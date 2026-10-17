@@ -81,3 +81,11 @@ key.properties
 # 提示词子仓库（独立私有仓库，不纳入主仓库）
 /_prompts/
 
+
+# 浏览器 mint 工作区（含 Cookie，绝不入库）
+/_mint/
+
+
+# Gradle 构建产物
+/android/build/
+

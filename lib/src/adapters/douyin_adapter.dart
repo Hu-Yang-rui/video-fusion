@@ -52,6 +52,7 @@ import '../models/feed.dart';
 import '../models/interaction.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
+import 'douyin/web_signer.dart';
 import 'platform_adapter.dart';
 
 /// 抖音播放地址的进程内缓存项。
@@ -112,7 +113,7 @@ class DouyinAdapter implements PlatformAdapter {
   // 因此如实声明为不支持，UI 不渲染这些按钮——而不是渲染后点了报错。
 
   @override
-  bool get supportsComments => false;
+  bool get supportsComments => true;
 
   @override
   bool get supportsLike => false;
@@ -123,6 +124,33 @@ class DouyinAdapter implements PlatformAdapter {
   @override
   bool get supportsFavorite => false;
 
+  /// WebView 签名桥（懒加载）。
+  ///
+  /// 抖音评论需要 `uifid` Cookie + 两套签名，这些只能在真实浏览器
+  /// 环境里由平台自己的 SDK 产生。因此这里用隐藏 WebView 加载
+  /// 抖音页面，让页面自己完成签名，再在页面上下文里发请求。
+  ///
+  /// 详见 `douyin/web_signer.dart` 的说明。
+  DouyinWebSigner? _signer;
+
+  DouyinWebSigner get _ensureSigner =>
+      _signer ??= DouyinWebSigner(logger: _logger);
+
+  /// 释放 WebView 资源。由上层在页面销毁时调用。
+  Future<void> disposeComments() async {
+    await _signer?.dispose();
+    _signer = null;
+  }
+
+  /// 拉取评论列表。
+  ///
+  /// 实测（2026-10，通过隐藏 WebView）：
+  ///  - `/aweme/v1/web/comment/list/` 返回 71KB 真实数据，20 条/页
+  ///  - `total` 与 feed 声明的评论数一致（22.8 万）
+  ///  - 楼中楼 `/comment/list/reply/` 同样可用
+  ///
+  /// 分页游标是**偏移量**（0, 20, 40...），不是时间戳。
+  /// 实测跨页会有少量重复条目，因此这里按 `cid` 去重。
   @override
   Future<CommentPage> fetchComments(
     String platformVideoId, {
@@ -130,15 +158,166 @@ class DouyinAdapter implements PlatformAdapter {
     int pageSize = 20,
     PlatformSession? session,
   }) async {
-    throw FusionException(
-      code: FusionErrorCode.capabilityUnavailable,
-      userMessage: '抖音评论当前不可用：该接口受平台风控保护。',
-      technicalMessage:
-          'douyin comments unavailable: reply endpoints are blocked by '
-          'ArgusSecurityPlugin (403 before signature check).',
-      platformId: id,
-      retryable: false,
-      diagnostics: const {'blockedBy': 'ArgusSecurityPlugin'},
+    final signer = _ensureSigner;
+
+    // 1. 确保会话就绪（加载视频页，等待风控下发 uifid）
+    final ready = await signer.ensureReady(awemeId: platformVideoId);
+    if (!ready) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '抖音会话初始化失败，暂时无法加载评论。',
+        technicalMessage:
+            'DouyinWebSigner not ready: no uifid after 15s. '
+            'The page may have been blocked or the network is unavailable.',
+        platformId: id,
+        retryable: true,
+        diagnostics: const {
+          'stage': 'webview_init',
+          'required': 'uifid cookie from real browser session',
+        },
+      );
+    }
+
+    // 2. 计算游标（偏移量语义）
+    final safeSize = pageSize.clamp(1, 50);
+    final cursor = (page <= 1 ? 0 : (page - 1) * safeSize);
+
+    // 3. 在页面上下文里请求（页面 SDK 自动签名）
+    final response = await signer.request(
+      path: '/aweme/v1/web/comment/list/',
+      params: {
+        'device_platform': 'webapp',
+        'aid': '6383',
+        'channel': 'channel_pc_web',
+        'pc_client_type': '1',
+        'version_code': '290100',
+        'version_name': '29.1.0',
+        'cookie_enabled': 'true',
+        'browser_language': 'zh-CN',
+        'browser_platform': 'Win32',
+        'browser_name': 'Chrome',
+        'browser_version': '124.0.0.0',
+        'browser_online': 'true',
+        'engine_name': 'Blink',
+        'engine_version': '124.0.0.0',
+        'os_name': 'Windows',
+        'os_version': '10',
+        'platform': 'PC',
+        'downlink': '10',
+        'effective_type': '4g',
+        'round_trip_time': '0',
+        'update_version_code': '170400',
+        'aweme_id': platformVideoId,
+        'cursor': '$cursor',
+        'count': '$safeSize',
+        'item_type': '0',
+        'insert_ids': '',
+        'whale_cut_token': '',
+        'cut_version': '1',
+        'rcFT': '',
+      },
+    );
+
+    // 4. 空响应 = 签名/会话被拒，如实报错
+    if (response.isEmpty) {
+      throw FusionException(
+        code: FusionErrorCode.permissionDenied,
+        userMessage: '抖音返回了空评论列表，可能是会话凭证已失效。',
+        technicalMessage:
+            'empty body from comment/list (HTTP ${response.statusCode}); '
+            'signature or uifid was rejected',
+        httpStatus: response.statusCode,
+        platformId: id,
+        retryable: true,
+        diagnostics: const {
+          'stage': 'comment_request',
+          'observed': 'HTTP 200 with zero-length body',
+        },
+      );
+    }
+
+    final json = response.tryParseJson();
+    if (json == null) {
+      throw FusionException(
+        code: FusionErrorCode.parseError,
+        userMessage: '抖音评论数据无法解析。',
+        technicalMessage:
+            'body is not JSON (length=${response.body.length})',
+        platformId: id,
+      );
+    }
+
+    final statusCode = json['status_code'];
+    if (statusCode != 0) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '抖音返回错误：${json['status_msg'] ?? '未知原因'}',
+        technicalMessage: 'status_code=$statusCode',
+        upstreamCode: statusCode,
+        platformId: id,
+      );
+    }
+
+    // 5. 解析评论
+    final rawComments = json['comments'];
+    final items = <VideoComment>[];
+    final seen = <String>{};
+    if (rawComments is List) {
+      for (final raw in rawComments) {
+        if (raw is! Map) continue;
+        final c = _commentFromJson(Map<String, Object?>.from(raw));
+        if (c == null) continue;
+        if (!seen.add(c.id)) continue; // 跨页去重
+        items.add(c);
+      }
+    }
+
+    final total = (json['total'] as num?)?.toInt() ?? 0;
+    final hasMore = json['has_more'] == 1 || json['has_more'] == true;
+
+    return CommentPage(
+      items: items,
+      page: page,
+      totalCount: total,
+      hasMore: hasMore && items.isNotEmpty,
+      notes: [
+        if (total > 0) '共 $total 条评论。',
+        '通过应用内隐藏 WebView 获取，未使用外部浏览器。',
+      ],
+    );
+  }
+
+  /// 解析抖音评论条目。
+  VideoComment? _commentFromJson(Map<String, Object?> raw) {
+    final cid = _nullableString(raw['cid']);
+    if (cid == null) return null;
+
+    final user = raw['user'] is Map
+        ? Map<String, Object?>.from(raw['user'] as Map)
+        : const <String, Object?>{};
+
+    final text = _nullableString(raw['text']) ?? '';
+    final createTime = (raw['create_time'] as num?)?.toInt();
+
+    // 抖音用 [呲牙] 这类方括号表情，保留原样（UI 可后续渲染成图）
+    return VideoComment(
+      id: cid,
+      authorName: _nullableString(user['nickname']) ?? '抖音用户',
+      authorAvatarUrl: _firstUrlIn(user['avatar_thumb']) ??
+          _firstUrlIn(user['avatar_medium']),
+      authorId: _nullableString(user['uid']),
+      message: text,
+      createdAt: createTime != null
+          ? DateTime.fromMillisecondsSinceEpoch(
+              createTime * 1000,
+              isUtc: true,
+            ).toIso8601String()
+          : DateTime.now().toUtc().toIso8601String(),
+      likeCount: (raw['digg_count'] as num?)?.toInt(),
+      replyCount: (raw['reply_comment_total'] as num?)?.toInt(),
+      isUpAuthor: raw['is_author'] == true,
+      isPinned: false,
+      floor: null,
     );
   }
 

@@ -173,11 +173,11 @@ void main() {
       );
     });
 
-    test('评论不可用时明确抛错', () async {
-      expect(
-        () => _adapter().fetchComments('7696114106826280242'),
-        throwsA(isA<FusionException>()),
-      );
+    test('评论能力已声明为支持（通过 WebView 签名桥）', () {
+      // 抖音评论依赖 uifid Cookie + 两套签名，只能在真实浏览器环境产生。
+      // 实现方式：隐藏 WebView 加载抖音页面，由页面 SDK 自动签名。
+      // 详见 lib/src/adapters/douyin/web_signer.dart
+      expect(_adapter().supportsComments, isTrue);
     });
 
     test('点赞不可用时明确抛错（未登录）', () async {
