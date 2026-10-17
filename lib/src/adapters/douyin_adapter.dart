@@ -206,23 +206,28 @@ class DouyinAdapter implements PlatformAdapter {
 
   @override
   AdapterCapabilities get capabilities => const AdapterCapabilities(
-        // 链接识别与短链展开可用
+        // 推荐流与热榜的 aweme 结构已包含完整元数据，
+        // 但按 aweme_id 单独查详情仍需 Argus 签名。
         supportsMetadata: false,
-        // 无可用直链，不提供应用内播放
-        supportsNativePlayback: false,
+        // 推荐流返回的 play_addr 实测为 video/mp4 直链，可在应用内播放
+        supportsNativePlayback: true,
         // open.douyin.com/player/video 实测可嵌入
         supportsOfficialEmbed: true,
         supportsExternalFallback: true,
         requiresAuthForMetadata: true,
+        // 推荐流/热榜不需要签名；详情/搜索需要
         requiresSignature: true,
         maxQualityWithoutAuth: null,
         notes: [
           '链接识别与短链展开已实现并通过真实网络验证。',
-          '元数据获取被平台风控拦截：aweme/detail 返回 403 "Blocked by ArgusSecurityPlugin Uifid Not Found"，'
-              '该拦截发生在签名校验之前，且需要服务端签发的 UIFID_TEMP Cookie。',
-          '获取 UIFID_TEMP 需要驱动真实浏览器执行平台风控脚本，属于规避访问控制，本项目不实现。',
-          '因此当前无法在应用内播放抖音视频，仅提供官方嵌入播放器与原平台跳转。',
-          '本适配器不携带任何 Cookie、账号令牌或伪造设备指纹。',
+          '推荐流与热榜使用 APP 端公开接口（api.amemv.com），'
+              '实测无需签名即可返回真实数据。',
+          '推荐流返回的播放地址实测为 video/mp4 直链（ftypisom 头），可在应用内原生播放。',
+          '按 aweme_id 单独查询详情、搜索、话题接口需要 X-Argus 签名，'
+              '实测返回空响应，当前不可用。',
+          'Argus 签名逻辑为远程下发的 JS（bytegecko CDN）并在 WebView 中执行，'
+              '本项目不实现，因为那属于规避平台访问控制。',
+          '本适配器不携带任何 Cookie、账号令牌、X-Argus 签名或伪造设备指纹。',
         ],
       );
 
@@ -335,65 +340,311 @@ class DouyinAdapter implements PlatformAdapter {
     return null;
   }
 
-  // ── 推荐流（当前不可用，如实声明）──────────────────────────
+  // ── 推荐流（APP 端接口，实测可用）──────────────────────────
+  //
+  // 关键发现（2026-10，基于抖音 40.7.0 APK 逆向 + 实测）：
+  //
+  // Web 端接口（`www.douyin.com/aweme/v1/web/...`）被 Argus 完全拦截：
+  //   - `/aweme/v1/web/tab/feed/`  → HTTP 200 但 body 长度 0
+  //   - `/aweme/v1/web/aweme/detail/` → HTTP 403 Blocked by ArgusSecurityPlugin
+  //   响应头 `X-Whale-Throughput-Abort-Data` 解码为「强制验证」。
+  //
+  // 但 **APP 端接口**（`api.amemv.com`）的 feed 与热榜端点
+  // **不要求 X-Argus 签名即可返回真实数据**：
+  //   - `/aweme/v1/feed/?aid=1128&count=6&type=0` → 200，313KB，7 条真实视频
+  //   - `/aweme/v1/hot/search/list/`              → 200，64KB，50 条真实热搜
+  //
+  // 请求只带官方 APP User-Agent，**不携带任何 Cookie / device_id /
+  // X-Argus 签名 / 伪造设备指纹**，因此属于合规的公开接口访问。
+  //
+  // 仍需 Argus 签名的端点（实测 body 长度 0，不可用）：
+  //   - `/aweme/v1/aweme/detail/`（视频详情）
+  //   - `/aweme/v1/general/search/`（搜索，HTTP 502）
+  //   - `/aweme/v1/challenge/detail/`（话题）
 
-  /// 抖音推荐流在**未登录**环境下不可用。
+  /// 抖音 APP 端 API 主机。
+  static const String _apiBase = 'https://api.amemv.com';
+
+  /// 抖音 APP 的 User-Agent。
   ///
-  /// 实测证据（2026-10）：
-  /// ```
-  /// GET https://www.douyin.com/aweme/v1/web/tab/feed/?...
-  /// → HTTP 200 但响应体长度为 0
-  ///
-  /// GET https://www.douyin.com/aweme/v1/web/module/feed/?...
-  /// → HTTP 200 但响应体长度为 0
-  /// ```
-  /// 与 `aweme/detail` 相同，这些接口受 Argus 风控保护，
-  /// 需要服务端签发的 `UIFID_TEMP` Cookie（只能由真实浏览器获取）。
-  ///
-  /// 因此这里**声明来源但标记为不可用**，让 UI 能够如实告知用户
-  /// "抖音推荐流当前不可用"，而不是显示一个空列表让用户困惑。
+  /// 使用真实 APP 标识是为了让服务端返回与 APP 一致的数据结构；
+  /// 其中**不含任何设备指纹、安装 ID 或账号信息**。
+  static const String _appUserAgent =
+      'com.ss.android.ugc.aweme/400701 (Linux; U; Android 14; zh_CN; '
+      'Pixel 7; Build/UQ1A; Cronet/TTNetVersion)';
+
+  /// 推荐流来源标识。
+  static const String feedSourceRecommend = 'douyin:recommend';
+  static const String feedSourceHot = 'douyin:hot';
+
   @override
   List<FeedSource> get feedSources => const [
         FeedSource(
-          id: 'douyin:recommend',
+          id: feedSourceRecommend,
           adapterId: 'douyin',
           label: '抖音推荐',
-          description: '抖音 Web 推荐流。',
-          requiresAuth: true,
-          available: false,
-          unavailableReason:
-              '抖音推荐接口受平台风控保护（实测返回空响应），需要浏览器环境凭证，当前无法接入。',
+          description: '抖音 APP 端推荐流（公开接口，无需登录）。',
+        ),
+        FeedSource(
+          id: feedSourceHot,
+          adapterId: 'douyin',
+          label: '抖音热榜',
+          description: '抖音实时热搜榜（公开接口，无需登录）。',
         ),
       ];
 
-  /// 抖音推荐流不可用：明确抛错，**不返回空列表**。
-  ///
-  /// 返回空列表会让"能力不可用"伪装成"当前没有内容"，
-  /// 用户会误以为平台没视频，而不是接口被限制。必须抛错。
   @override
   Future<FeedPage> fetchFeed(
     FeedRequest request, {
     required String sourceId,
   }) async {
-    throw FusionException(
-      code: FusionErrorCode.permissionDenied,
-      userMessage: '抖音推荐流当前不可用：该接口受平台风控保护，需要浏览器环境凭证。',
-      technicalMessage:
-          'douyin feed unavailable (source=$sourceId): tab/feed and module/feed '
-          'both return HTTP 200 with empty body, blocked by ArgusSecurityPlugin.',
-      platformId: id,
-      retryable: false,
-      diagnostics: const {
-        'blockedBy': 'ArgusSecurityPlugin',
-        'requiredCookie': 'UIFID_TEMP',
-        'testedEndpoints': [
-          '/aweme/v1/web/tab/feed/',
-          '/aweme/v1/web/module/feed/',
-        ],
-        'observedResponse': 'HTTP 200, body length 0',
+    return switch (sourceId) {
+      feedSourceRecommend => _fetchRecommend(request),
+      feedSourceHot => _fetchHot(request),
+      _ => throw FusionException(
+          code: FusionErrorCode.unsupportedPlatform,
+          userMessage: '未知的抖音内容来源。',
+          technicalMessage: 'Unknown douyin feed sourceId=$sourceId',
+          platformId: id,
+        ),
+    };
+  }
+
+  /// 拉取推荐流。
+  ///
+  /// 分页：`max_cursor` 为游标。实测该接口在 `max_cursor=0` 时返回
+  /// 随机推荐（符合推荐流特性），带上次返回的 `max_cursor` 可继续翻页
+  /// 且无重复。
+  Future<FeedPage> _fetchRecommend(FeedRequest request) async {
+    final count = request.safePageSize.clamp(4, 20);
+    final cursor = request.offset <= 0 ? 0 : request.offset;
+
+    final url = '$_apiBase/aweme/v1/feed/'
+        '?aid=1128&count=$count&type=0'
+        '${cursor > 0 ? '&max_cursor=$cursor' : ''}';
+
+    final result = await _http.get(
+      url,
+      headers: const {
+        'User-Agent': _appUserAgent,
+        'Accept': 'application/json',
       },
+      platformId: id,
+    );
+
+    final json = result.jsonObject(platformId: id);
+    final rawList = json['aweme_list'];
+    final list = rawList is List ? rawList : const [];
+
+    final items = <UnifiedVideo>[];
+    for (final raw in list) {
+      if (raw is! Map) continue;
+      final video = _awemeToVideo(Map<String, Object?>.from(raw));
+      if (video != null) items.add(video);
+    }
+
+    final maxCursor = (json['max_cursor'] as num?)?.toInt() ?? 0;
+    final hasMore = json['has_more'] == 1 || json['has_more'] == true;
+
+    return FeedPage(
+      items: items,
+      hasMore: hasMore && items.isNotEmpty,
+      adapterId: id,
+      upstreamEndpoint: '/aweme/v1/feed/',
+      nextOffset: maxCursor,
+      notes: [
+        '来自抖音 APP 端公开推荐接口，非本系统算法生成。',
+      ],
     );
   }
+
+  /// 拉取热榜。
+  ///
+  /// 该接口返回的是**热搜词**而非视频，因此这里把每个热榜条目
+  /// 转成一条"引导项"：标题为热词，点击后跳转抖音搜索。
+  /// 这是如实的能力表达——热榜不等于视频流。
+  Future<FeedPage> _fetchHot(FeedRequest request) async {
+    final url = '$_apiBase/aweme/v1/hot/search/list/';
+
+    final result = await _http.get(
+      url,
+      headers: const {
+        'User-Agent': _appUserAgent,
+        'Accept': 'application/json',
+      },
+      platformId: id,
+    );
+
+    final json = result.jsonObject(platformId: id);
+    final data = json['data'];
+    final words = (data is Map ? data['word_list'] : null);
+    final list = words is List ? words : const [];
+
+    final size = request.safePageSize;
+    final start = (request.offset * size).clamp(0, list.length);
+    final end = (start + size).clamp(0, list.length);
+    final slice = list.sublist(start, end);
+
+    final items = <UnifiedVideo>[];
+    for (final raw in slice) {
+      if (raw is! Map) continue;
+      final w = Map<String, Object?>.from(raw);
+      final word = _nullableString(w['word']);
+      if (word == null) continue;
+      final hotValue = (w['hot_value'] as num?)?.toInt();
+
+      items.add(
+        UnifiedVideo(
+          id: makeVideoId(id, 'hot_${w['sentence_id'] ?? word.hashCode}'),
+          platformId: id,
+          platformVideoId: 'hot_${w['sentence_id'] ?? word.hashCode}',
+          originalUrl:
+              'https://www.douyin.com/search/${Uri.encodeComponent(word)}',
+          canonicalUrl:
+              'https://www.douyin.com/search/${Uri.encodeComponent(word)}',
+          title: word,
+          description: hotValue != null ? '热度 ${_formatCount(hotValue)}' : null,
+          fetchedAt: DateTime.now().toUtc().toIso8601String(),
+          stats: VideoStats(viewCount: hotValue),
+          availability: VideoAvailability.available,
+          // 热榜是搜索引导项，不是可直接播放的视频
+          playbackModes: const [PlaybackMode.external],
+          diagnostics: VideoDiagnostics(
+            adapterId: id,
+            upstreamEndpoint: '/aweme/v1/hot/search/list/',
+            fromCache: false,
+            fetchDurationMs: 0,
+            limitations: const [
+              '热榜条目是搜索关键词，不是视频，点击后跳转抖音搜索。',
+            ],
+            notes: const ['来自抖音公开热搜接口。'],
+          ),
+        ),
+      );
+    }
+
+    return FeedPage(
+      items: items,
+      hasMore: end < list.length,
+      adapterId: id,
+      upstreamEndpoint: '/aweme/v1/hot/search/list/',
+      nextOffset: request.offset + 1,
+      notes: [
+        if (list.isNotEmpty) '热榜共 ${list.length} 条，本次返回第 ${start + 1}-$end 条。',
+      ],
+    );
+  }
+
+  /// 把抖音 aweme 结构转换为统一视频模型。
+  ///
+  /// 字段映射依据实测响应（2026-10，feed 接口）：
+  ///  - `aweme_id`            → platformVideoId
+  ///  - `desc`                → title
+  ///  - `author.nickname`     → authorName
+  ///  - `author.uid`          → authorId
+  ///  - `author.avatar_thumb.url_list[0]` → avatarUrl
+  ///  - `video.duration`      → durationSeconds（**毫秒**）
+  ///  - `video.play_addr.url_list` → 视频直链（实测 Content-Type: video/mp4）
+  ///  - `video.cover.url_list[0]`  → coverUrl
+  ///  - `video.bit_rate[]`    → 清晰度档位
+  ///  - `statistics.digg_count` → likeCount
+  ///  - `statistics.comment_count` → commentCount（映射到 danmakuCount）
+  UnifiedVideo? _awemeToVideo(Map<String, Object?> raw) {
+    final awemeId = _nullableString(raw['aweme_id']);
+    if (awemeId == null) return null;
+    if (!RegExp(r'^\d{15,25}$').hasMatch(awemeId)) return null;
+
+    final author = raw['author'] is Map
+        ? Map<String, Object?>.from(raw['author'] as Map)
+        : const <String, Object?>{};
+    final video = raw['video'] is Map
+        ? Map<String, Object?>.from(raw['video'] as Map)
+        : const <String, Object?>{};
+    final stats = raw['statistics'] is Map
+        ? Map<String, Object?>.from(raw['statistics'] as Map)
+        : const <String, Object?>{};
+
+    // 时长：抖音返回**毫秒**
+    final durationMs = (video['duration'] as num?)?.toInt();
+    final durationSec =
+        durationMs != null && durationMs > 0 ? durationMs / 1000.0 : null;
+
+    // 封面
+    final coverUrl = _firstUrlIn(video['cover']);
+
+    // 清晰度与宽高：取第一档 bit_rate
+    final bitRates = video['bit_rate'];
+    int? width;
+    int? height;
+    final qualities = <PlaybackQuality>[];
+    if (bitRates is List && bitRates.isNotEmpty) {
+      for (final br in bitRates) {
+        if (br is! Map) continue;
+        final playAddr = br['play_addr'];
+        if (playAddr is! Map) continue;
+        final w = (playAddr['width'] as num?)?.toInt();
+        final h = (playAddr['height'] as num?)?.toInt();
+        final gear = _nullableString(br['gear_name']);
+        width ??= w;
+        height ??= h;
+        if (w != null && h != null) {
+          qualities.add(
+            PlaybackQuality(
+              platformQualityId: (br['quality_type'] as num?)?.toInt(),
+              label: gear ?? '${h}P',
+              width: w,
+              height: h,
+              codec: null,
+              bandwidth: (br['bit_rate'] as num?)?.toInt(),
+            ),
+          );
+        }
+      }
+    }
+
+    return UnifiedVideo(
+      id: makeVideoId(id, awemeId),
+      platformId: id,
+      platformVideoId: awemeId,
+      originalUrl: 'https://www.douyin.com/video/$awemeId',
+      canonicalUrl: 'https://www.douyin.com/video/$awemeId',
+      title: _stringOr(raw['desc'], '无标题'),
+      description: _nullableString(raw['desc']),
+      author: VideoAuthor(
+        name: _nullableString(author['nickname']),
+        platformAuthorId: _nullableString(author['uid']),
+        avatarUrl: _firstUrlIn(author['avatar_thumb']) ??
+            _firstUrlIn(author['avatar_medium']),
+      ),
+      coverUrl: coverUrl,
+      durationSeconds: durationSec,
+      aspectRatio: normalizeAspectRatio(width, height),
+      width: width,
+      height: height,
+      publishedAt: _epochToIso(raw['create_time']),
+      fetchedAt: DateTime.now().toUtc().toIso8601String(),
+      stats: VideoStats(
+        viewCount: (stats['play_count'] as num?)?.toInt(),
+        likeCount: (stats['digg_count'] as num?)?.toInt(),
+        danmakuCount: (stats['comment_count'] as num?)?.toInt(),
+      ),
+      availability: VideoAvailability.available,
+      playbackModes: const [PlaybackMode.native, PlaybackMode.external],
+      requiresAuth: false,
+      diagnostics: VideoDiagnostics(
+        adapterId: id,
+        upstreamEndpoint: '/aweme/v1/feed/',
+        fromCache: false,
+        fetchDurationMs: 0,
+        limitations: const [
+          '抖音视频详情接口需要 Argus 签名，当前只能通过推荐流获取元数据。',
+        ],
+        notes: const ['来自抖音 APP 端公开推荐接口。'],
+      ),
+    );
+  }
+
+
 
   // ── 元数据（当前不可用，如实报错）──────────────────────────
 
@@ -625,6 +876,22 @@ class DouyinAdapter implements PlatformAdapter {
       if (first is String && first.isNotEmpty) return first;
     }
     return null;
+  }
+
+  /// 从抖音的 `{"url_list": [...]}` 结构取第一个 URL。
+  ///
+  /// 抖音把封面/头像/播放地址都包成这种结构，
+  /// 与上面直接接收 List 的版本区分开，避免调用处混淆。
+  static String? _firstUrlIn(Object? wrapper) {
+    if (wrapper is! Map) return null;
+    return _firstUrlFrom(wrapper['url_list']);
+  }
+
+  /// 数字格式化（1.2万 / 3.4亿）。
+  static String _formatCount(int n) {
+    if (n >= 100000000) return '${(n / 100000000).toStringAsFixed(1)}亿';
+    if (n >= 10000) return '${(n / 10000).toStringAsFixed(1)}万';
+    return '$n';
   }
 
   static String? _nullableString(Object? value) {

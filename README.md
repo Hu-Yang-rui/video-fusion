@@ -21,10 +21,16 @@
 | B站评论读取 | ✅ 已验证（游标分页） |
 | B站点赞 / 投币 / 收藏 | ⚠️ 已实现，待真实账号验证 |
 | 抖音链接识别 | ✅ 已验证 |
-| 抖音元数据 / 推荐流 / 互动 | ❌ 平台风控（Argus）拦截 |
+| **抖音推荐流** | ✅ **已验证**（APP 端公开接口） |
+| **抖音热榜** | ✅ **已验证**（50 条真实热搜） |
+| **抖音应用内播放** | ✅ **已验证**（mp4 直链，ftypisom） |
+| 抖音详情 / 搜索 / 评论 / 互动 | ❌ 需 Argus 签名，不实现 |
 | TikTok | ❌ 未接入（网络不可达，未实测） |
 
 > 能力标注依据实测结果。未验证的能力不会标注为可用。
+>
+> 抖音的能力边界来自对官方 APK 40.7.0 的静态分析，
+> 详见 [docs/06-抖音APK逆向分析报告.md](docs/06-抖音APK逆向分析报告.md)。
 
 ---
 
@@ -98,11 +104,19 @@ flutter test test/interaction_live_test.dart --tags network
 
 ### 抖音
 
-`aweme/detail`、`tab/feed`、`module/feed` 均返回 `403 Blocked by ArgusSecurityPlugin`
-或 HTTP 200 + 空响应体。拦截发生在签名校验**之前**，需要服务端签发的
-`UIFID_TEMP` Cookie，而获取它必须驱动真实浏览器执行风控脚本。
+**可用**：推荐流与热榜走 APP 端公开接口 `api.amemv.com`，无需签名。
+播放地址实测为 `video/mp4` 直链（`ftypisom` 头），可原生播放。
 
-这属于规避访问控制，**本项目不实现**。抖音仅链接识别可用。
+**不可用**：`/aweme/v1/aweme/detail/`（详情）、`/aweme/v1/general/search/`（搜索，502）、
+`/aweme/v1/challenge/detail/`（话题）均返回空响应，需要 `X-Argus` 签名。
+
+Argus 的签名逻辑是**远程下发的 JS**（`bytegecko.com` CDN）并在 **WebView** 中执行
+（`ArgusGeckoLoader` / `TuringVerifyWebView`），算法不在 APK 内。
+
+让应用执行平台风控脚本以获取签名，属于规避访问控制，**本项目不实现**。
+
+> 注：Web 端常见的 `a_bogus`、`X-Gorgon`、`UIFID_TEMP` 在 APP 端**完全不存在**，
+> 扫描 259 万字符串命中 0 次。Web 与 APP 是两套独立的风控体系。
 
 ### B站
 

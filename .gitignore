@@ -64,6 +64,11 @@ app.*.map.json
 /douyin-research/*.html
 /douyin-research/rendered/
 
+# 逆向分析工作区（APK 本体 343MB + 解包 DEX 437MB）
+# 绝不入库：体积巨大，且再分发第三方 APK 存在法律风险。
+# 分析报告见 docs/06-抖音APK逆向分析报告.md
+/_apk/
+
 # 本地环境与密钥
 local.properties
 *.jks

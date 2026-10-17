@@ -320,9 +320,17 @@ void main() {
       // 能力声明必须如实
       final bili = all.firstWhere((d) => d.id == 'bilibili');
       expect(bili.capabilities.supportsNativePlayback, isTrue);
+
+      // 抖音：APK 逆向分析后确认 feed 接口返回 mp4 直链，
+      // 因此 supportsNativePlayback 已升级为 true；
+      // 但详情/搜索仍需 Argus 签名，requiresSignature 保持 true。
       final dy = all.firstWhere((d) => d.id == 'douyin');
-      expect(dy.capabilities.supportsNativePlayback, isFalse);
-      expect(dy.capabilities.requiresSignature, isTrue);
+      expect(dy.capabilities.supportsNativePlayback, isTrue,
+          reason: 'feed 返回 video/mp4 直链，支持原生播放');
+      expect(dy.capabilities.requiresSignature, isTrue,
+          reason: '详情/搜索接口仍需 X-Argus 签名');
+      expect(dy.capabilities.supportsMetadata, isFalse,
+          reason: '按 aweme_id 查详情不可用，只能通过 feed 拿元数据');
     });
   });
 
