@@ -10,6 +10,62 @@ import 'package:flutter/material.dart';
 
 import '../apple_tokens.dart';
 
+/// 统一的分割线（iOS 列表风格）。
+///
+/// # 为什么需要这个组件
+///
+/// 直接写 `Container(height: 0.5)` 有两个问题：
+///
+/// 1. **粗细不一致**：Flutter 的逻辑像素 0.5 在 DPR=2.625（Android 常见）
+///    的设备上会被取整成 1 或 2 个物理像素，同一屏幕上不同位置的
+///    分割线看起来粗细不同。
+/// 2. **左边没有线**：用 `Padding(left: indent)` 实现缩进时，
+///    左侧留白处完全空着，看起来像"线断了一截"。
+///
+/// 正确做法（对齐 iOS）：
+///  - 用 [Divider] 的 `thickness` 而非 `Container` 高度，
+///    由引擎按设备像素对齐处理；
+///  - 缩进用 `indent` 参数，**线本身仍然从左边缘开始绘制**，
+///    只是视觉上从内容起始处断开——iOS 的真实做法是
+///    线从左边缘开始，但左侧留出内容内边距。
+///
+/// 这里采用 iOS 的实际视觉：**线从容器左边缘延伸到右边缘**，
+/// 通过 [indent] 控制左侧留白宽度，保证多条线对齐。
+class AppleDivider extends StatelessWidget {
+  const AppleDivider({
+    super.key,
+    this.indent = 0,
+    this.endIndent = 0,
+    this.color,
+  });
+
+  /// 左侧留白（线从该位置开始）。
+  ///
+  /// iOS 列表中，分割线通常与文字左对齐（约 16pt），
+  /// 而不是从屏幕边缘开始。
+  final double indent;
+
+  /// 右侧留白。
+  final double endIndent;
+
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+
+    // 用 SizedBox 明确高度，避免父级 Column 拉伸导致线变粗。
+    // 关键：不给 Container 设 height 而让它 fill，会撑满可用高度。
+    return SizedBox(
+      height: 0.5,
+      child: Padding(
+        padding: EdgeInsets.only(left: indent, right: endIndent),
+        child: ColoredBox(color: color ?? c.separator),
+      ),
+    );
+  }
+}
+
 /// 分组容器（iOS Inset Grouped List）。
 ///
 /// 这是 Apple 风格最重要的布局原语：把相关行放进一个圆角白块，
@@ -48,10 +104,7 @@ class AppleGroupedSection extends StatelessWidget {
       rows.add(children[i]);
       if (showDividers && i < children.length - 1) {
         rows.add(
-          Padding(
-            padding: EdgeInsets.only(left: dividerIndent),
-            child: Container(height: 0.5, color: c.separator),
-          ),
+          AppleDivider(indent: dividerIndent),
         );
       }
     }

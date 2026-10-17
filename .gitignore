@@ -77,3 +77,7 @@ key.properties
 
 # 鏋勫缓绗﹀彿
 /build/symbols/
+
+# 提示词子仓库（独立私有仓库，不纳入主仓库）
+/_prompts/
+

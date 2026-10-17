@@ -440,6 +440,50 @@ class FusionPlayerController {
       'height': _snapshot.videoHeight,
       'advanced': advanced,
     });
+
+    // 未起播时输出底层诊断，便于定位是解码器、渲染器还是网络问题。
+    if (!advanced) {
+      await _logDiagnostics();
+    }
+  }
+
+  /// 输出 mpv 的底层状态，用于定位"能解析元数据但不出帧"的问题。
+  Future<void> _logDiagnostics() async {
+    try {
+      final tracks = _player.state.tracks;
+      _logger.warn('player: diagnostics', {
+        'audioTracks': tracks.audio.length,
+        'videoTracks': tracks.video.length,
+        'subtitleTracks': tracks.subtitle.length,
+        'audioSelected': _player.state.track.audio.id,
+        'videoSelected': _player.state.track.video.id,
+        'buffering': _snapshot.isBuffering,
+        'phase': _snapshot.phase.name,
+        'paused': !_player.state.playing,
+      });
+
+      // 逐个列出轨道，看 mpv 是否真的识别到了音视频流
+      for (var i = 0; i < tracks.video.length; i++) {
+        final t = tracks.video[i];
+        _logger.warn('player: video track $i', {
+          'id': t.id,
+          'codec': t.codec,
+          'w': t.w,
+          'h': t.h,
+          'fps': t.fps,
+        });
+      }
+      for (var i = 0; i < tracks.audio.length; i++) {
+        final t = tracks.audio[i];
+        _logger.warn('player: audio track $i', {
+          'id': t.id,
+          'codec': t.codec,
+          'channels': t.channels,
+        });
+      }
+    } catch (e) {
+      _logger.warn('player: diagnostics failed', {'error': '$e'});
+    }
   }
 
   /// 等待播放位置前进。返回是否真的前进了。

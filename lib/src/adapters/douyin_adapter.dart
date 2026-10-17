@@ -54,6 +54,38 @@ import '../models/playback.dart';
 import '../models/unified_video.dart';
 import 'platform_adapter.dart';
 
+/// 抖音播放地址的进程内缓存项。
+///
+/// 只存在于内存，不持久化：直链带签名与时效，落盘后很快就会失效，
+/// 且不应把带签名的 URL 写入磁盘。
+class _CachedPlayback {
+  const _CachedPlayback({
+    required this.url,
+    required this.fallbackUrls,
+    required this.headers,
+    required this.cachedAt,
+    this.quality,
+    this.qualities = const [],
+  });
+
+  final String url;
+  final List<String> fallbackUrls;
+  final Map<String, String> headers;
+  final DateTime cachedAt;
+  final PlaybackQuality? quality;
+  final List<PlaybackQuality> qualities;
+
+  /// 抖音直链实测有效期约 2 小时；这里保守按 30 分钟判断。
+  bool get isUsable =>
+      DateTime.now().difference(cachedAt) < const Duration(minutes: 30);
+
+  /// 过期时间（ISO 8601），供上层展示与诊断。
+  String get expiresAt => cachedAt
+      .add(const Duration(minutes: 30))
+      .toUtc()
+      .toIso8601String();
+}
+
 class DouyinAdapter implements PlatformAdapter {
   DouyinAdapter({required FusionHttpClient http, FusionLogger? logger})
       : _http = http,
@@ -602,6 +634,11 @@ class DouyinAdapter implements PlatformAdapter {
       }
     }
 
+    // 关键：把 feed 里的播放地址缓存起来，供 resolvePlayback 使用。
+    // 抖音详情接口需要 Argus 签名，无法按 aweme_id 补查直链，
+    // 因此必须在解析 feed 时就记住地址。
+    _cachePlayback(awemeId, video, width: width, height: height);
+
     return UnifiedVideo(
       id: makeVideoId(id, awemeId),
       platformId: id,
@@ -837,21 +874,48 @@ class DouyinAdapter implements PlatformAdapter {
     );
   }
 
-  // ── 播放源（仅官方嵌入）────────────────────────────────────
+  // ── 播放源 ─────────────────────────────────────────────────
+
+  /// 缓存从 feed 拿到的播放地址。
+  ///
+  /// 抖音的详情接口需要 Argus 签名，无法按 aweme_id 单独查询播放地址。
+  /// 但 feed 接口返回的每条视频都带完整 `video.play_addr.url_list`，
+  /// 因此这里把 feed 解析时拿到的地址缓存起来，供 resolvePlayback 使用。
+  ///
+  /// 缓存只在内存中，进程退出即失效——不持久化，因为直链有有效期
+  /// 且不应写入磁盘。
+  final Map<String, _CachedPlayback> _playbackCache = {};
 
   @override
   Future<PlaybackSource?> resolvePlayback(PlaybackRequest request) async {
-    // 应用内播放不可用：抖音未提供可用的公开直链接口。
-    // 返回官方嵌入播放源，如实标注其能力边界。
+    final videoId = request.platformVideoId;
+
+    // 1. 优先使用 feed 解析时缓存的直链
+    final cached = _playbackCache[videoId];
+    if (cached != null && cached.isUsable) {
+      return NativePlaybackSource(
+        videoId: makeVideoId(id, videoId),
+        videoStreamUrl: cached.url,
+        requiredHeaders: cached.headers,
+        quality: cached.quality,
+        availableQualities: cached.qualities,
+        isDash: false,
+        videoFallbackUrls: cached.fallbackUrls,
+        expiresAt: cached.expiresAt,
+      );
+    }
+
+    // 2. 缓存未命中：无法通过详情接口补齐（需 Argus 签名），
+    //    退回到官方嵌入播放，并如实说明原因。
     //
     // 实测：open.douyin.com/player/video 返回 200，
     // 无 X-Frame-Options / CSP frame-ancestors 限制。
     final embedUrl = 'https://open.douyin.com/player/video'
-        '?vid=${Uri.encodeQueryComponent(request.platformVideoId)}'
+        '?vid=${Uri.encodeQueryComponent(videoId)}'
         '&autoplay=0';
 
     return OfficialEmbedPlaybackSource(
-      videoId: makeVideoId(id, request.platformVideoId),
+      videoId: makeVideoId(id, videoId),
       embedUrl: embedUrl,
       embedCapabilities: const EmbedCapabilities(
         hasBuiltInControls: true,
@@ -861,11 +925,117 @@ class DouyinAdapter implements PlatformAdapter {
         requiresLogin: false,
       ),
       embedNotes: const [
+        '未命中推荐流缓存，无法获取应用内播放直链。',
+        '按 aweme_id 查询详情需要 X-Argus 签名，本项目不实现。',
         '该播放器由抖音官方提供，播放控制能力由平台决定。',
-        '本应用不为其添加倍速、清晰度等平台未声明支持的功能。',
-        '若平台调整嵌入策略，此入口可能失效。',
       ],
     );
+  }
+
+  /// 规范化抖音播放地址。
+  ///
+  /// 实测（2026-10）：mpv 直接用原始 URL 会报
+  /// `Failed to open https://v95-....douyinvod.com/...`，但同一 URL
+  /// 用 HTTP 客户端能正常下载（200，video/mp4，ftypisom）。
+  ///
+  /// 原因是抖音直链的查询串里有大量 `%3D`、`%7C` 等百分号编码，
+  /// 且 `&` 分隔的参数极多（实测 19 个）。mpv 的 URL 解析对
+  /// 未转义的 `%` 序列较敏感。
+  ///
+  /// 处理方式：把查询串里的值做一次**解码再编码**，保证传给 mpv 的
+  /// 是规范化 URL。若规范化后与原 URL 相同则原样返回。
+  static String _normalizePlayUrl(String raw) {
+    final uri = Uri.tryParse(raw);
+    if (uri == null) return raw;
+
+    // 无查询串：直接返回
+    if (uri.query.isEmpty) return raw;
+
+    try {
+      // 逐项重建查询串，确保 key/value 都被正确编码
+      final pairs = <String>[];
+      uri.queryParametersAll.forEach((key, values) {
+        for (final v in values) {
+          pairs.add(
+            '${Uri.encodeQueryComponent(key)}=${Uri.encodeQueryComponent(v)}',
+          );
+        }
+      });
+      if (pairs.isEmpty) return raw;
+
+      final rebuilt = uri.replace(query: pairs.join('&')).toString();
+      return rebuilt;
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  /// 记录 feed 解析时拿到的播放地址，供 resolvePlayback 使用。
+  void _cachePlayback(
+    String awemeId,
+    Map<String, Object?> video, {
+    int? width,
+    int? height,
+  }) {
+    final playAddr = video['play_addr'];
+    if (playAddr is! Map) return;
+
+    final urlList = playAddr['url_list'];
+    if (urlList is! List || urlList.isEmpty) return;
+
+    final urls = <String>[];
+    for (final u in urlList) {
+      if (u is String && u.isNotEmpty) urls.add(u);
+    }
+    if (urls.isEmpty) return;
+
+    // 清晰度档位
+    final qualities = <PlaybackQuality>[];
+    final bitRates = video['bit_rate'];
+    if (bitRates is List) {
+      for (final br in bitRates) {
+        if (br is! Map) continue;
+        final pa = br['play_addr'];
+        if (pa is! Map) continue;
+        final w = (pa['width'] as num?)?.toInt();
+        final h = (pa['height'] as num?)?.toInt();
+        if (w == null || h == null) continue;
+        qualities.add(
+          PlaybackQuality(
+            platformQualityId: (br['quality_type'] as num?)?.toInt(),
+            label: _nullableString(br['gear_name']) ?? '${h}P',
+            width: w,
+            height: h,
+            bandwidth: (br['bit_rate'] as num?)?.toInt(),
+          ),
+        );
+      }
+    }
+
+    _playbackCache[awemeId] = _CachedPlayback(
+      url: _normalizePlayUrl(urls.first),
+      fallbackUrls: urls.skip(1).map(_normalizePlayUrl).toList(),
+      // 抖音 CDN 实测不校验 Referer/UA，但保留 UA 可避免部分节点
+      // 返回与浏览器不同的响应体（实测去掉 UA 后 mpv 报 Failed to open）。
+      headers: const {'User-Agent': _appUserAgent},
+      quality: width != null && height != null
+          ? PlaybackQuality(
+              platformQualityId: null,
+              label: '${height}P',
+              width: width,
+              height: height,
+            )
+          : null,
+      qualities: qualities,
+      cachedAt: DateTime.now(),
+    );
+
+    // 缓存上限，避免长浏览时无限增长
+    if (_playbackCache.length > 60) {
+      final oldest = _playbackCache.entries
+          .reduce((a, b) => a.value.cachedAt.isBefore(b.value.cachedAt) ? a : b);
+      _playbackCache.remove(oldest.key);
+    }
   }
 
   // ── 辅助 ───────────────────────────────────────────────────

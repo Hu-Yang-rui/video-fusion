@@ -177,6 +177,16 @@ class FeedController extends ChangeNotifier {
     _hasMore = true;
     _feedError = null;
     _appendError = null;
+
+    // 关键：必须重置播放索引与上一来源的播放快照。
+    //
+    // 否则切换来源后 playIndex(0) 会因 `_playingIndex == 0` 早退，
+    // 新来源的视频永远不会开始播放——表现为"内容加载了但画面不动"。
+    // 同时清掉快照里的 duration，避免沿用上一个来源的时长
+    // 让 `alreadyPlaying` 判断误判为"已起播"。
+    _playingIndex = null;
+    _snapshot = PlayerSnapshot.initial;
+
     notifyListeners();
 
     await loadMore(initial: true);

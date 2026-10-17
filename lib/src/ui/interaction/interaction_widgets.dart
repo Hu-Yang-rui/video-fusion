@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../design/apple_tokens.dart';
+import '../../design/components/apple_layout.dart';
 import '../../models/interaction.dart';
 import 'interaction_controller.dart';
 
@@ -396,7 +397,7 @@ class _CommentSheetState extends State<CommentSheet> {
                   ],
                 ),
               ),
-              Container(height: 0.5, color: c.separator),
+              const AppleDivider(indent: 0),
 
               Expanded(
                 child: _buildBody(c, ctrl, sheetScroll),
@@ -480,10 +481,7 @@ class _CommentSheetState extends State<CommentSheet> {
       controller: _scroll,
       padding: const EdgeInsets.only(bottom: AppleSpace.xxxl),
       itemCount: ctrl.comments.length + (ctrl.commentsHasMore ? 1 : 0),
-      separatorBuilder: (_, __) => Padding(
-        padding: const EdgeInsets.only(left: 60),
-        child: Container(height: 0.5, color: c.separator),
-      ),
+      separatorBuilder: (_, __) => const AppleDivider(indent: 60),
       itemBuilder: (context, index) {
         if (index >= ctrl.comments.length) {
           // 加载更多指示

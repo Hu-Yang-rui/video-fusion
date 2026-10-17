@@ -129,10 +129,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             AppleSpace.xl,
       ),
       itemCount: list.length,
-      separatorBuilder: (_, __) => Padding(
-        padding: const EdgeInsets.only(left: 164),
-        child: Container(height: 0.5, color: c.separator),
-      ),
+      separatorBuilder: (_, __) => const AppleDivider(indent: 164),
       itemBuilder: (context, i) {
         final v = list[i];
         final record = _progress[v.id];
