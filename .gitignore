@@ -57,8 +57,12 @@ app.*.map.json
 # 本地验证产物（截图、日志、临时脚本）
 /research/evidence/
 /research/probes/
-/douyin-research/rendered/
 /_recover/
+
+# 调研时保存的网页快照（体积大且无代码价值）
+# 曾导致 GitHub 语言统计出现 HTML 43.8% 的误导性结果。
+/douyin-research/*.html
+/douyin-research/rendered/
 
 # 本地环境与密钥
 local.properties
