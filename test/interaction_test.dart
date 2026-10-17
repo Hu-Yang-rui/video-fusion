@@ -17,6 +17,7 @@ import 'package:video_fusion/src/core/secure_store.dart';
 import 'package:video_fusion/src/core/video_service.dart';
 import 'package:video_fusion/src/core/video_store.dart';
 import 'package:video_fusion/src/models/feed.dart';
+import 'package:video_fusion/src/models/live.dart';
 import 'package:video_fusion/src/models/interaction.dart';
 import 'package:video_fusion/src/models/playback.dart';
 import 'package:video_fusion/src/models/unified_video.dart';
@@ -234,6 +235,34 @@ class FakeInteractionAdapter implements PlatformAdapter {
     initialState = initialState.copyWith(favorited: favorite);
     return const InteractionResult(accepted: true);
   }
+
+  // ── 直播：测试桩不支持 ──────────────────────────────────────
+  @override
+  bool get supportsLive => false;
+
+  @override
+  Future<LiveRoomPage> fetchLiveRooms({
+    int page = 1,
+    int pageSize = 20,
+    int? parentAreaId,
+    int? areaId,
+  }) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<LiveRoomInfo> fetchLiveRoomInfo(int roomId) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<LiveStream> resolveLiveStream(int roomId, {int? quality}) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<List<LiveArea>> fetchLiveAreas() async => const [];
 }
 
 /// 内存安全存储由库内提供（[InMemorySecureStore]），这里无需重复实现。

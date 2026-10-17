@@ -9,7 +9,6 @@ import 'package:flutter/material.dart';
 import '../../core/credential_vault.dart';
 import '../../core/video_service.dart';
 import 'mobile_theme.dart';
-import 'mobile_widgets.dart';
 
 class SettingsPage extends StatelessWidget {
   const SettingsPage({

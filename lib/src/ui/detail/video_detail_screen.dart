@@ -335,10 +335,28 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
               fit: BoxFit.contain,
             ),
           ),
-          // 点击切换控制条
+          // 单击画面：切换播放/暂停 + 显示控制条。
+          //
+          // 之前只调 _toggleControls（显隐控制条），单击画面不会暂停，
+          // 与短视频页是同一个缺陷。
+          //
+          // 双击保留原有行为（全屏切换在别处，这里不占用双击手势），
+          // 因此只注册 onTap，单击立即响应，无 300ms 判定延迟。
           Positioned.fill(
             child: GestureDetector(
-              onTap: _toggleControls,
+              onTap: () {
+                final phase = _snapshot.phase;
+                if (phase == PlayerPhase.playing ||
+                    phase == PlayerPhase.paused) {
+                  player.playOrPause();
+                  _scheduleHideControls();
+                } else {
+                  _toggleControls();
+                }
+                if (!_showControls) {
+                  setState(() => _showControls = true);
+                }
+              },
               behavior: HitTestBehavior.opaque,
               child: const SizedBox.expand(),
             ),

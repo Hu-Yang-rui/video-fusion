@@ -17,6 +17,7 @@ import '../core/http_client.dart';
 import '../core/logger.dart';
 import '../models/feed.dart';
 import '../models/interaction.dart';
+import '../models/live.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
 import 'platform_adapter.dart';
@@ -75,6 +76,41 @@ class MockAdapter implements PlatformAdapter {
 
   @override
   bool get supportsFavorite => false;
+
+  // 测试平台不提供直播。
+  @override
+  bool get supportsLive => false;
+
+  @override
+  Future<LiveRoomPage> fetchLiveRooms({
+    int page = 1,
+    int pageSize = 20,
+    int? parentAreaId,
+    int? areaId,
+  }) =>
+      throw _noLive('fetchLiveRooms');
+
+  @override
+  Future<LiveRoomInfo> fetchLiveRoomInfo(int roomId) =>
+      throw _noLive('fetchLiveRoomInfo');
+
+  @override
+  Future<LiveStream> resolveLiveStream(int roomId, {int? quality}) =>
+      throw _noLive('resolveLiveStream');
+
+  @override
+  Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) =>
+      throw _noLive('fetchLiveDanmakuEndpoint');
+
+  @override
+  Future<List<LiveArea>> fetchLiveAreas() async => const [];
+
+  FusionException _noLive(String method) => FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试平台不提供直播。',
+        technicalMessage: 'MockAdapter does not implement $method',
+        platformId: id,
+      );
 
   @override
   Future<CommentPage> fetchComments(

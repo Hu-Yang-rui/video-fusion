@@ -26,7 +26,6 @@ import 'src/adapters/mock_adapter.dart';
 import 'src/adapters/platform_registry.dart';
 import 'src/core/credential_vault.dart';
 import 'src/core/http_client.dart';
-import 'src/core/key_value_store.dart';
 import 'src/core/logger.dart';
 import 'src/core/platform/flutter_secure_store.dart';
 import 'src/core/platform/shared_preferences_store.dart';
@@ -40,6 +39,7 @@ import 'src/ui/detail/video_detail_screen.dart';
 import 'src/ui/discover/discover_screen.dart';
 import 'src/ui/feed/feed_screen.dart';
 import 'src/ui/library/library_screen.dart';
+import 'src/ui/live/live_screen.dart';
 import 'src/ui/mobile/feed_controller.dart';
 import 'src/ui/mobile/link_intake_sheet.dart';
 import 'src/ui/mobile/mobile_widgets.dart' show openInBrowser;
@@ -199,6 +199,24 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
     openInBrowser(video.canonicalUrl);
   }
 
+  /// 构造直播页。
+  ///
+  /// 返回 null 表示当前没有任何平台支持直播——此时 AppShell 不会
+  /// 渲染直播标签，避免出现"点进去什么都没有"的空页面。
+  ///
+  /// 目前只有 B 站实现了直播接口；未来其它平台接入时，
+  /// 这里按 `supportsLive` 自动选中第一个可用适配器即可。
+  Widget? _livePage() {
+    final adapter = _registry.byId('bilibili');
+    if (adapter == null || !adapter.supportsLive) return null;
+    return LiveScreen(
+      adapter: adapter,
+      onOpenOriginal: (room) => openInBrowser(
+        'https://live.bilibili.com/${room.roomId}',
+      ),
+    );
+  }
+
   /// 打开长视频详情页。
   Future<void> _openDetail(UnifiedVideo video, {Duration? resumeAt}) async {
     final navContext = _navigatorKey.currentContext;
@@ -257,6 +275,9 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
           onOpenVideo: (v) => _openDetail(v),
           onOpenSourcePicker: _openSourcePicker,
         ),
+        // 直播页：只在平台确实声明 supportsLive 时注入，
+        // 否则标签栏保持四项，不出现空页面。
+        livePage: _livePage(),
         libraryPage: LibraryScreen(
           service: _service,
           progressStore: _progressStore,

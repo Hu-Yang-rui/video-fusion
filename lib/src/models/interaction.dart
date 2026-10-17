@@ -23,6 +23,7 @@ class VideoComment {
     this.isUpAuthor = false,
     this.isPinned = false,
     this.floor,
+    this.ipLocation,
   });
 
   /// 平台评论 ID。
@@ -50,6 +51,17 @@ class VideoComment {
   /// 楼层号。
   final int? floor;
 
+  /// 平台公示的 IP 属地（如「广东」「日本」）。
+  ///
+  /// **只承载平台明确返回的值，绝不由客户端推断。**
+  ///  - B 站：`reply_control.location`，格式为「IP属地：广东」，
+  ///    适配器会剥离前缀。**实测该字段仅在登录态返回**，
+  ///    未登录请求的响应里完全没有此字段。
+  ///  - 抖音：评论接口未返回任何地区信息（已核实），恒为 null。
+  ///
+  /// 为 null 时 UI 不显示任何地区文字，不得用昵称/头像/网络位置猜测。
+  final String? ipLocation;
+
   Map<String, Object?> toJson() => {
         'id': id,
         'authorName': authorName,
@@ -62,6 +74,7 @@ class VideoComment {
         'isUpAuthor': isUpAuthor,
         'isPinned': isPinned,
         'floor': floor,
+        'ipLocation': ipLocation,
       };
 }
 

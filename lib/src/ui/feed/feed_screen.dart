@@ -26,7 +26,6 @@ import '../../core/video_service.dart';
 import '../../design/apple_tokens.dart';
 import '../../design/components/video_widgets.dart';
 import '../../models/feed.dart';
-import '../../models/playback.dart';
 import '../../models/unified_video.dart';
 import '../../player/player_controller.dart';
 import '../interaction/interaction_controller.dart';
@@ -197,6 +196,42 @@ class _FeedScreenState extends State<FeedScreen> {
     });
   }
 
+  /// 单击画面：切换播放/暂停，并让控制层可见。
+  ///
+  /// 之前这里只调 [_toggleUi]（显隐控制层），所以单击画面**不会**
+  /// 暂停播放——这正是"单击无法暂停/恢复"的根因。
+  ///
+  /// 现在的行为对齐主流短视频应用：
+  ///  - 单击播放中 → 暂停，同时显示控制层（让用户看到暂停状态）
+  ///  - 单击已暂停 → 恢复播放，并重新安排自动隐藏
+  ///  - 双击仍然只做触觉反馈（在 _FeedStage 里处理），
+  ///    与单击不冲突：Flutter 的 GestureDetector 在有 onDoubleTap 时
+  ///    会把单击延后约 300ms 再触发，保证不会误判。
+  ///
+  /// 只有当前屏处于可播放状态时才切换，加载中/失败态不响应，
+  /// 避免在解析过程中把状态搅乱。
+  void _onStageTap() {
+    final c = widget.controller;
+
+    // 以**播放器的实际状态**为准，而不是快照里的 phase。
+    //
+    // 快照的 phase 来自 media_kit 的事件流，暂停/恢复与事件到达之间
+    // 有几十毫秒延迟。若用快照判断，连续两次点击会读到同一个旧
+    // phase，导致第二次点击被判定为"不可切换"而不响应——
+    // 表现为"暂停后点不回来"。
+    //
+    // 只有确实有媒体在播时才切换，加载中/失败态不响应，
+    // 避免在解析过程中把状态搅乱。
+    if (!c.canTogglePlay) {
+      _toggleUi();
+      return;
+    }
+
+    c.togglePlay();
+    setState(() => _showUi = true);
+    _scheduleHide();
+  }
+
   void _toggleUi() {
     setState(() => _showUi = !_showUi);
     if (_showUi) _scheduleHide();
@@ -261,7 +296,7 @@ class _FeedScreenState extends State<FeedScreen> {
                 onOpenDetail: widget.onOpenDetail == null
                     ? null
                     : () => widget.onOpenDetail!(c.items[index]),
-                onTap: _toggleUi,
+                onTap: _onStageTap,
               ),
             ),
 

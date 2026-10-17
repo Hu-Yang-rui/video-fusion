@@ -6,7 +6,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../../models/feed.dart';
-import '../../models/unified_video.dart';
 import 'mobile_theme.dart';
 
 /// 在系统浏览器中打开链接。

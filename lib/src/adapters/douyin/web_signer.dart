@@ -34,7 +34,6 @@ library;
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/errors.dart';
@@ -81,9 +80,6 @@ class DouyinWebSigner {
   bool _ready = false;
   bool _initializing = false;
   Completer<bool>? _initCompleter;
-
-  /// 已加载的页面地址（用于 Referer 与同源请求）。
-  String? _currentVideoUrl;
 
   bool get isReady => _ready;
 
@@ -139,7 +135,6 @@ class DouyinWebSigner {
           _logger.info('douyin signer: page loaded', {
             'url': url?.toString() ?? '-',
           });
-          _currentVideoUrl = url?.toString() ?? target;
 
           try {
             // 移除自动化标记（在页面脚本执行前注入更可靠，

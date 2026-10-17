@@ -62,7 +62,27 @@ class InteractionController extends ChangeNotifier {
   // ── 评论 ────────────────────────────────────────────────────
 
   final List<VideoComment> _comments = [];
-  List<VideoComment> get comments => List.unmodifiable(_comments);
+
+  /// 评论的只读视图。
+  ///
+  /// **性能关键**：这里必须缓存包装器，不能写成
+  /// `List.unmodifiable(_comments)` —— 那样每次访问都会新建一个
+  /// UnmodifiableListView，而评论列表的 `itemBuilder` 每帧会为每个
+  /// 可见条目访问一次，滚动时每帧产生 N 次堆分配，直接导致掉帧。
+  ///
+  /// 缓存后只有列表被整体替换（`_comments = ...`）时才重建包装器。
+  /// 这里用 late 字段 + 在替换列表时失效的方式，保持语义正确。
+  List<VideoComment>? _commentsView;
+  List<VideoComment> get comments =>
+      _commentsView ??= List.unmodifiable(_comments);
+
+  /// 列表内容变更后调用，使只读视图失效。
+  ///
+  /// 只在"结构性变更"（追加/清空/刷新）后调用，
+  /// 不在单条评论的字段变化时调用。
+  void _invalidateCommentsView() {
+    _commentsView = null;
+  }
 
   int _commentPage = 0;
   int _commentTotal = 0;
@@ -221,6 +241,7 @@ class InteractionController extends ChangeNotifier {
 
     if (refresh) {
       _comments.clear();
+      _invalidateCommentsView();
       _commentPage = 0;
       _commentCursor = 0;
       _commentsHasMore = true;
@@ -249,9 +270,14 @@ class InteractionController extends ChangeNotifier {
 
       // 去重：游标分页理论上不重复，但仍做防护
       final existing = _comments.map((c) => c.id).toSet();
+      var added = false;
       for (final c in page.items) {
-        if (!existing.contains(c.id)) _comments.add(c);
+        if (!existing.contains(c.id)) {
+          _comments.add(c);
+          added = true;
+        }
       }
+      if (added) _invalidateCommentsView();
       _commentsLoadedOnce = true;
     } on FusionException catch (e) {
       _commentsError = e;

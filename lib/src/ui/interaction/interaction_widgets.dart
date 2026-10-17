@@ -8,7 +8,6 @@
 library;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../design/apple_tokens.dart';
 import '../../design/components/apple_layout.dart';
@@ -313,41 +312,38 @@ class CommentSheet extends StatefulWidget {
 }
 
 class _CommentSheetState extends State<CommentSheet> {
-  final ScrollController _scroll = ScrollController();
+  // 注意：这里**不**自建 ScrollController。
+  //
+  // DraggableScrollableSheet 要求内部的滚动组件使用它通过 builder
+  // 传进来的 controller，否则拖拽与滚动的坐标是两套，会出现
+  // "拖不动"、"滚到顶不接管" 之类的交互冲突。
+  //
+  // 之前这里用独立的 _scroll，既和 sheetScroll 打架，
+  // 又额外注册了一个每像素触发的监听器。现在改为：
+  //  - ListView 直接用 sheetScroll
+  //  - 触底加载改由 NotificationListener<ScrollNotification> 驱动
 
   @override
   void initState() {
     super.initState();
-    widget.controller.addListener(_onChanged);
-    _scroll.addListener(_onScroll);
     if (!widget.controller.commentsLoadedOnce) {
       widget.controller.loadComments();
     }
   }
 
-  void _onChanged() {
-    if (mounted) setState(() {});
-  }
-
-  void _onScroll() {
-    if (!_scroll.hasClients) return;
-    if (_scroll.position.pixels >=
-        _scroll.position.maxScrollExtent - 300) {
+  /// 触底加载。由滚动通知驱动，不再每帧轮询位置。
+  bool _onScrollNotification(ScrollNotification n) {
+    if (n.metrics.axis != Axis.vertical) return false;
+    final remaining = n.metrics.maxScrollExtent - n.metrics.pixels;
+    if (remaining < 400) {
       widget.controller.loadMoreComments();
     }
-  }
-
-  @override
-  void dispose() {
-    widget.controller.removeListener(_onChanged);
-    _scroll.dispose();
-    super.dispose();
+    return false;
   }
 
   @override
   Widget build(BuildContext context) {
     final c = AppleColors.of(context);
-    final ctrl = widget.controller;
 
     return DraggableScrollableSheet(
       initialChildSize: 0.7,
@@ -362,47 +358,62 @@ class _CommentSheetState extends State<CommentSheet> {
               top: Radius.circular(AppleRadius.sheet),
             ),
           ),
-          child: Column(
-            children: [
-              // 拖拽条 + 标题
-              const SizedBox(height: AppleSpace.sm),
-              Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: c.separator,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  AppleSpace.lg,
-                  AppleSpace.md,
-                  AppleSpace.sm,
-                  AppleSpace.sm,
-                ),
-                child: Row(
-                  children: [
-                    Text(
-                      ctrl.commentTotal > 0
-                          ? '评论 ${_fmtCount(ctrl.commentTotal)}'
-                          : '评论',
-                      style: AppleType.title3.copyWith(color: c.label),
+          // 用 ListenableBuilder 把"数据变化"的重建范围限制在内容区，
+          // 不再用 setState 重建整个 DraggableScrollableSheet。
+          //
+          // 之前 _onChanged 里 setState(() {}) 会在每次
+          // notifyListeners（含加载更多、点赞状态刷新）时重建
+          // sheet 几何 + 标题 + 整个列表，滚动中触发会明显掉帧。
+          child: ListenableBuilder(
+            listenable: widget.controller,
+            builder: (context, _) {
+              final ctrl = widget.controller;
+              return Column(
+                children: [
+                  // 拖拽条 + 标题
+                  const SizedBox(height: AppleSpace.sm),
+                  Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: c.separator,
+                      borderRadius: BorderRadius.circular(2),
                     ),
-                    const Spacer(),
-                    IconButton(
-                      onPressed: () => Navigator.pop(context),
-                      icon: Icon(Icons.close_rounded, color: c.secondaryLabel),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      AppleSpace.lg,
+                      AppleSpace.md,
+                      AppleSpace.sm,
+                      AppleSpace.sm,
                     ),
-                  ],
-                ),
-              ),
-              const AppleDivider(indent: 0),
+                    child: Row(
+                      children: [
+                        Text(
+                          ctrl.commentTotal > 0
+                              ? '评论 ${_fmtCount(ctrl.commentTotal)}'
+                              : '评论',
+                          style: AppleType.title3.copyWith(color: c.label),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          onPressed: () => Navigator.pop(context),
+                          icon: Icon(
+                            Icons.close_rounded,
+                            color: c.secondaryLabel,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const AppleDivider(indent: 0),
 
-              Expanded(
-                child: _buildBody(c, ctrl, sheetScroll),
-              ),
-            ],
+                  Expanded(
+                    child: _buildBody(c, ctrl, sheetScroll),
+                  ),
+                ],
+              );
+            },
           ),
         );
       },
@@ -477,32 +488,44 @@ class _CommentSheetState extends State<CommentSheet> {
       );
     }
 
-    return ListView.separated(
-      controller: _scroll,
-      padding: const EdgeInsets.only(bottom: AppleSpace.xxxl),
-      itemCount: ctrl.comments.length + (ctrl.commentsHasMore ? 1 : 0),
-      separatorBuilder: (_, __) => const AppleDivider(indent: 60),
-      itemBuilder: (context, index) {
-        if (index >= ctrl.comments.length) {
-          // 加载更多指示
-          return Padding(
-            padding: const EdgeInsets.all(AppleSpace.lg),
-            child: Center(
-              child: ctrl.commentsLoading
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : TextButton(
-                      onPressed: ctrl.loadMoreComments,
-                      child: const Text('加载更多'),
-                    ),
-            ),
+    // 用 sheet 提供的 controller，保证拖拽与滚动是同一套坐标。
+    final comments = ctrl.comments;
+
+    return NotificationListener<ScrollNotification>(
+      onNotification: _onScrollNotification,
+      child: ListView.separated(
+        controller: sheetScroll,
+        padding: const EdgeInsets.only(bottom: AppleSpace.xxxl),
+        itemCount: comments.length + (ctrl.commentsHasMore ? 1 : 0),
+        separatorBuilder: (_, _) => const AppleDivider(indent: 60),
+        itemBuilder: (context, index) {
+          if (index >= comments.length) {
+            // 加载更多指示
+            return Padding(
+              padding: const EdgeInsets.all(AppleSpace.lg),
+              child: Center(
+                child: ctrl.commentsLoading
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : TextButton(
+                        onPressed: ctrl.loadMoreComments,
+                        child: const Text('加载更多'),
+                      ),
+              ),
+            );
+          }
+          final comment = comments[index];
+          // 稳定的 Key：翻页追加时 Flutter 能复用已构建的 element，
+          // 而不是按位置错配导致整屏重建。
+          return _CommentTile(
+            key: ValueKey<String>(comment.id),
+            comment: comment,
           );
-        }
-        return _CommentTile(comment: ctrl.comments[index]);
-      },
+        },
+      ),
     );
   }
 
@@ -514,10 +537,29 @@ class _CommentSheetState extends State<CommentSheet> {
 }
 
 /// 单条评论。
+///
+/// 性能说明（列表滚动的关键路径）：
+///  - 头像用 [ResizeImage] 限制解码宽度。评论头像原图常见 200×200，
+///    不限制的话每条评论解码后占 160KB，滚动时内存与解码开销叠加明显。
+///    限制到 64px 后单条约 16KB。
+///  - 头像首字母在构造时算一次，避免每帧调用 `characters.first`
+///    （字形簇分析，比取首个 code unit 贵得多）。
 class _CommentTile extends StatelessWidget {
-  const _CommentTile({required this.comment});
+  _CommentTile({super.key, required this.comment})
+      : _avatarInitial = _initialOf(comment.authorName);
 
   final VideoComment comment;
+
+  /// 昵称首字（构造时计算一次）。
+  final String _avatarInitial;
+
+  static String _initialOf(String name) {
+    if (name.isEmpty) return '?';
+    return name.characters.first;
+  }
+
+  /// 头像解码目标宽度（逻辑像素 32 → 按 2x 屏取 64）。
+  static const int _avatarDecodeWidth = 64;
 
   @override
   Widget build(BuildContext context) {
@@ -535,17 +577,19 @@ class _CommentTile extends StatelessWidget {
           CircleAvatar(
             radius: 16,
             backgroundColor: c.fill,
-            backgroundImage: comment.authorAvatarUrl != null
-                ? NetworkImage(
-                    comment.authorAvatarUrl!,
-                    headers: const {'Referer': 'https://www.bilibili.com/'},
-                  )
-                : null,
+            backgroundImage: comment.authorAvatarUrl == null
+                ? null
+                : ResizeImage.resizeIfNeeded(
+                    _avatarDecodeWidth,
+                    _avatarDecodeWidth,
+                    NetworkImage(
+                      comment.authorAvatarUrl!,
+                      headers: const {'Referer': 'https://www.bilibili.com/'},
+                    ),
+                  ),
             child: comment.authorAvatarUrl == null
                 ? Text(
-                    comment.authorName.isNotEmpty
-                        ? comment.authorName.characters.first
-                        : '?',
+                    _avatarInitial,
                     style: AppleType.caption1.copyWith(color: c.secondaryLabel),
                   )
                 : null,
@@ -616,6 +660,17 @@ class _CommentTile extends StatelessWidget {
                         color: c.tertiaryLabel,
                       ),
                     ),
+                    // IP 属地：与时间同权重，不额外加底色或徽标。
+                    // 仅在平台确实返回时显示，缺失时整段不渲染。
+                    if (comment.ipLocation != null) ...[
+                      const SizedBox(width: AppleSpace.sm),
+                      Text(
+                        comment.ipLocation!,
+                        style: AppleType.caption2.copyWith(
+                          color: c.tertiaryLabel,
+                        ),
+                      ),
+                    ],
                     if (comment.likeCount != null && comment.likeCount! > 0) ...[
                       const SizedBox(width: AppleSpace.md),
                       Icon(

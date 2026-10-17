@@ -35,6 +35,7 @@ import '../core/logger.dart';
 import '../core/qr_login.dart';
 import '../models/feed.dart';
 import '../models/interaction.dart';
+import '../models/live.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
 import 'platform_adapter.dart';
@@ -1305,6 +1306,441 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     return null;
   }
 
+
+  // ── 直播 ────────────────────────────────────────────────────
+  //
+  // 端点实测（2026-10，未登录）：
+  //  - 列表 room/v3/area/getRoomList          → code=0，16754 个房间
+  //  - 详情 room/v1/Room/get_info             → code=0，含 live_status
+  //  - 播放 xlive/web-room/v2/.../getRoomPlayInfo → FLV + HLS，5 档清晰度
+  //  - 弹幕 xlive/web-room/v1/index/getDanmuInfo → token + wss 地址
+  //
+  // 注意：xlive/web-interface/v1/second/getList 返回 -352（风控），
+  // 不可用，因此列表走 room/v3/area/getRoomList。
+
+  static const String _liveApiBase = 'https://api.live.bilibili.com';
+  static const String _liveReferer = 'https://live.bilibili.com/';
+
+  @override
+  bool get supportsLive => true;
+
+  @override
+  Future<LiveRoomPage> fetchLiveRooms({
+    int page = 1,
+    int pageSize = 20,
+    int? parentAreaId,
+    int? areaId,
+  }) async {
+    final safePage = page < 1 ? 1 : page;
+    final safeSize = pageSize.clamp(1, 30);
+
+    final url = '$_liveApiBase/room/v3/area/getRoomList'
+        '?platform=web'
+        '&parent_area_id=${parentAreaId ?? 0}'
+        '&area_id=${areaId ?? 0}'
+        '&sort_type=online'
+        '&page=$safePage'
+        '&page_size=$safeSize';
+
+    final result = await _http.get(
+      url,
+      headers: const {
+        'Referer': _liveReferer,
+        'Accept': 'application/json',
+      },
+      platformId: id,
+    );
+
+    final json = result.jsonObject(platformId: id);
+    _assertApiOk(json, endpoint: '/room/v3/area/getRoomList');
+
+    final data = json['data'];
+    if (data is! Map) {
+      return LiveRoomPage(items: const [], page: safePage, hasMore: false);
+    }
+    final d = Map<String, Object?>.from(data);
+    final rawList = d['list'];
+    final total = (d['count'] as num?)?.toInt() ?? 0;
+
+    final items = <LiveRoomSummary>[];
+    if (rawList is List) {
+      for (final raw in rawList) {
+        if (raw is! Map) continue;
+        final m = Map<String, Object?>.from(raw);
+        final roomId = (m['roomid'] as num?)?.toInt();
+        if (roomId == null) continue;
+        items.add(
+          LiveRoomSummary(
+            roomId: roomId,
+            title: _nullableString(m['title']) ?? '直播间 $roomId',
+            uname: _nullableString(m['uname']) ?? '未知主播',
+            coverUrl: _nullableString(m['cover']) ??
+                _nullableString(m['user_cover']),
+            faceUrl: _nullableString(m['face']),
+            online: (m['online'] as num?)?.toInt(),
+            areaName: _nullableString(m['area_v2_name']) ??
+                _nullableString(m['area_name']),
+            parentAreaName: _nullableString(m['area_v2_parent_name']) ??
+                _nullableString(m['parent_name']),
+            uid: (m['uid'] as num?)?.toInt(),
+          ),
+        );
+      }
+    }
+
+    return LiveRoomPage(
+      items: items,
+      page: safePage,
+      hasMore: items.isNotEmpty && safePage * safeSize < total,
+      totalCount: total,
+      notes: [
+        if (total > 0) '共 $total 个直播间。',
+      ],
+    );
+  }
+
+  @override
+  Future<List<LiveArea>> fetchLiveAreas() async {
+    final result = await _http.get(
+      '$_liveApiBase/room/v1/Area/getList?show_pinyin=1',
+      headers: const {
+        'Referer': _liveReferer,
+        'Accept': 'application/json',
+      },
+      platformId: id,
+    );
+
+    final json = result.jsonObject(platformId: id);
+    _assertApiOk(json, endpoint: '/room/v1/Area/getList');
+
+    final data = json['data'];
+    if (data is! List) return const [];
+
+    final areas = <LiveArea>[];
+    for (final raw in data) {
+      if (raw is! Map) continue;
+      final m = Map<String, Object?>.from(raw);
+      final areaId = (m['id'] as num?)?.toInt();
+      final name = _nullableString(m['name']);
+      if (areaId == null || name == null) continue;
+
+      final children = <LiveArea>[];
+      final subs = m['list'];
+      if (subs is List) {
+        for (final sub in subs) {
+          if (sub is! Map) continue;
+          final sm = Map<String, Object?>.from(sub);
+          // 注意：一级分区的 id 是数字，但二级分区的 id 是**字符串**。
+          // 实测 2026-10：{"id":"86","parent_id":"2","name":"英雄联盟"}
+          final sid = _toInt(sm['id']);
+          final sname = _nullableString(sm['name']);
+          if (sid == null || sname == null) continue;
+          children.add(LiveArea(id: sid, name: sname));
+        }
+      }
+
+      areas.add(LiveArea(id: areaId, name: name, children: children));
+    }
+    return areas;
+  }
+
+  @override
+  Future<LiveRoomInfo> fetchLiveRoomInfo(int roomId) async {
+    final result = await _http.get(
+      '$_liveApiBase/room/v1/Room/get_info?room_id=$roomId',
+      headers: const {
+        'Referer': _liveReferer,
+        'Accept': 'application/json',
+      },
+      platformId: id,
+    );
+
+    final json = result.jsonObject(platformId: id);
+    _assertApiOk(json, endpoint: '/room/v1/Room/get_info');
+
+    final data = json['data'];
+    if (data is! Map) {
+      throw FusionException(
+        code: FusionErrorCode.videoNotFound,
+        userMessage: '直播间不存在。',
+        technicalMessage: 'get_info returned no data for room $roomId',
+        platformId: id,
+      );
+    }
+    final d = Map<String, Object?>.from(data);
+
+    final startTime = _toInt(d['live_time']);
+
+    // 注意：get_info 的字段类型不统一。
+    // 实测 2026-10：`live_status` 返回的是**字符串** "1"，
+    // 而 `room_id` / `uid` 是数字。直接 `as num?` 会抛
+    // "type 'String' is not a subtype of type 'num?'"，
+    // 导致所有直播间都查不出状态。统一走 _toInt 兼容两种类型。
+    return LiveRoomInfo(
+      roomId: _toInt(d['room_id']) ?? roomId,
+      shortId: _toInt(d['short_id']) ?? 0,
+      uid: _toInt(d['uid']) ?? 0,
+      title: _nullableString(d['title']) ?? '直播间 $roomId',
+      liveStatus: _toInt(d['live_status']) ?? 0,
+      online: _toInt(d['online']),
+      description: _nullableString(d['description']),
+      coverUrl: _nullableString(d['user_cover']) ??
+          _nullableString(d['keyframe']),
+      keyframeUrl: _nullableString(d['keyframe']),
+      areaName: _nullableString(d['area_name']),
+      parentAreaName: _nullableString(d['parent_area_name']),
+      tags: _nullableString(d['tags']),
+      liveStartTime: startTime != null && startTime > 0
+          ? _epochToIso(startTime)
+          : null,
+    );
+  }
+
+  @override
+  Future<LiveStream> resolveLiveStream(int roomId, {int? quality}) async {
+    final qn = quality ?? 10000;
+    final url = '$_liveApiBase/xlive/web-room/v2/index/getRoomPlayInfo'
+        '?room_id=$roomId'
+        '&protocol=0,1'
+        '&format=0,1,2'
+        '&codec=0,1'
+        '&qn=$qn'
+        '&platform=web'
+        '&ptype=8';
+
+    final result = await _http.get(
+      url,
+      headers: const {
+        'Referer': _liveReferer,
+        'Accept': 'application/json',
+      },
+      platformId: id,
+    );
+
+    final json = result.jsonObject(platformId: id);
+    _assertApiOk(json, endpoint: '/xlive/web-room/v2/index/getRoomPlayInfo');
+
+    final data = json['data'];
+    if (data is! Map) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '该直播间暂无可播放的流。',
+        technicalMessage: 'playurl_info missing for room $roomId',
+        platformId: id,
+      );
+    }
+    final d = Map<String, Object?>.from(data);
+
+    // 未开播：平台不会给流地址
+    final liveStatus = (d['live_status'] as num?)?.toInt() ?? 0;
+    final playurlInfo = d['playurl_info'];
+    if (playurlInfo is! Map) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: liveStatus == 0
+            ? '主播尚未开播，暂时无法观看。'
+            : '该直播间当前无法获取播放地址。',
+        technicalMessage:
+            'playurl_info is null (live_status=$liveStatus, room=$roomId)',
+        platformId: id,
+        retryable: liveStatus == 0,
+      );
+    }
+
+    final streams = Map<String, Object?>.from(playurlInfo)['playurl'];
+    if (streams is! Map) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '该直播间暂无可播放的流。',
+        technicalMessage: 'playurl missing',
+        platformId: id,
+      );
+    }
+
+    final rawStreams = Map<String, Object?>.from(streams)['stream'];
+    if (rawStreams is! List || rawStreams.isEmpty) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '该直播间暂无可播放的流。',
+        technicalMessage: 'stream list empty',
+        platformId: id,
+      );
+    }
+
+    // 优先 HLS（断线重连更稳），否则回退 FLV
+    LiveStream? best;
+    for (final rawStream in rawStreams) {
+      if (rawStream is! Map) continue;
+      final sm = Map<String, Object?>.from(rawStream);
+      final protocolName = _nullableString(sm['protocol_name']) ?? '';
+      final formats = sm['format'];
+      if (formats is! List) continue;
+
+      for (final rawFormat in formats) {
+        if (rawFormat is! Map) continue;
+        final fm = Map<String, Object?>.from(rawFormat);
+        final formatName = _nullableString(fm['format_name']) ?? '';
+        final codecs = fm['codec'];
+        if (codecs is! List) continue;
+
+        for (final rawCodec in codecs) {
+          if (rawCodec is! Map) continue;
+          final cm = Map<String, Object?>.from(rawCodec);
+          final codecName = _nullableString(cm['codec_name']) ?? '';
+          // 优先 avc：兼容性最好，模拟器与老设备都能解
+          if (codecName != 'avc') continue;
+
+          final candidate = _buildLiveStream(
+            cm,
+            protocolName: protocolName,
+            formatName: formatName,
+            codecName: codecName,
+          );
+          if (candidate == null) continue;
+
+          // HLS 优先
+          if (best == null ||
+              (candidate.isHls && !best.isHls)) {
+            best = candidate;
+          }
+        }
+      }
+    }
+
+    if (best == null) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '该直播间的流格式不受支持。',
+        technicalMessage: 'no avc stream found among $rawStreams.length streams',
+        platformId: id,
+      );
+    }
+
+    return best;
+  }
+
+  /// 由 codec 节点拼出完整播放地址。
+  ///
+  /// B 站把地址拆成三段：host + base_url + extra，
+  /// 直接拼接即可，**不能**再补问号（base_url 已自带）。
+  LiveStream? _buildLiveStream(
+    Map<String, Object?> codec, {
+    required String protocolName,
+    required String formatName,
+    required String codecName,
+  }) {
+    final urlInfo = codec['url_info'];
+    if (urlInfo is! List || urlInfo.isEmpty) return null;
+
+    final host = _nullableString(
+      urlInfo.first is Map
+          ? Map<String, Object?>.from(urlInfo.first as Map)['host']
+          : null,
+    );
+    final extra = _nullableString(
+      urlInfo.first is Map
+          ? Map<String, Object?>.from(urlInfo.first as Map)['extra']
+          : null,
+    );
+    final baseUrl = _nullableString(codec['base_url']);
+    if (host == null || baseUrl == null) return null;
+
+    final fullUrl = '$host$baseUrl${extra ?? ''}';
+
+    // 清晰度档位
+    final acceptQn = codec['accept_qn'];
+    final currentQn = (codec['current_qn'] as num?)?.toInt() ?? 0;
+    final qualities = <LiveStream>[];
+    if (acceptQn is List) {
+      for (final raw in acceptQn) {
+        final q = (raw as num?)?.toInt();
+        if (q == null) continue;
+        qualities.add(
+          LiveStream(
+            url: fullUrl,
+            protocolName: protocolName,
+            formatName: formatName,
+            codecName: codecName,
+            qualityLabel: _liveQualityLabel(q),
+            qualityValue: q,
+          ),
+        );
+      }
+    }
+
+    return LiveStream(
+      url: fullUrl,
+      protocolName: protocolName,
+      formatName: formatName,
+      codecName: codecName,
+      qualityLabel: _liveQualityLabel(currentQn),
+      qualityValue: currentQn,
+      availableQualities: qualities,
+    );
+  }
+
+  static String _liveQualityLabel(int qn) => switch (qn) {
+        30000 => '杜比',
+        20000 => '4K',
+        10000 => '原画',
+        400 => '蓝光',
+        250 => '超清',
+        150 => '高清',
+        _ => '流畅',
+      };
+
+  @override
+  Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) async {
+    final result = await _http.get(
+      '$_liveApiBase/xlive/web-room/v1/index/getDanmuInfo?id=$roomId&type=0',
+      headers: const {
+        'Referer': _liveReferer,
+        'Accept': 'application/json',
+      },
+      platformId: id,
+    );
+
+    final json = result.jsonObject(platformId: id);
+    _assertApiOk(json, endpoint: '/xlive/web-room/v1/index/getDanmuInfo');
+
+    final data = json['data'];
+    if (data is! Map) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '无法连接该直播间的弹幕服务器。',
+        technicalMessage: 'getDanmuInfo returned no data',
+        platformId: id,
+      );
+    }
+    final d = Map<String, Object?>.from(data);
+    final token = _nullableString(d['token']) ?? '';
+
+    final hosts = <String>[];
+    final rawHosts = d['host_list'];
+    if (rawHosts is List) {
+      for (final raw in rawHosts) {
+        if (raw is! Map) continue;
+        final hm = Map<String, Object?>.from(raw);
+        final host = _nullableString(hm['host']);
+        final port = (hm['wss_port'] as num?)?.toInt() ?? 443;
+        if (host == null) continue;
+        hosts.add('wss://$host:$port/sub');
+      }
+    }
+
+    if (hosts.isEmpty) {
+      // 官方公布的兜底地址
+      hosts.add('wss://broadcastlv.chat.bilibili.com:443/sub');
+    }
+
+    return LiveDanmakuEndpoint(
+      token: token,
+      hostList: hosts,
+      roomId: roomId,
+      uid: 0,
+    );
+  }
+
   // ── 辅助 ────────────────────────────────────────────────────
 
   String _videoIdQuery(String videoId) {
@@ -1366,14 +1802,6 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     );
   }
 
-  static String? _firstUrl(Object? value) {
-    if (value is List && value.isNotEmpty) {
-      final first = value.first;
-      if (first is String && first.isNotEmpty) return first;
-    }
-    return null;
-  }
-
   /// 收集一条 DASH 流的全部候选 URL（baseUrl + backupUrl[]）。
   ///
   /// 实测背景（2026-10）：B 站返回的每条流都带 1 个 baseUrl 与 2 个
@@ -1400,10 +1828,14 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     return out;
   }
 
-  /// 从一条流中选出可用的首选 URL（含回退链）。
-  static String? _pickReachableUrl(Map<String, Object?> stream) {
-    final urls = _collectStreamUrls(stream);
-    return urls.isEmpty ? null : urls.first;
+  /// 宽松取整：兼容 num 与数字字符串。
+  ///
+  /// B 站同一个接口里 id 的类型并不统一（一级分区是数字、
+  /// 二级分区是字符串），因此不能直接 `as num?`。
+  static int? _toInt(Object? value) {
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
   }
 
   static String? _nullableString(Object? value) {
@@ -1572,6 +2004,19 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
 
     final message = _nullableString(content['message']) ?? '';
 
+    // IP 属地。
+    //
+    // B 站把属地放在 `reply_control.location`，原始值是
+    // 「IP属地：广东」这种带前缀的字符串。
+    //
+    // 实测（2026-10）：**未登录请求的响应里完全没有该字段**，
+    // `reply_control` 只有 max_line / time_desc / translation_switch 等。
+    // 因此未登录时恒为 null，UI 不显示地区——不猜测、不伪造。
+    final replyControl = raw['reply_control'] is Map
+        ? Map<String, Object?>.from(raw['reply_control'] as Map)
+        : const <String, Object?>{};
+    final ipLocation = _parseIpLocation(replyControl['location']);
+
     return VideoComment(
       id: rpid,
       authorName: _nullableString(member['uname']) ?? '匿名用户',
@@ -1587,7 +2032,30 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
               (raw['up_action'] as Map)['like'] == true),
       isPinned: raw['is_top'] == 1 || raw['is_top'] == true,
       floor: (raw['floor'] as num?)?.toInt(),
+      ipLocation: ipLocation,
     );
+  }
+
+  /// 解析 B 站评论的 IP 属地。
+  ///
+  /// 原始值形如 `IP属地：广东` / `IP属地：日本`，
+  /// 部分返回也可能已经是纯地区名。这里统一剥离前缀，
+  /// 只保留地区本身供 UI 以低视觉权重展示。
+  ///
+  /// 返回 null 表示平台未提供——调用方不得补默认值。
+  static String? _parseIpLocation(Object? raw) {
+    final text = _nullableString(raw)?.trim();
+    if (text == null || text.isEmpty) return null;
+
+    // 剥离「IP属地：」「IP属地:」前缀（中英文冒号都可能有）
+    var value = text;
+    for (final prefix in const ['IP属地：', 'IP属地:', 'IP 属地：', 'IP 属地:']) {
+      if (value.startsWith(prefix)) {
+        value = value.substring(prefix.length).trim();
+        break;
+      }
+    }
+    return value.isEmpty ? null : value;
   }
 
   /// 查询当前用户对该视频的互动状态。

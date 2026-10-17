@@ -20,6 +20,7 @@ import 'package:video_fusion/src/core/playback_policy.dart';
 import 'package:video_fusion/src/core/video_service.dart';
 import 'package:video_fusion/src/core/video_store.dart';
 import 'package:video_fusion/src/models/feed.dart';
+import 'package:video_fusion/src/models/live.dart';
 import 'package:video_fusion/src/models/interaction.dart';
 import 'package:video_fusion/src/models/playback.dart';
 import 'package:video_fusion/src/models/unified_video.dart';
@@ -211,6 +212,34 @@ class StubAdapter implements PlatformAdapter {
         platformId: id,
       );
 
+
+  // ── 直播：测试桩不支持 ──────────────────────────────────────
+  @override
+  bool get supportsLive => false;
+
+  @override
+  Future<LiveRoomPage> fetchLiveRooms({
+    int page = 1,
+    int pageSize = 20,
+    int? parentAreaId,
+    int? areaId,
+  }) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<LiveRoomInfo> fetchLiveRoomInfo(int roomId) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<LiveStream> resolveLiveStream(int roomId, {int? quality}) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<List<LiveArea>> fetchLiveAreas() async => const [];
 }
 FusionHttpClient _fakeHttp() =>
     FusionHttpClient(logger: FusionLogger(enabled: false));
@@ -739,4 +768,32 @@ class _FlakyAdapter implements PlatformAdapter {
         platformId: id,
       );
 
+
+  // ── 直播：测试桩不支持 ──────────────────────────────────────
+  @override
+  bool get supportsLive => false;
+
+  @override
+  Future<LiveRoomPage> fetchLiveRooms({
+    int page = 1,
+    int pageSize = 20,
+    int? parentAreaId,
+    int? areaId,
+  }) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<LiveRoomInfo> fetchLiveRoomInfo(int roomId) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<LiveStream> resolveLiveStream(int roomId, {int? quality}) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) =>
+      throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<List<LiveArea>> fetchLiveAreas() async => const [];
 }

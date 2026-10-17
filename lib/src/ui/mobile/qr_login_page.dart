@@ -18,7 +18,6 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
-import '../../core/logger.dart';
 import '../../core/qr_login.dart';
 import 'mobile_theme.dart';
 import 'mobile_widgets.dart';

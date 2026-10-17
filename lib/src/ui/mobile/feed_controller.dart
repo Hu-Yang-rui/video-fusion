@@ -414,6 +414,27 @@ class FeedController extends ChangeNotifier {
     await playIndex(index);
   }
 
+  /// 当前是否允许切换播放/暂停。
+  ///
+  /// 判断依据是**播放器的实时状态**，不是快照 phase。
+  /// 快照由 media_kit 事件流驱动，暂停/恢复与事件到达之间有延迟；
+  /// 用快照判断会让连续两次点击读到同一个旧值，
+  /// 表现为"暂停后点不回来"。
+  ///
+  /// 只要已加载出时长（即媒体真的打开了），就允许切换。
+  /// 加载中（duration 为 0）与失败态不响应。
+  bool get canTogglePlay {
+    final p = _player;
+    if (p == null) return false;
+    if (_snapshot.phase == PlayerPhase.failed) return false;
+    if (_snapshot.duration.inMilliseconds <= 0) return false;
+    return true;
+  }
+
+  /// 切换播放/暂停。
+  ///
+  /// 直接委托给播放内核，不在这里维护第二份播放状态——
+  /// 两套状态必然发散，是"点了没反应"类缺陷的常见来源。
   Future<void> togglePlay() async {
     final p = _player;
     if (p == null) return;

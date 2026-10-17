@@ -3,8 +3,12 @@
 /// 结构（对应 Apple 风格的信息架构）：
 ///  1. 推荐 —— 全屏竖滑短视频流（沉浸式，隐藏标签栏）
 ///  2. 发现 —— 长视频浏览、分类、搜索（浅色列表界面）
-///  3. 媒体库 —— 观看历史、收藏、继续观看
-///  4. 设置 —— 账号与平台管理
+///  3. 直播 —— 直播列表与直播间（可选的第三个页面）
+///  4. 媒体库 —— 观看历史、收藏、继续观看
+///  5. 设置 —— 账号与平台管理
+///
+/// 直播页是**可选**的：只有当接入的平台声明 supportsLive 时才注入，
+/// 否则标签栏保持四项，避免出现点了没内容的空页面。
 ///
 /// 设计要点：
 ///  - 标签栏使用毛玻璃，但**不在视频流内显示**（避免遮挡画面）
@@ -26,6 +30,7 @@ class AppShell extends StatefulWidget {
     required this.discoverPage,
     required this.libraryPage,
     required this.settingsPage,
+    this.livePage,
     this.initialIndex = 0,
   });
 
@@ -33,6 +38,10 @@ class AppShell extends StatefulWidget {
   final Widget discoverPage;
   final Widget libraryPage;
   final Widget settingsPage;
+
+  /// 直播页（可选）。为 null 时不显示直播标签。
+  final Widget? livePage;
+
   final int initialIndex;
 
   @override
@@ -54,11 +63,44 @@ class AppShellState extends State<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    final pages = [
+    final hasLive = widget.livePage != null;
+
+    final pages = <Widget>[
       widget.feedPage,
       widget.discoverPage,
+      if (hasLive) widget.livePage!,
       widget.libraryPage,
       widget.settingsPage,
+    ];
+
+    // 标签项与 pages 一一对应。直播缺席时自动收起对应标签。
+    final items = <AppleTabItem>[
+      const AppleTabItem(
+        icon: Icons.play_circle_outline_rounded,
+        activeIcon: Icons.play_circle_rounded,
+        label: '推荐',
+      ),
+      const AppleTabItem(
+        icon: Icons.explore_outlined,
+        activeIcon: Icons.explore_rounded,
+        label: '发现',
+      ),
+      if (hasLive)
+        const AppleTabItem(
+          icon: Icons.live_tv_outlined,
+          activeIcon: Icons.live_tv_rounded,
+          label: '直播',
+        ),
+      const AppleTabItem(
+        icon: Icons.bookmark_outline_rounded,
+        activeIcon: Icons.bookmark_rounded,
+        label: '媒体库',
+      ),
+      const AppleTabItem(
+        icon: Icons.settings_outlined,
+        activeIcon: Icons.settings_rounded,
+        label: '设置',
+      ),
     ];
 
     // 标签栏占据的垂直空间（含系统手势条）。
@@ -98,28 +140,7 @@ class AppShellState extends State<AppShell> {
                 child: AppleTabBar(
                   currentIndex: _index,
                   onChanged: goTo,
-                  items: const [
-                    AppleTabItem(
-                      icon: Icons.play_circle_outline_rounded,
-                      activeIcon: Icons.play_circle_rounded,
-                      label: '推荐',
-                    ),
-                    AppleTabItem(
-                      icon: Icons.explore_outlined,
-                      activeIcon: Icons.explore_rounded,
-                      label: '发现',
-                    ),
-                    AppleTabItem(
-                      icon: Icons.bookmark_outline_rounded,
-                      activeIcon: Icons.bookmark_rounded,
-                      label: '媒体库',
-                    ),
-                    AppleTabItem(
-                      icon: Icons.settings_outlined,
-                      activeIcon: Icons.settings_rounded,
-                      label: '设置',
-                    ),
-                  ],
+                  items: items,
                 ),
               ),
           ],

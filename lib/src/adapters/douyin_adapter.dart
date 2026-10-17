@@ -50,6 +50,7 @@ import '../core/http_client.dart';
 import '../core/logger.dart';
 import '../models/feed.dart';
 import '../models/interaction.dart';
+import '../models/live.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
 import 'douyin/web_signer.dart';
@@ -114,6 +115,47 @@ class DouyinAdapter implements PlatformAdapter {
 
   @override
   bool get supportsComments => true;
+
+  // ── 直播：不支持 ────────────────────────────────────────────
+  //
+  // 抖音直播的接口同样受 Argus 保护，且未找到可匿名访问的公开端点。
+  // 如实声明为不支持，UI 不会渲染直播入口。
+
+  @override
+  bool get supportsLive => false;
+
+  @override
+  Future<LiveRoomPage> fetchLiveRooms({
+    int page = 1,
+    int pageSize = 20,
+    int? parentAreaId,
+    int? areaId,
+  }) =>
+      throw _liveUnsupported('fetchLiveRooms');
+
+  @override
+  Future<LiveRoomInfo> fetchLiveRoomInfo(int roomId) =>
+      throw _liveUnsupported('fetchLiveRoomInfo');
+
+  @override
+  Future<LiveStream> resolveLiveStream(int roomId, {int? quality}) =>
+      throw _liveUnsupported('resolveLiveStream');
+
+  @override
+  Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) =>
+      throw _liveUnsupported('fetchLiveDanmakuEndpoint');
+
+  @override
+  Future<List<LiveArea>> fetchLiveAreas() async => const [];
+
+  FusionException _liveUnsupported(String method) => FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '抖音暂不支持直播。',
+        technicalMessage:
+            'douyin live unavailable: $method. Douyin live endpoints are '
+            'behind Argus and no anonymous public endpoint was found.',
+        platformId: id,
+      );
 
   @override
   bool get supportsLike => false;
@@ -318,6 +360,15 @@ class DouyinAdapter implements PlatformAdapter {
       isUpAuthor: raw['is_author'] == true,
       isPinned: false,
       floor: null,
+      // IP 属地。
+      //
+      // 实测（2026-10，未登录态，通过应用内 WebView 请求）：
+      // 抖音评论顶层字段 `ip_label` 直接就是地区名，
+      // 例如 "安徽" / "湖南" / "四川"，**不需要登录**。
+      //
+      // 注意不要用 `user.region` —— 那是账号注册国家（恒为 "CN"），
+      // 不是 IP 属地。
+      ipLocation: _nullableString(raw['ip_label'])?.trim(),
     );
   }
 

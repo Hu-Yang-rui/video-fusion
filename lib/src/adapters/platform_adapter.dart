@@ -11,6 +11,7 @@ import '../core/errors.dart';
 import '../core/http_client.dart';
 import '../models/feed.dart';
 import '../models/interaction.dart';
+import '../models/live.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
 
@@ -272,6 +273,70 @@ abstract class PlatformAdapter {
       platformId: id,
     );
   }
+
+  // ── 直播 ────────────────────────────────────────────────────
+  //
+  // 直播与普通视频是两套数据：房间有独立 ID、独立播放协议
+  // （FLV / HLS）、独立的消息通道。因此不塞进 fetchMetadata /
+  // resolvePlayback，而是单独一组方法，
+  // 避免普通视频路径被直播的时效签名污染。
+  //
+  // 这些是**类成员而非 extension**：extension 方法无法被子类覆盖，
+  // 通过 PlatformAdapter 类型调用时会命中默认实现而不是适配器实现。
+
+  /// 是否支持直播。
+  bool get supportsLive => false;
+
+  /// 拉取直播列表。
+  Future<LiveRoomPage> fetchLiveRooms({
+    int page = 1,
+    int pageSize = 20,
+    int? parentAreaId,
+    int? areaId,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持直播。',
+      technicalMessage: 'Adapter $id does not implement fetchLiveRooms',
+      platformId: id,
+    );
+  }
+
+  /// 拉取直播间详情。
+  Future<LiveRoomInfo> fetchLiveRoomInfo(int roomId) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持直播。',
+      technicalMessage: 'Adapter $id does not implement fetchLiveRoomInfo',
+      platformId: id,
+    );
+  }
+
+  /// 解析直播播放流。
+  ///
+  /// 返回的地址带时效签名，调用方**不得持久化**。
+  Future<LiveStream> resolveLiveStream(int roomId, {int? quality}) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持直播播放。',
+      technicalMessage: 'Adapter $id does not implement resolveLiveStream',
+      platformId: id,
+    );
+  }
+
+  /// 获取弹幕服务器连接参数。
+  Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持直播弹幕。',
+      technicalMessage:
+          'Adapter $id does not implement fetchLiveDanmakuEndpoint',
+      platformId: id,
+    );
+  }
+
+  /// 拉取直播分区（一级）。
+  Future<List<LiveArea>> fetchLiveAreas() async => const [];
 }
 
 /// 适配器能力声明。用于报告与 UI 如实展示"已实现 / 受限"。
@@ -321,6 +386,40 @@ class AdapterCapabilities {
         'maxQualityWithoutAuth': maxQualityWithoutAuth,
         'notes': notes,
       };
+}
+
+/// 直播分区。
+class LiveArea {
+  const LiveArea({
+    required this.id,
+    required this.name,
+    this.children = const [],
+  });
+
+  final int id;
+  final String name;
+
+  /// 二级分区。
+  final List<LiveArea> children;
+}
+
+/// 一页直播房间。
+class LiveRoomPage {
+  const LiveRoomPage({
+    required this.items,
+    required this.page,
+    required this.hasMore,
+    this.totalCount = 0,
+    this.notes = const [],
+  });
+
+  final List<LiveRoomSummary> items;
+  final int page;
+  final bool hasMore;
+  final int totalCount;
+  final List<String> notes;
+
+  bool get isEmpty => items.isEmpty;
 }
 
 /// 适配器构造上下文：注入共享依赖，避免适配器自行创建网络栈。
