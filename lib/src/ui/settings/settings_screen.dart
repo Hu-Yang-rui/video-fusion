@@ -1,0 +1,466 @@
+/// 设置页：账号与平台管理（Apple 风格分组列表）。
+///
+/// 内容：
+///  - 已连接平台账号（登录状态、重新授权、解绑）
+///  - 内容来源管理（哪些平台可提供内容）
+///  - 播放设置
+///  - 存储与隐私
+///  - 关于与能力说明
+///
+/// 安全约束：凭证永不进入 UI。这里只展示脱敏的账号名与登录时间。
+library;
+
+import 'package:flutter/material.dart';
+
+import '../../adapters/platform_adapter.dart';
+import '../../adapters/platform_registry.dart';
+import '../../core/credential_vault.dart';
+import '../../core/video_progress_store.dart';
+import '../../core/video_service.dart';
+import '../../core/qr_login.dart';
+import '../../design/apple_tokens.dart';
+import '../../design/components/apple_controls.dart';
+import '../../design/components/apple_layout.dart';
+import '../mobile/qr_login_page.dart';
+
+/// 设置页。
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({
+    super.key,
+    required this.service,
+    required this.registry,
+    required this.vault,
+    required this.progressStore,
+    this.onSessionChanged,
+  });
+
+  final VideoService service;
+  final PlatformRegistry registry;
+  final CredentialVault vault;
+  final VideoProgressStore progressStore;
+  final VoidCallback? onSessionChanged;
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  final Map<String, PlatformSession> _sessions = {};
+  bool _loadingSessions = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSessions();
+  }
+
+  Future<void> _loadSessions() async {
+    setState(() => _loadingSessions = true);
+    final loaded = <String, PlatformSession>{};
+    for (final adapter in widget.registry.adapters) {
+      try {
+        final s = await widget.vault
+            .load(adapter.id)
+            .timeout(const Duration(seconds: 5));
+        if (s != null) loaded[adapter.id] = s;
+      } catch (_) {
+        // 读取失败按未登录处理
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _sessions
+        ..clear()
+        ..addAll(loaded);
+      _loadingSessions = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+
+    return Scaffold(
+      backgroundColor: c.groupedBackground,
+      body: SafeArea(
+        bottom: false,
+        child: CustomScrollView(
+          slivers: [
+            SliverToBoxAdapter(
+              child: AppleLargeTitleHeader(
+                title: '设置',
+                subtitle: '账号、播放与隐私',
+              ),
+            ),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: EdgeInsets.only(
+                  bottom: MediaQuery.paddingOf(context).bottom +
+                      AppleSize.tabBar +
+                      AppleSpace.xxl,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildAccounts(c),
+                    const SizedBox(height: AppleSpace.lg),
+                    _buildPlatforms(c),
+                    const SizedBox(height: AppleSpace.lg),
+                    _buildPlayback(c),
+                    const SizedBox(height: AppleSpace.lg),
+                    _buildStorage(c),
+                    const SizedBox(height: AppleSpace.lg),
+                    _buildAbout(c),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── 账号 ────────────────────────────────────────────────────
+
+  Widget _buildAccounts(AppleColors c) {
+    final loginCapable = widget.registry.adapters
+        .whereType<QrLoginCapable>()
+        .toList();
+
+    if (loginCapable.isEmpty) {
+      return AppleGroupedSection(
+        header: '账号',
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(AppleSpace.lg),
+            child: Text(
+              '当前接入的平台都不支持应用内登录。',
+              style: AppleType.footnote.copyWith(color: c.secondaryLabel),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return AppleGroupedSection(
+      header: '账号',
+      footer: _sessions.isEmpty
+          ? '登录后可访问你自己账号可见的个性化内容。凭证加密存储在本机，不会上传到任何服务器。'
+          : '凭证使用系统安全存储加密保存（${widget.vault.storageName}），不会出现在日志或界面中。',
+      children: [
+        for (final adapter in loginCapable)
+          _buildAccountRow(c, adapter as PlatformAdapter),
+      ],
+    );
+  }
+
+  Widget _buildAccountRow(AppleColors c, PlatformAdapter adapter) {
+    final session = _sessions[adapter.id];
+    final connected = session != null;
+
+    return AppleListRow(
+      leading: Container(
+        width: 29,
+        height: 29,
+        decoration: BoxDecoration(
+          color: connected ? c.green : c.fill,
+          borderRadius: BorderRadius.circular(AppleRadius.xs),
+        ),
+        child: Icon(
+          connected ? Icons.check_rounded : Icons.person_outline_rounded,
+          size: 17,
+          color: connected ? Colors.white : c.secondaryLabel,
+        ),
+      ),
+      title: adapter.displayName,
+      subtitle: connected
+          ? '${session.displayName} · 已连接'
+          : (_loadingSessions ? '正在检查…' : '未连接'),
+      trailing: connected
+          ? AppleTextButton(
+              label: '解绑',
+              color: c.red,
+              onPressed: () => _disconnect(adapter),
+            )
+          : AppleTextButton(
+              label: '连接',
+              onPressed: () => _connect(adapter),
+            ),
+      onTap: connected ? null : () => _connect(adapter),
+    );
+  }
+
+  Future<void> _connect(PlatformAdapter adapter) async {
+    final login = adapter as QrLoginCapable;
+    final result = await Navigator.of(context).push<Object?>(
+      MaterialPageRoute<Object?>(
+        builder: (_) => QrLoginPage(
+          adapter: login,
+          vault: widget.vault,
+          platformName: adapter.displayName,
+        ),
+      ),
+    );
+
+    if (result != null) {
+      await _loadSessions();
+      widget.onSessionChanged?.call();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已连接 ${adapter.displayName}')),
+        );
+      }
+    }
+  }
+
+  Future<void> _disconnect(PlatformAdapter adapter) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('解绑 ${adapter.displayName}？'),
+        content: const Text('解绑后会清除本机保存的登录凭证，需要重新扫码才能再次连接。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              '解绑',
+              style: TextStyle(color: AppleColors.of(context).red),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    await widget.vault.clear(adapter.id);
+    await _loadSessions();
+    widget.onSessionChanged?.call();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已解绑 ${adapter.displayName}')),
+      );
+    }
+  }
+
+  // ── 平台能力 ────────────────────────────────────────────────
+
+  Widget _buildPlatforms(AppleColors c) {
+    return AppleGroupedSection(
+      header: '已接入平台',
+      footer: '能力标注依据实际验证结果。未验证的能力不会标注为可用。',
+      children: [
+        for (final adapter in widget.registry.adapters)
+          if (adapter.id != 'mock') _buildPlatformRow(c, adapter),
+      ],
+    );
+  }
+
+  Widget _buildPlatformRow(AppleColors c, PlatformAdapter adapter) {
+    final caps = adapter.capabilities;
+    final feedCount = adapter.feedSources.length;
+    final availableFeeds = adapter.feedSources.where((s) => s.available).length;
+
+    final tags = <String>[
+      if (caps.supportsNativePlayback) '应用内播放',
+      if (caps.supportsMetadata) '元数据',
+      if (adapter.supportsSearch) '搜索',
+      if (availableFeeds > 0) '内容 $availableFeeds/$feedCount',
+      if (feedCount > 0 && availableFeeds == 0) '推荐流不可用',
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.all(AppleSpace.lg),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                adapter.displayName,
+                style: AppleType.bodyEmphasized.copyWith(color: c.label),
+              ),
+              const SizedBox(width: AppleSpace.sm),
+              Text(
+                adapter.id,
+                style: AppleType.caption2.copyWith(color: c.tertiaryLabel),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppleSpace.xs + 2),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final t in tags)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 2.5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: c.fill,
+                    borderRadius: BorderRadius.circular(AppleRadius.xs - 1),
+                  ),
+                  child: Text(
+                    t,
+                    style: AppleType.caption2.copyWith(
+                      fontSize: 10.5,
+                      color: c.secondaryLabel,
+                      height: 1.2,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          if (caps.notes.isNotEmpty) ...[
+            const SizedBox(height: AppleSpace.sm),
+            for (final n in caps.notes)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  '· $n',
+                  style: AppleType.caption1.copyWith(
+                    color: c.secondaryLabel,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ── 播放 ────────────────────────────────────────────────────
+
+  Widget _buildPlayback(AppleColors c) {
+    return AppleGroupedSection(
+      header: '播放',
+      children: [
+        AppleListRow(
+          leadingIcon: Icons.hd_rounded,
+          leadingColor: c.orange,
+          title: '播放内核',
+          subtitle: '设备本地解码（libmpv），不经过网页容器',
+          trailingText: '原生',
+        ),
+        AppleListRow(
+          leadingIcon: Icons.wifi_rounded,
+          leadingColor: c.blue,
+          title: '移动网络下播放',
+          subtitle: '当前版本不区分网络类型',
+          trailingText: '始终允许',
+        ),
+      ],
+    );
+  }
+
+  // ── 存储与隐私 ──────────────────────────────────────────────
+
+  Widget _buildStorage(AppleColors c) {
+    return AppleGroupedSection(
+      header: '存储与隐私',
+      footer: '所有数据仅保存在本机。应用不会上传观看记录、账号凭证或任何个人数据。',
+      children: [
+        AppleListRow(
+          leadingIcon: Icons.lock_rounded,
+          leadingColor: c.green,
+          title: '凭证存储',
+          subtitle: widget.vault.isEncrypted ? '系统安全存储（加密）' : '普通存储（未加密）',
+          trailingText: widget.vault.isEncrypted ? '已加密' : '未加密',
+        ),
+        AppleListRow(
+          leadingIcon: Icons.delete_outline_rounded,
+          leadingColor: c.red,
+          title: '清除观看记录',
+          onTap: () => _clearProgress(),
+        ),
+        AppleListRow(
+          leadingIcon: Icons.logout_rounded,
+          leadingColor: c.red,
+          title: '清除全部登录凭证',
+          onTap: () => _clearAllSessions(),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _clearProgress() async {
+    final ok = await _confirm('清除观看记录？', '所有续播进度将被删除，此操作不可撤销。');
+    if (ok != true) return;
+    await widget.progressStore.clear();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('观看记录已清除')),
+      );
+    }
+  }
+
+  Future<void> _clearAllSessions() async {
+    final ok = await _confirm('清除全部登录凭证？', '所有平台的登录状态都将失效，需要重新扫码。');
+    if (ok != true) return;
+    await widget.vault.clearAll();
+    await _loadSessions();
+    widget.onSessionChanged?.call();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已清除全部凭证')),
+      );
+    }
+  }
+
+  Future<bool?> _confirm(String title, String message) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              '确定',
+              style: TextStyle(color: AppleColors.of(context).red),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── 关于 ────────────────────────────────────────────────────
+
+  Widget _buildAbout(AppleColors c) {
+    return AppleGroupedSection(
+      header: '关于',
+      footer: '本应用不是视频解析工具。内容来自各平台公开接口与用户自身账号授权范围，'
+          '不绕过任何访问控制，不下载受保护内容。',
+      children: [
+        AppleListRow(
+          leadingIcon: Icons.info_outline_rounded,
+          leadingColor: c.gray,
+          title: '视频融合',
+          subtitle: '多平台视频聚合 · Apple 风格设计',
+          trailingText: '1.0.0',
+        ),
+        AppleListRow(
+          leadingIcon: Icons.verified_user_outlined,
+          leadingColor: c.blue,
+          title: '内容来源',
+          subtitle: '各平台公开接口 + 用户授权账号',
+        ),
+      ],
+    );
+  }
+}

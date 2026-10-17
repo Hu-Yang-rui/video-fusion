@@ -1,0 +1,332 @@
+/// 平台适配器契约。
+///
+/// 每个平台独立实现一个 [PlatformAdapter]。主界面与 UI 层
+/// **不得**直接编写针对某个平台的请求逻辑或平台判断分支。
+///
+/// 新增平台 = 新增一个适配器实现 + 在注册表注册一行。
+library;
+
+import '../core/credential_vault.dart';
+import '../core/errors.dart';
+import '../core/http_client.dart';
+import '../models/feed.dart';
+import '../models/interaction.dart';
+import '../models/playback.dart';
+import '../models/unified_video.dart';
+
+/// 链接识别结果。
+class LinkMatch {
+  const LinkMatch({
+    required this.platformId,
+    required this.platformVideoId,
+    required this.canonicalUrl,
+    this.notes = const [],
+  });
+
+  /// 平台标识。
+  final String platformId;
+
+  /// 平台原始视频 ID。
+  final String platformVideoId;
+
+  /// 规范化后的平台视频页链接。
+  final String canonicalUrl;
+
+  /// 识别过程中的诊断说明（已脱敏）。
+  final List<String> notes;
+
+  Map<String, Object?> toJson() => {
+        'platformId': platformId,
+        'platformVideoId': platformVideoId,
+        'canonicalUrl': canonicalUrl,
+        'notes': notes,
+      };
+}
+
+/// 平台元数据获取结果。
+///
+/// 适配器返回该结构，由 [VideoService] 统一包装为 [UnifiedVideo]。
+/// 适配器不直接构造 [UnifiedVideo]，以保证 ID 生成、时间戳与
+/// 诊断字段的一致性由核心层统一负责。
+class VideoMetadata {
+  const VideoMetadata({
+    required this.title,
+    this.description,
+    this.author = VideoAuthor.empty,
+    this.coverUrl,
+    this.durationSeconds,
+    this.width,
+    this.height,
+    this.publishedAt,
+    this.stats = VideoStats.empty,
+    this.availability = VideoAvailability.available,
+    this.requiresAuth = false,
+    this.limitations = const [],
+    this.notes = const [],
+    this.upstreamEndpoint = '',
+  });
+
+  final String title;
+  final String? description;
+  final VideoAuthor author;
+  final String? coverUrl;
+  final double? durationSeconds;
+  final int? width;
+  final int? height;
+  final String? publishedAt;
+  final VideoStats stats;
+  final VideoAvailability availability;
+  final bool requiresAuth;
+
+  /// 该平台在当前环境下的固有限制（会进入 UnifiedVideo.diagnostics.limitations）。
+  final List<String> limitations;
+
+  /// 本次获取的可诊断信息。
+  final List<String> notes;
+
+  /// 实际使用的上游接口标识。
+  final String upstreamEndpoint;
+}
+
+/// 播放源解析请求。
+class PlaybackRequest {
+  const PlaybackRequest({
+    required this.platformVideoId,
+    required this.canonicalUrl,
+    this.preferredMode,
+    this.preferQuality,
+  });
+
+  final String platformVideoId;
+  final String canonicalUrl;
+
+  /// 用户期望的播放模式；为 null 表示由策略层决定。
+  final PlaybackMode? preferredMode;
+
+  /// 期望的清晰度码值（平台相关），仅作为偏好提示。
+  final int? preferQuality;
+}
+
+/// 平台适配器接口。
+abstract class PlatformAdapter {
+  /// 平台稳定标识，例如 'bilibili'。
+  String get id;
+
+  /// 平台展示名，例如 '哔哩哔哩'。
+  String get displayName;
+
+  /// 平台来源标识的短标签，用于列表角标（例如 'B站'）。
+  String get shortLabel;
+
+  /// 该适配器实现的能力声明，用于报告与 UI 如实展示。
+  AdapterCapabilities get capabilities;
+
+  /// 该平台可识别的域名（小写，不含协议）。
+  List<String> get supportedHosts;
+
+  /// 判断链接是否属于本平台。必须只依据域名/路径结构，不得猜测。
+  bool matches(Uri uri);
+
+  /// 从链接中提取平台视频 ID 与规范链接。
+  ///
+  /// 无法提取时返回 null（由上层映射为 videoIdNotFound）。
+  /// 允许在此发起网络请求（例如展开短链）。
+  Future<LinkMatch?> extract(Uri uri);
+
+  /// 获取视频元数据。
+  Future<VideoMetadata> fetchMetadata(LinkMatch match);
+
+  /// 解析播放源。返回 null 表示该模式当前不可用，
+  /// 由播放策略层继续尝试下一优先级模式。
+  Future<PlaybackSource?> resolvePlayback(PlaybackRequest request);
+
+  /// 该适配器提供的推荐流来源列表。
+  ///
+  /// 返回空列表表示该平台不提供推荐流（例如仅支持链接接入的平台）。
+  /// 主界面据此渲染"内容来源"切换，不在 UI 层硬编码任何平台判断。
+  List<FeedSource> get feedSources => const [];
+
+  /// 拉取一页推荐流。
+  ///
+  /// [sourceId] 来自 [feedSources] 中的 [FeedSource.id]。
+  /// 未声明该来源时必须抛 [FusionException]（unsupportedPlatform），
+  /// 不得静默返回空列表——那会让"不可用"伪装成"没有内容"。
+  Future<FeedPage> fetchFeed(FeedRequest request, {required String sourceId}) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台未提供推荐流。',
+      technicalMessage: 'Adapter $id does not implement fetchFeed (source=$sourceId)',
+      platformId: id,
+    );
+  }
+
+  /// 该平台是否支持搜索。
+  ///
+  /// 默认 false。只有真正实现并验证过搜索接口的适配器才返回 true，
+  /// 避免 UI 展示一个点了必然失败的搜索入口。
+  bool get supportsSearch => false;
+
+  /// 搜索视频。
+  ///
+  /// [page] 从 1 开始（与多数平台语义一致）。
+  /// 不支持搜索时必须抛 [FusionException]，不得返回空列表。
+  Future<FeedPage> searchVideos(
+    String query, {
+    int page = 1,
+    int pageSize = 20,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持搜索。',
+      technicalMessage: 'Adapter $id does not implement searchVideos',
+      platformId: id,
+    );
+  }
+
+  // ── 互动能力 ────────────────────────────────────────────────
+
+  /// 是否支持读取评论列表。
+  bool get supportsComments => false;
+
+  /// 是否支持点赞（写操作，需要登录）。
+  bool get supportsLike => false;
+
+  /// 是否支持投币。
+  bool get supportsCoin => false;
+
+  /// 是否支持收藏。
+  bool get supportsFavorite => false;
+
+  /// 拉取评论列表。
+  ///
+  /// 多数平台评论读取是公开的；[session] 为 null 时按匿名访问。
+  Future<CommentPage> fetchComments(
+    String platformVideoId, {
+    int page = 1,
+    int pageSize = 20,
+    PlatformSession? session,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持评论。',
+      technicalMessage: 'Adapter $id does not implement fetchComments',
+      platformId: id,
+    );
+  }
+
+  /// 查询当前用户对该视频的互动状态。
+  ///
+  /// 未登录时返回 [InteractionState.unknown]，
+  /// **不得**伪造"未点赞"——那会让用户以为操作被重置了。
+  Future<InteractionState> fetchInteractionState(
+    String platformVideoId, {
+    PlatformSession? session,
+    int? aid,
+  }) async =>
+      InteractionState.unknown;
+
+  /// 点赞 / 取消点赞。
+  ///
+  /// 未登录时必须抛 `loginRequired`，不得静默失败。
+  Future<InteractionResult> setLike(
+    String platformVideoId, {
+    required bool like,
+    required PlatformSession session,
+    int? aid,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持点赞。',
+      technicalMessage: 'Adapter $id does not implement setLike',
+      platformId: id,
+    );
+  }
+
+  /// 投币。[count] 为 1 或 2。
+  Future<InteractionResult> setCoin(
+    String platformVideoId, {
+    required int count,
+    required PlatformSession session,
+    bool alsoLike = false,
+    int? aid,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持投币。',
+      technicalMessage: 'Adapter $id does not implement setCoin',
+      platformId: id,
+    );
+  }
+
+  /// 收藏 / 取消收藏。
+  Future<InteractionResult> setFavorite(
+    String platformVideoId, {
+    required bool favorite,
+    required PlatformSession session,
+    int? aid,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持收藏。',
+      technicalMessage: 'Adapter $id does not implement setFavorite',
+      platformId: id,
+    );
+  }
+}
+
+/// 适配器能力声明。用于报告与 UI 如实展示"已实现 / 受限"。
+class AdapterCapabilities {
+  const AdapterCapabilities({
+    required this.supportsMetadata,
+    required this.supportsNativePlayback,
+    required this.supportsOfficialEmbed,
+    required this.supportsExternalFallback,
+    this.requiresAuthForMetadata = false,
+    this.requiresSignature = false,
+    this.maxQualityWithoutAuth,
+    this.notes = const [],
+  });
+
+  /// 是否支持元数据获取。
+  final bool supportsMetadata;
+
+  /// 是否支持应用内播放（NATIVE）。
+  final bool supportsNativePlayback;
+
+  /// 是否支持官方嵌入播放（OFFICIAL_EMBED）。
+  final bool supportsOfficialEmbed;
+
+  /// 是否支持跳转原平台（EXTERNAL）。几乎总是 true。
+  final bool supportsExternalFallback;
+
+  /// 元数据获取是否需要登录。
+  final bool requiresAuthForMetadata;
+
+  /// 是否需要平台安全签名（如抖音 a_bogus）。
+  final bool requiresSignature;
+
+  /// 未登录时可获得的最高清晰度标签。
+  final String? maxQualityWithoutAuth;
+
+  /// 能力说明（会写入报告）。
+  final List<String> notes;
+
+  Map<String, Object?> toJson() => {
+        'supportsMetadata': supportsMetadata,
+        'supportsNativePlayback': supportsNativePlayback,
+        'supportsOfficialEmbed': supportsOfficialEmbed,
+        'supportsExternalFallback': supportsExternalFallback,
+        'requiresAuthForMetadata': requiresAuthForMetadata,
+        'requiresSignature': requiresSignature,
+        'maxQualityWithoutAuth': maxQualityWithoutAuth,
+        'notes': notes,
+      };
+}
+
+/// 适配器构造上下文：注入共享依赖，避免适配器自行创建网络栈。
+class AdapterContext {
+  const AdapterContext({required this.http, required this.logger});
+
+  final FusionHttpClient http;
+  final Object logger;
+}
