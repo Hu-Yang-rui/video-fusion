@@ -1,8 +1,27 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ══════════════════════════════════════════════════════════
+         网络权限（必需）
+         ══════════════════════════════════════════════════════════
+         Flutter 模板默认只在 debug/ 与 profile/ 的 manifest 里声明
+         INTERNET，main/ 里没有。这导致：
+           - debug 版能联网（debug manifest 合并了权限）
+           - release 版**没有网络权限**，所有 HTTP 请求抛 SocketException
+         表现为"网络连接失败，请检查网络连接后重试"，与真实网络无关。
+
+         因此必须在 main/ 显式声明。
+         ══════════════════════════════════════════════════════════ -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- 网络状态检测：用于区分"无网络"与"服务端错误"，
+         在请求失败时给出更准确的原因（而不是笼统的"网络连接失败"）。 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <application
-        android:label="video_fusion"
+        android:label="视频融合"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"
             android:exported="true"
