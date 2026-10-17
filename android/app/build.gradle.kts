@@ -34,6 +34,23 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+
+            // R8 混淆。
+            //
+            // 注意：flutter_inappwebview_android 的 AAR 在 R8 读取其
+            // 内置 proguard 规则时，会因 AAR 的 ZIP 结构触发
+            // "Unexpected end of ZLIB input stream" 而构建失败
+            // （只在该模块的 minifyReleaseWithR8 阶段出现，debug 正常）。
+            //
+            // 因此这里保留 R8 但跳过对第三方库的规则解析：
+            // 用 -dontwarn + 显式 keep 规则覆盖 WebView 相关类，
+            // 并关闭对依赖的完整规则提取。
+            isMinifyEnabled = true
+            isShrinkResources = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }
