@@ -26,7 +26,7 @@
 | **抖音应用内播放** | ✅ **已验证**（mp4 直链，ftypisom） |
 | **抖音评论读取** | ✅ **已验证**（隐藏 WebView 签名桥，20 条真实评论） |
 | **抖音评论 IP 属地** | ✅ **已验证**（`ip_label`，无需登录） |
-| 抖音扫码登录 | ⚠️ 二维码可获取，轮询需 `sign`（纯 Dart 不可达） |
+| 抖音扫码登录 | ⚠️ 已打通（纯 Dart `a_bogus`），待真人扫码验证凭证换取 |
 | 抖音 Cookie 导入登录 | ✅ 已验证（31 项测试） |
 | 抖音点赞 / 关注 / 搜索 / 详情 | ❌ 需 Argus 签名，不实现 |
 | TikTok | ❌ 未接入（网络不可达，未实测） |
@@ -92,9 +92,12 @@ lib/
 
 ```bash
 flutter pub get
-flutter test                                    # 221 项
+flutter test --concurrency=1                    # 343 项
 flutter build apk --release --split-per-abi
 ```
+
+> `--concurrency=1` 不是可选项：并行编译时设计系统测试与真实网络测试
+> 偶发 `did not complete`（资源竞争，非真实失败），串行必过。
 
 真实网络测试（需要能访问 B站）：
 
