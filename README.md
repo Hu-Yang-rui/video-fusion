@@ -33,8 +33,10 @@
 
 > 能力标注依据实测结果。未验证的能力不会标注为可用。
 >
-> 抖音的能力边界来自对官方 APK 40.7.0 的静态分析，
-> 详见 [docs/06-抖音APK逆向分析报告.md](docs/06-抖音APK逆向分析报告.md)。
+> 抖音的能力边界来自对官方 APK 40.7.0 的静态分析；
+> 全部实测过程、接口结论与能力边界记录在
+> [video-fusion-prompts](https://github.com/Hu-Yang-rui/video-fusion-prompts)
+> 仓库的 `HANDOVER.md`（交接文档，含每轮穷举证据与复现脚本）。
 
 ---
 
