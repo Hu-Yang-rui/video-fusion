@@ -6,6 +6,15 @@
 ///  3. 用户在手机客户端扫码 → APP 轮询状态 → 实时更新提示
 ///  4. 确认成功 → 保存会话 → 返回
 ///
+/// # 设计体系
+///
+/// 本页使用项目统一的 **Apple 设计系统**（`AppleColors` / `AppleType` /
+/// `AppleSpace` / `AppleRadius`），与设置页、详情页、评论面板一致。
+///
+/// 历史说明：这里原本用的是另一套 `MobileTokens` / `MobileText` 令牌，
+/// 导致从设置页点「连接」后界面风格突变（配色、字号、圆角全部不同）。
+/// 现已统一，旧令牌只保留给仍在引用的旧组件。
+///
 /// 为什么不用 WebView：产品要求"APP 内做一个 UI，不能使用 web"。
 /// 二维码的原始内容只是一个 URL 字符串，本地渲染即可，
 /// 完全不需要加载任何网页。
@@ -19,8 +28,9 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
 import '../../core/qr_login.dart';
-import 'mobile_theme.dart';
-import 'mobile_widgets.dart';
+import '../../design/apple_tokens.dart';
+import '../../design/components/apple_controls.dart';
+import '../../design/components/apple_layout.dart';
 
 /// 登录页。传入一个实现了 [QrLoginCapable] 的适配器。
 class QrLoginPage extends StatefulWidget {
@@ -162,75 +172,100 @@ class _QrLoginPageState extends State<QrLoginPage> {
 
   @override
   Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+
     return Scaffold(
-      backgroundColor: MobileTokens.lightCanvas,
-      appBar: AppBar(
-        backgroundColor: MobileTokens.lightCanvas,
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        leading: IconButton(
-          onPressed: () => Navigator.of(context).maybePop(),
-          icon: const Icon(Icons.arrow_back_rounded,
-              size: 22, color: MobileTokens.ink),
-        ),
-        title: Text(
-          '登录${widget.platformName}',
-          style: MobileText.listTitle,
-        ),
-      ),
+      backgroundColor: c.groupedBackground,
       body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(MobileTokens.s5),
-          child: Column(
-            children: [
-              const SizedBox(height: MobileTokens.s4),
-              Text(
-                '扫码登录',
-                style: MobileText.pageTitle,
+        child: Column(
+          children: [
+            // 顶栏：返回 + 标题
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppleSpace.sm,
+                vertical: AppleSpace.sm,
               ),
-              const SizedBox(height: MobileTokens.s2),
-              Text(
-                '使用${widget.platformName}手机客户端扫码，'
-                '在手机上确认即可完成登录。',
-                style: MobileText.body,
-                textAlign: TextAlign.center,
+              child: Row(
+                children: [
+                  AppleIconButton(
+                    icon: Icons.arrow_back_ios_new_rounded,
+                    onPressed: () => Navigator.of(context).maybePop(),
+                  ),
+                  Expanded(
+                    child: Text(
+                      '登录${widget.platformName}',
+                      textAlign: TextAlign.center,
+                      style: AppleType.headline.copyWith(color: c.label),
+                    ),
+                  ),
+                  // 占位，保持标题居中
+                  const SizedBox(width: AppleSize.minTapTarget),
+                ],
               ),
-              const SizedBox(height: MobileTokens.s6),
-              _buildQrArea(),
-              const SizedBox(height: MobileTokens.s5),
-              _buildStatus(),
-              const SizedBox(height: MobileTokens.s6),
-              _buildSecurityNotice(),
-            ],
-          ),
+            ),
+
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(
+                  AppleSpace.xl,
+                  AppleSpace.lg,
+                  AppleSpace.xl,
+                  AppleSpace.xl,
+                ),
+                child: Column(
+                  children: [
+                    Text(
+                      '使用${widget.platformName}手机客户端扫码',
+                      textAlign: TextAlign.center,
+                      style: AppleType.subheadline.copyWith(
+                        color: c.secondaryLabel,
+                        height: 1.45,
+                      ),
+                    ),
+                    const SizedBox(height: AppleSpace.xl),
+
+                    _buildQrArea(c),
+                    const SizedBox(height: AppleSpace.lg),
+
+                    _buildStatus(c),
+                    const SizedBox(height: AppleSpace.xl),
+
+                    _buildSecurityNotice(c),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildQrArea() {
+  Widget _buildQrArea(AppleColors c) {
     final challenge = _challenge;
 
     return Container(
       width: 236,
       height: 236,
       decoration: BoxDecoration(
+        // 二维码必须白底黑码才能被扫描器识别，
+        // 因此这里固定白色，不随主题变化。
         color: Colors.white,
-        borderRadius: BorderRadius.circular(MobileTokens.rCard),
+        borderRadius: BorderRadius.circular(AppleRadius.lg),
       ),
       alignment: Alignment.center,
       child: _requesting
           ? const SizedBox(
-              width: 28,
-              height: 28,
-              child: CircularProgressIndicator(
-                strokeWidth: 2.4,
-                color: MobileTokens.accent,
-              ),
+              width: 26,
+              height: 26,
+              child: CircularProgressIndicator(strokeWidth: 2.2),
             )
           : challenge == null
-              ? const Icon(Icons.qr_code_2_rounded,
-                  size: 64, color: Color(0xFFBDBDBD))
+              ? Icon(
+                  Icons.qr_code_2_rounded,
+                  size: 64,
+                  color: c.tertiaryLabel,
+                )
               : Stack(
                   alignment: Alignment.center,
                   children: [
@@ -249,7 +284,7 @@ class _QrLoginPageState extends State<QrLoginPage> {
                         color: Color(0xFF101012),
                       ),
                     ),
-                    if (_isExpiredOrDone) _buildQrOverlay(),
+                    if (_isExpiredOrDone) _buildQrOverlay(c),
                   ],
                 ),
     );
@@ -260,34 +295,32 @@ class _QrLoginPageState extends State<QrLoginPage> {
     return phase == QrLoginPhase.expired || phase == QrLoginPhase.succeeded;
   }
 
-  Widget _buildQrOverlay() {
+  Widget _buildQrOverlay(AppleColors c) {
     final succeeded = _lastPoll?.phase == QrLoginPhase.succeeded;
     return Container(
       width: 208,
       height: 208,
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.94),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(AppleRadius.md),
       ),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(
             succeeded ? Icons.check_circle_rounded : Icons.refresh_rounded,
-            size: 36,
-            color: succeeded ? MobileTokens.positive : MobileTokens.inkTertiary,
+            size: 34,
+            color: succeeded ? c.green : c.tertiaryLabel,
           ),
-          const SizedBox(height: MobileTokens.s3),
+          const SizedBox(height: AppleSpace.md),
           Text(
             succeeded ? '登录成功' : '二维码已过期',
-            style: const TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              color: Color(0xFF101012),
+            style: AppleType.footnoteEmphasized.copyWith(
+              color: const Color(0xFF101012),
             ),
           ),
           if (!succeeded) ...[
-            const SizedBox(height: MobileTokens.s3),
+            const SizedBox(height: AppleSpace.sm),
             TextButton(
               onPressed: _requestQr,
               child: const Text('点击刷新'),
@@ -298,16 +331,12 @@ class _QrLoginPageState extends State<QrLoginPage> {
     );
   }
 
-  Widget _buildStatus() {
+  Widget _buildStatus(AppleColors c) {
     if (_error != null) {
-      return Column(
-        children: [
-          MobileErrorCard(
-            title: _error!.presentation.title,
-            detail: _error!.userMessage,
-            onRetry: _error!.retryable ? _requestQr : null,
-          ),
-        ],
+      return AppleErrorState(
+        title: _error!.presentation.title,
+        message: _error!.userMessage,
+        onRetry: _error!.retryable ? _requestQr : null,
       );
     }
 
@@ -317,74 +346,69 @@ class _QrLoginPageState extends State<QrLoginPage> {
     final (icon, color) = switch (poll.phase) {
       QrLoginPhase.waitingForScan => (
           Icons.qr_code_scanner_rounded,
-          MobileTokens.inkTertiary
+          c.tertiaryLabel,
         ),
       QrLoginPhase.waitingForConfirm => (
           Icons.phone_iphone_rounded,
-          MobileTokens.accent
+          c.blue,
         ),
-      QrLoginPhase.succeeded => (
-          Icons.check_circle_rounded,
-          MobileTokens.positive
-        ),
-      QrLoginPhase.expired => (Icons.timer_off_rounded, MobileTokens.caution),
-      _ => (Icons.info_outline_rounded, MobileTokens.inkTertiary),
+      QrLoginPhase.succeeded => (Icons.check_circle_rounded, c.green),
+      QrLoginPhase.expired => (Icons.timer_off_rounded, c.orange),
+      _ => (Icons.info_outline_rounded, c.tertiaryLabel),
     };
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         Icon(icon, size: 16, color: color),
-        const SizedBox(width: MobileTokens.s2),
+        const SizedBox(width: AppleSpace.sm),
         Flexible(
           child: Text(
             poll.message ?? '',
-            style: MobileText.body.copyWith(color: color),
             textAlign: TextAlign.center,
+            style: AppleType.footnote.copyWith(color: color, height: 1.4),
           ),
         ),
       ],
     );
   }
 
-  Widget _buildSecurityNotice() {
-    return Container(
-      padding: const EdgeInsets.all(MobileTokens.s4),
-      decoration: BoxDecoration(
-        color: MobileTokens.lightSurface,
-        borderRadius: BorderRadius.circular(MobileTokens.rCard),
-        border: Border.all(color: MobileTokens.lightBorder),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+  /// 账号安全说明。
+  ///
+  /// 放在页面底部而不是顶部：用户是来登录的，不是来读条款的；
+  /// 但登录涉及凭证，必须让用户能随时看到这些承诺。
+  Widget _buildSecurityNotice(AppleColors c) {
+    return AppleGroupedSection(
+      header: '关于你的账号安全',
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppleSpace.lg,
+            AppleSpace.md,
+            AppleSpace.lg,
+            AppleSpace.md,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(Icons.shield_outlined,
-                  size: 15, color: MobileTokens.accent),
-              const SizedBox(width: MobileTokens.s2),
-              Text(
-                '关于你的账号安全',
-                style: MobileText.label.copyWith(
-                  color: MobileTokens.ink,
-                  fontWeight: FontWeight.w600,
-                ),
+              _notice(c, '本应用不索取、不接触你的账号密码。'),
+              _notice(c, '登录由平台官方完成，本应用只接收平台下发的会话凭证。'),
+              _notice(
+                c,
+                '凭证使用系统安全存储加密保存'
+                '（Android Keystore / Windows 凭据管理器）。',
               ),
+              _notice(c, '凭证不会写入任何日志，也不会发送到该平台以外的服务器。'),
+              _notice(c, '你可随时在设置页解绑，解绑即彻底删除本地凭证。'),
             ],
           ),
-          const SizedBox(height: MobileTokens.s3),
-          _notice('本应用不索取、不接触你的账号密码。'),
-          _notice('登录由平台官方完成，本应用只接收平台下发的会话凭证。'),
-          _notice('凭证使用系统安全存储加密保存（Android Keystore / Windows 凭据管理器）。'),
-          _notice('凭证不会写入任何日志，也不会发送到除该平台以外的任何服务器。'),
-          _notice('你可随时在本页退出登录，退出即彻底删除本地凭证。'),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
-  Widget _notice(String text) => Padding(
-        padding: const EdgeInsets.only(bottom: MobileTokens.s2),
+  Widget _notice(AppleColors c, String text) => Padding(
+        padding: const EdgeInsets.only(bottom: AppleSpace.sm),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -393,17 +417,20 @@ class _QrLoginPageState extends State<QrLoginPage> {
               child: Container(
                 width: 3.5,
                 height: 3.5,
-                decoration: const BoxDecoration(
-                  color: MobileTokens.accent,
+                decoration: BoxDecoration(
+                  color: c.tertiaryLabel,
                   shape: BoxShape.circle,
                 ),
               ),
             ),
-            const SizedBox(width: MobileTokens.s2),
+            const SizedBox(width: AppleSpace.sm),
             Expanded(
               child: Text(
                 text,
-                style: MobileText.caption.copyWith(height: 1.55),
+                style: AppleType.caption1.copyWith(
+                  color: c.secondaryLabel,
+                  height: 1.55,
+                ),
               ),
             ),
           ],

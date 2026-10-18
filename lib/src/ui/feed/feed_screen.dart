@@ -395,7 +395,6 @@ class _FeedStage extends StatelessWidget {
   final VoidCallback? onOpenDetail;
   final VoidCallback onTap;
 
-  bool get _isLong => (video.durationSeconds ?? 0) >= 600;
 
   @override
   Widget build(BuildContext context) {
@@ -472,7 +471,6 @@ class _FeedStage extends StatelessWidget {
             bottom: MediaQuery.paddingOf(context).bottom + 28,
             child: _VideoInfoPanel(
               video: video,
-              isLong: _isLong,
               onOpenDetail: onOpenDetail,
             ),
           ),
@@ -690,12 +688,10 @@ class _GlassIconButton extends StatelessWidget {
 class _VideoInfoPanel extends StatelessWidget {
   const _VideoInfoPanel({
     required this.video,
-    required this.isLong,
     this.onOpenDetail,
   });
 
   final UnifiedVideo video;
-  final bool isLong;
   final VoidCallback? onOpenDetail;
 
   @override
@@ -724,7 +720,17 @@ class _VideoInfoPanel extends StatelessWidget {
                 ),
               ),
             ),
-            if (isLong && onOpenDetail != null) ...[
+            // 详情入口对所有视频开放。
+            //
+            // 之前这里是 `isLong && onOpenDetail != null`，
+            // 只有时长 >= 10 分钟的视频才有入口，
+            // 其余视频**完全无法进入详情页**——看不到简介、
+            // 评论和技术信息。短视频流里的内容绝大多数不足 10 分钟，
+            // 等于详情页对用户不可达。
+            //
+            // 现在无条件显示：这个胶囊足够轻量（11px 文字 + 箭头），
+            // 不会干扰画面，但保证每个视频都能进详情。
+            if (onOpenDetail != null) ...[
               const SizedBox(width: AppleSpace.sm),
               GestureDetector(
                 onTap: onOpenDetail,

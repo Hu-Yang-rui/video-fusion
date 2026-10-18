@@ -42,7 +42,7 @@ import 'src/ui/library/library_screen.dart';
 import 'src/ui/live/live_screen.dart';
 import 'src/ui/mobile/feed_controller.dart';
 import 'src/ui/mobile/link_intake_sheet.dart';
-import 'src/ui/mobile/mobile_widgets.dart' show openInBrowser;
+import 'src/core/external_link.dart' show openInBrowser;
 import 'src/ui/settings/settings_screen.dart';
 import 'src/ui/shell/app_shell.dart';
 
