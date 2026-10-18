@@ -261,16 +261,39 @@ class LiveDanmakuEndpoint {
     required this.hostList,
     required this.roomId,
     required this.uid,
+    this.protocol = LiveDanmakuProtocol.bilibili,
+    this.roomKey,
   });
 
   /// 鉴权 token。
+  ///
+  /// B站：`getDanmuInfo` 下发的 key，未登录拿不到（-352）。
+  /// 抖音：**完整 wss URL**（已含 signature），见 [protocol]。
   final String token;
 
   /// 可连接的弹幕服务器地址（wss）。
+  ///
+  /// B站：`broadcastlv.chat.bilibili.com` 等，需自己拼 `/sub`。
+  /// 抖音：为空，完整地址在 [token] 里。
   final List<String> hostList;
 
   final int roomId;
 
   /// 当前用户 UID（未登录为 0）。
   final int uid;
+
+  /// 弹幕协议类型。两种平台的帧格式完全不同。
+  final LiveDanmakuProtocol protocol;
+
+  /// 跨平台房间标识（抖音是 19 位字符串）。
+  final String? roomKey;
+}
+
+/// 弹幕协议类型。
+enum LiveDanmakuProtocol {
+  /// B站：自定义 16 字节头 + JSON/zlib body。
+  bilibili,
+
+  /// 抖音：`PushFrame` protobuf + gzip。
+  douyin,
 }
