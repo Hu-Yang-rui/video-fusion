@@ -30,6 +30,7 @@ library;
 
 import '../core/errors.dart';
 import '../core/credential_vault.dart';
+import 'bilibili/wbi_signer.dart';
 import '../core/http_client.dart';
 import '../core/logger.dart';
 import '../core/qr_login.dart';
@@ -55,6 +56,11 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
   ///
   /// 用于验证"登录后平台是否开始下发 location"——见 [_replyToComment]。
   static bool _loggedReplyControlKeys = false;
+
+  /// wbi 签名器（懒加载，key 缓存 11h50m）。
+  ///
+  /// 直播弹幕的 `getDanmuInfo` 需要它；不带签名会返回 -352。
+  late final WbiSigner _wbi = WbiSigner(http: _http, logger: _logger);
 
   /// 当前这次评论请求是否带了登录态。
   ///
@@ -1737,18 +1743,52 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     return resolveLiveStream(numeric, quality: quality);
   }
 
+  /// 获取弹幕服务器连接参数。
+  ///
+  /// # 必须带 wbi 签名（v1.11.0 修正）
+  ///
+  /// 这个接口**需要 wbi 签名**，不带会返回 `code = -352`。
+  ///
+  /// 本项目此前把 -352 误判为"需要登录"，实测证明不是：
+  /// 加上 wbi 签名后 `code = 0`，**匿名即可拿到 token 与 host_list**。
+  ///
+  /// 参考实现：xfgryujk/blivedm 的 `clients/web.py`
+  /// （`add_wbi_sign({'id': room_id, 'type': 0})`），
+  /// 其代码注释也明确写着 `code == -352` 是 "wbi签名错误"。
+  ///
+  /// 拿到 token 后用它做弹幕协议认证包（op=7）的 `key` 字段，
+  /// 服务端返回 `{"code":0}` 即认证成功，随后推 op=5 业务包。
   @override
   Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) async {
-    final result = await _http.get(
-      '$_liveApiBase/xlive/web-room/v1/index/getDanmuInfo?id=$roomId&type=0',
+    // 先签一次；若服务端仍返回 -352，说明 key 过期，刷新后重试一次。
+    var signedQuery = await _wbi.sign({'id': roomId, 'type': 0});
+    var result = await _http.get(
+      '$_liveApiBase/xlive/web-room/v1/index/getDanmuInfo?$signedQuery',
       headers: const {
         'Referer': _liveReferer,
         'Accept': 'application/json',
       },
       platformId: id,
+      acceptStatuses: const {200},
     );
+    var json = result.jsonObject(platformId: id);
 
-    final json = result.jsonObject(platformId: id);
+    if ((json['code'] as num?)?.toInt() == -352) {
+      _logger.info('danmaku: -352, refreshing wbi key and retrying');
+      _wbi.invalidate();
+      signedQuery = await _wbi.sign({'id': roomId, 'type': 0});
+      result = await _http.get(
+        '$_liveApiBase/xlive/web-room/v1/index/getDanmuInfo?$signedQuery',
+        headers: const {
+          'Referer': _liveReferer,
+          'Accept': 'application/json',
+        },
+        platformId: id,
+        acceptStatuses: const {200},
+      );
+      json = result.jsonObject(platformId: id);
+    }
+
     _assertApiOk(json, endpoint: '/xlive/web-room/v1/index/getDanmuInfo');
 
     final data = json['data'];

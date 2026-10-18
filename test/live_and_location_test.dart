@@ -204,36 +204,27 @@ void main() {
   });
 
   group('B 站弹幕连接参数（真实网络）', () {
-    test('未登录时弹幕接口返回风控错误，如实抛出而非伪造', () async {
-      // 实测（2026-10，未登录）：getDanmuInfo 返回 code=-352（风控）。
-      // 该接口需要登录态 Cookie 才能换取 token。
+    test('弹幕接口带 wbi 签名后可匿名拿到 token', () async {
+      // v1.11.0 修正：此前这里断言"未登录返回 -352 风控"，
+      // 并据此判定"该接口需要登录态 Cookie"。
       //
-      // 这里断言两种可接受结果：
-      //  1. 拿到 token（若平台放开或已登录）
-      //  2. 明确抛 FusionException（当前实际情况）
-      // 不允许的是：返回空 token 却假装成功。
+      // **那个结论是错的。** -352 的真实原因是**缺 wbi 签名**。
+      // 参考 xfgryujk/blivedm 的 add_wbi_sign({'id': room_id, 'type': 0})，
+      // 补上签名后 code=0，匿名即可拿到 token 与 host_list。
+      //
+      // 现在断言正向结果：必须拿到非空 token 与真实 wss 地址。
       final a = _bili();
       final page = await a.fetchLiveRooms(page: 1, pageSize: 5);
       expect(page.items, isNotEmpty);
 
-      try {
-        final endpoint =
-            await a.fetchLiveDanmakuEndpoint(page.items.first.roomId);
-        // 若成功，必须有真实的 wss 地址
-        expect(endpoint.hostList, isNotEmpty);
-        expect(endpoint.hostList.first, startsWith('wss://'));
-        expect(endpoint.roomId, page.items.first.roomId);
-      } on FusionException catch (e) {
-        // 当前预期路径：风控拦截
-        expect(
-          e.code,
-          anyOf(
-            FusionErrorCode.upstreamError,
-            FusionErrorCode.permissionDenied,
-          ),
-        );
-        expect(e.technicalMessage, contains('-352'));
-      }
+      final endpoint =
+          await a.fetchLiveDanmakuEndpoint(page.items.first.roomId);
+
+      expect(endpoint.token, isNotEmpty,
+          reason: 'wbi 签名后应能匿名拿到弹幕 token');
+      expect(endpoint.hostList, isNotEmpty);
+      expect(endpoint.hostList.first, startsWith('wss://'));
+      expect(endpoint.roomId, page.items.first.roomId);
     }, tags: 'network');
   });
 
