@@ -27,15 +27,24 @@ class LiveRoomScreen extends StatefulWidget {
   const LiveRoomScreen({
     super.key,
     required this.adapter,
-    required this.roomId,
+    required this.roomKey,
     this.initialTitle,
     this.initialUname,
+    this.onOpenOriginal,
   });
 
   final PlatformAdapter adapter;
-  final int roomId;
+
+  /// 跨平台房间标识（字符串）。
+  ///
+  /// B站是数字房间号；抖音是 19 位长整型字符串，**不能**用 int 承载。
+  final String roomKey;
+
   final String? initialTitle;
   final String? initialUname;
+
+  /// 兜底：在原平台打开该直播间。
+  final VoidCallback? onOpenOriginal;
 
   @override
   State<LiveRoomScreen> createState() => _LiveRoomScreenState();
@@ -91,7 +100,8 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
 
     try {
       // 1. 房间信息
-      final info = await widget.adapter.fetchLiveRoomInfo(widget.roomId);
+      final info =
+          await widget.adapter.fetchLiveRoomInfoByKey(widget.roomKey);
       if (!mounted) return;
       setState(() => _info = info);
 
@@ -102,7 +112,7 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
             code: FusionErrorCode.capabilityUnavailable,
             userMessage: '主播尚未开播（${info.statusLabel}）。',
             technicalMessage: 'live_status=${info.liveStatus}',
-            platformId: 'bilibili',
+            platformId: widget.adapter.id,
             retryable: true,
           );
         });
@@ -110,7 +120,8 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
       }
 
       // 2. 播放流
-      final stream = await widget.adapter.resolveLiveStream(widget.roomId);
+      final stream =
+          await widget.adapter.resolveLiveStreamByKey(widget.roomKey);
       if (!mounted) return;
       setState(() {
         _stream = stream;
@@ -119,7 +130,7 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
 
       await _startPlayback(stream);
 
-      // 3. 弹幕（失败不影响播放）
+      // 3. 弹幕（失败不影响播放；抖音暂不支持，会抛 unsupportedPlatform）
       unawaited(_startDanmaku());
     } on FusionException catch (e) {
       if (!mounted) return;
@@ -130,7 +141,7 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = normalizeError(e, platformId: 'bilibili');
+        _error = normalizeError(e, platformId: widget.adapter.id);
         _loading = false;
       });
     }
@@ -166,9 +177,20 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
   }
 
   Future<void> _startDanmaku() async {
+    // 弹幕端点只对 B站 有效（B站房间号是数字）。
+    // 抖音等平台返回 unsupportedPlatform，此时不进入连接流程，
+    // UI 依据 _danmakuUnsupported 隐藏弹幕区，而不是显示"连接中"。
+    final numericRoom = int.tryParse(widget.roomKey);
+    if (numericRoom == null) {
+      if (mounted) {
+        setState(() => _danmakuState = DanmakuConnectionState.idle);
+      }
+      return;
+    }
+
     try {
       final endpoint =
-          await widget.adapter.fetchLiveDanmakuEndpoint(widget.roomId);
+          await widget.adapter.fetchLiveDanmakuEndpoint(numericRoom);
       if (!mounted) return;
 
       final client = LiveDanmakuClient();

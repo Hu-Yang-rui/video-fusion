@@ -9,6 +9,18 @@
 library;
 
 /// 直播列表中的一个房间（列表接口返回的轻量信息）。
+///
+/// # 关于 [roomId] 与 [roomKey]
+///
+/// 不同平台的房间标识类型不同：
+///  - B站是数字 `room_id`（如 21452505）
+///  - 抖音是 19 位长整型字符串（如 `7697959724830018331`）
+///
+/// 19 位整数超出 Dart `int` 在 Web 端的安全整数范围，且平台本身
+/// 就是以字符串下发的。因此这里用 [roomKey]（字符串）作为**唯一**
+/// 的跨平台房间标识，[roomId] 仅作为 B站等数字平台的兼容视图保留。
+///
+/// 新增代码一律用 [roomKey]；[roomId] 为 0 表示该平台房间号不是数字。
 class LiveRoomSummary {
   const LiveRoomSummary({
     required this.roomId,
@@ -20,10 +32,21 @@ class LiveRoomSummary {
     this.areaName,
     this.parentAreaName,
     this.uid,
-  });
+    String? roomKey,
+  }) : _roomKey = roomKey;
 
   /// 直播间号（进入房间用）。
+  ///
+  /// 仅对数字房间号的平台（B站）有意义。抖音等平台为 0，
+  /// 此时必须用 [roomKey]。
   final int roomId;
+
+  /// 跨平台房间标识（字符串形式）。始终有效。
+  ///
+  /// 构造时未显式传入则回退为 `roomId.toString()`。
+  final String? _roomKey;
+
+  String get roomKey => _roomKey ?? '$roomId';
 
   final String title;
 
@@ -47,6 +70,9 @@ class LiveRoomSummary {
 }
 
 /// 直播间详情。
+///
+/// 与 [LiveRoomSummary] 一样，房间标识同时提供数字视图 [roomId]
+/// 与跨平台字符串视图 [roomKey]。
 class LiveRoomInfo {
   const LiveRoomInfo({
     required this.roomId,
@@ -62,9 +88,20 @@ class LiveRoomInfo {
     this.parentAreaName,
     this.tags,
     this.liveStartTime,
-  });
+    String? roomKey,
+    this.uname,
+    this.faceUrl,
+    this.isPortrait = false,
+  }) : _roomKey = roomKey;
 
+  /// 数字房间号。抖音等平台为 0，此时用 [roomKey]。
   final int roomId;
+
+  /// 跨平台房间标识（字符串形式）。始终有效。
+  final String? _roomKey;
+
+  String get roomKey => _roomKey ?? '$roomId';
+
   final int shortId;
   final int uid;
   final String title;
@@ -82,6 +119,18 @@ class LiveRoomInfo {
 
   /// 开播时间（ISO 8601），未开播时为 null。
   final String? liveStartTime;
+
+  /// 主播昵称（列表页已带过来时可直接展示，避免详情页闪空）。
+  final String? uname;
+
+  /// 主播头像。
+  final String? faceUrl;
+
+  /// 直播间是否为竖屏（影响画面填充方式）。
+  ///
+  /// 抖音直播大量是竖屏；B站以横屏为主。播放器据此选择
+  /// `BoxFit.cover` 还是 `contain`。
+  final bool isPortrait;
 
   bool get isLive => liveStatus == 1;
 

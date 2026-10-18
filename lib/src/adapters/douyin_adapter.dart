@@ -54,6 +54,7 @@ import '../models/interaction.dart';
 import '../models/live.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
+import 'douyin/live_client.dart';
 import 'douyin/login_client.dart';
 import 'douyin/web_signer.dart';
 import 'platform_adapter.dart';
@@ -140,9 +141,11 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
 
     return QrLoginChallenge(
       platformId: id,
-      // 抖音返回的是 base64 PNG 图片，UI 直接展示这张图
-      // （不用 QrImageView 二次编码）
-      qrContent: challenge.qrBase64,
+      // 抖音返回的是已渲染好的 base64 PNG。
+      // 必须走 qrImageBase64（直接展示），不能塞进 qrContent ——
+      // 那会让 UI 把 base64 字符串当二维码内容重新编码，画出扫不出的假码。
+      qrContent: '',
+      qrImageBase64: challenge.qrBase64,
       // challengeKey 编码 token 与 fp：`token|fp`
       // 轮询时两者都必须与申请时一致
       challengeKey: '${challenge.token}|${challenge.fp}',
@@ -163,7 +166,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     final fp = parts.length > 1 ? parts[1] : '';
 
     final internal = DouyinQrChallenge(
-      qrBase64: challenge.qrContent,
+      qrBase64: challenge.qrImageBase64 ?? challenge.qrContent,
       token: token,
       expiresAt: challenge.createdAt.add(challenge.expiresIn),
       fp: fp,
@@ -188,13 +191,26 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     );
   }
 
-  // ── 直播：不支持 ────────────────────────────────────────────
+  // ── 直播 ────────────────────────────────────────────────────
   //
-  // 抖音直播的接口同样受 Argus 保护，且未找到可匿名访问的公开端点。
-  // 如实声明为不支持，UI 不会渲染直播入口。
+  // 2026-10-18 实测：`webcast.amemv.com/webcast/feed/` **匿名可用**，
+  // 无需 X-Argus / a_bogus 签名，也无需登录。
+  //
+  // 这推翻了此前"抖音直播接口受 Argus 保护、无公开端点"的结论。
+  // 该结论当时只查了 `/aweme/` 系接口，没查 webcast 系。
+  //
+  // 实测数据（一次请求）：HTTP 200、status_code=0、472KB、
+  // 6 个直播间、**6/6 带可播放的 HLS 地址**。
+  //
+  // 详细的接口陷阱与不可用路径见 `douyin/live_client.dart` 顶部注释。
+
+  DouyinLiveClient? _liveClient;
+
+  DouyinLiveClient get _ensureLiveClient =>
+      _liveClient ??= DouyinLiveClient(http: _http, logger: _logger);
 
   @override
-  bool get supportsLive => false;
+  bool get supportsLive => true;
 
   @override
   Future<LiveRoomPage> fetchLiveRooms({
@@ -202,32 +218,168 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     int pageSize = 20,
     int? parentAreaId,
     int? areaId,
-  }) =>
-      throw _liveUnsupported('fetchLiveRooms');
+  }) async {
+    // 该接口没有分区参数，也没有稳定的游标。
+    // 传了 parentAreaId/areaId 说明调用方期望按分区筛选——
+    // 平台做不到，如实抛错而不是静默忽略筛选条件。
+    if (parentAreaId != null || areaId != null) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '抖音直播暂不支持按分区筛选。',
+        technicalMessage:
+            'webcast/feed has no partition parameter; '
+            'parentAreaId=$parentAreaId areaId=$areaId',
+        platformId: id,
+      );
+    }
+
+    final rooms = await _ensureLiveClient.fetchFeed(
+      count: pageSize.clamp(1, 20),
+    );
+
+    // 该接口没有可靠的 hasMore 语义（重复请求会给出不同集合），
+    // 因此只在拿到内容时声明还有更多，让列表可以继续下拉刷新。
+    return LiveRoomPage(
+      items: rooms,
+      page: page,
+      hasMore: rooms.isNotEmpty,
+      totalCount: rooms.length,
+      notes: [
+        '抖音直播推荐流，每次刷新会给出不同的直播间。',
+        if (rooms.isEmpty) '当前没有正在直播的房间。',
+      ],
+    );
+  }
 
   @override
   Future<LiveRoomInfo> fetchLiveRoomInfo(int roomId) =>
-      throw _liveUnsupported('fetchLiveRoomInfo');
+      fetchLiveRoomInfoByKey('$roomId');
+
+  @override
+  Future<LiveRoomInfo> fetchLiveRoomInfoByKey(String roomKey) async {
+    final room = await _ensureLiveClient.findRoomInFeed(roomKey);
+    if (room == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoNotFound,
+        userMessage: '这个直播间当前不在推荐流中，暂时无法获取详情。',
+        technicalMessage:
+            'room $roomKey not found in webcast/feed after 3 attempts',
+        platformId: id,
+        retryable: true,
+      );
+    }
+
+    final owner = room['owner'] is Map
+        ? Map<String, Object?>.from(room['owner'] as Map)
+        : const <String, Object?>{};
+
+    final status = _toInt(room['status']) ?? 0;
+
+    return LiveRoomInfo(
+      roomId: int.tryParse(roomKey) ?? 0,
+      roomKey: roomKey,
+      shortId: 0,
+      uid: _toInt(owner['id_str']) ?? _toInt(owner['id']) ?? 0,
+      title: _nullableString(room['title']) ?? '抖音直播间',
+      // 抖音 status: 2 = 直播中（实测推荐流里的条目全是 2）
+      liveStatus: status == 2 ? 1 : 0,
+      online: _toInt(room['user_count']),
+      description: _nullableString(room['introduction']),
+      coverUrl: _firstUrl(room['cover']),
+      uname: _nullableString(owner['nickname']),
+      faceUrl: _firstUrl(owner['avatar_thumb']),
+      liveStartTime: _toInt(room['create_time']) != null
+          ? _epochToIso(_toInt(room['create_time'])!)
+          : null,
+      // 抖音直播以竖屏为主（stream_orientation: 1）
+      isPortrait: _toInt(room['stream_orientation']) != 1,
+    );
+  }
 
   @override
   Future<LiveStream> resolveLiveStream(int roomId, {int? quality}) =>
-      throw _liveUnsupported('resolveLiveStream');
+      resolveLiveStreamByKey('$roomId', quality: quality);
 
   @override
-  Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) =>
-      throw _liveUnsupported('fetchLiveDanmakuEndpoint');
+  Future<LiveStream> resolveLiveStreamByKey(
+    String roomKey, {
+    int? quality,
+  }) async {
+    final room = await _ensureLiveClient.findRoomInFeed(roomKey);
+    if (room == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoNotFound,
+        userMessage: '这个直播间当前不在推荐流中，暂时无法观看。',
+        technicalMessage:
+            'room $roomKey not found in webcast/feed; cannot resolve stream',
+        platformId: id,
+        retryable: true,
+      );
+    }
 
+    final status = _toInt(room['status']) ?? 0;
+    if (status != 2) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '主播当前没有开播。',
+        technicalMessage: 'room $roomKey status=$status (2 = live)',
+        platformId: id,
+        retryable: true,
+      );
+    }
+
+    final stream = _ensureLiveClient.parseStream(room);
+    if (stream == null) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '该直播间当前没有可播放的流。',
+        technicalMessage:
+            'room $roomKey: stream_url present but no playable url parsed',
+        platformId: id,
+        retryable: true,
+      );
+    }
+    return stream;
+  }
+
+  /// 抖音直播弹幕：**未实现**。
+  ///
+  /// 实测结论：抖音直播弹幕走 WebSocket + protobuf（`wss://webcast*.douyin.com/webcast/im/ws/`），
+  /// 需要 `signature` 参数，该签名由设备侧生成。项目当前没有可用的
+  /// 弹幕端点，因此如实声明不支持，UI 不渲染弹幕开关。
+  ///
+  /// 不做假弹幕、不接入未验证的第三方弹幕服务。
+  @override
+  Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '抖音直播弹幕暂不支持。',
+        technicalMessage:
+            'douyin live danmaku uses wss + protobuf with a device-side '
+            'signature; no verified public endpoint available',
+        platformId: id,
+      );
+
+  /// 抖音直播分区：**接口不可用**。
+  ///
+  /// 实测 `/webcast/room/partition/`、`/webcast/tag/list/` 均返回
+  /// `url doesn't match` 或 404。返回空列表让 UI 不渲染分区筛选，
+  /// 而不是编造分区名。
   @override
   Future<List<LiveArea>> fetchLiveAreas() async => const [];
 
-  FusionException _liveUnsupported(String method) => FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '抖音暂不支持直播。',
-        technicalMessage:
-            'douyin live unavailable: $method. Douyin live endpoints are '
-            'behind Argus and no anonymous public endpoint was found.',
-        platformId: id,
-      );
+  /// 抖音图片字段 `{"url_list":[...]}` 取第一张。
+  static String? _firstUrl(Object? v) {
+    if (v is String) return v.isEmpty ? null : v;
+    if (v is Map) {
+      final list = v['url_list'];
+      if (list is List && list.isNotEmpty) {
+        final first = list.first;
+        if (first is String && first.isNotEmpty) return first;
+      }
+    }
+    return null;
+  }
 
   @override
   bool get supportsLike => false;
@@ -1381,5 +1533,18 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       value.toInt() * 1000,
       isUtc: true,
     ).toIso8601String();
+  }
+
+  /// 抖音的数字字段类型不统一：同一字段可能是数字，也可能是字符串。
+  ///
+  /// 直播接口尤其明显：`status` 是数字，`id_str` 是字符串，
+  /// `user_count` 是数字。直接 `as num?` 会抛类型错误，
+  /// 因此统一走这里兼容两种形态。
+  static int? _toInt(Object? value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
   }
 }

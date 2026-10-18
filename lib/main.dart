@@ -203,16 +203,25 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
   /// 返回 null 表示当前没有任何平台支持直播——此时 AppShell 不会
   /// 渲染直播标签，避免出现"点进去什么都没有"的空页面。
   ///
-  /// 目前只有 B 站实现了直播接口；未来其它平台接入时，
-  /// 这里按 `supportsLive` 自动选中第一个可用适配器即可。
+  /// 2026-10-18：抖音直播已接入（`webcast.amemv.com/webcast/feed` 匿名可用），
+  /// 因此这里会把所有声明 `supportsLive` 的适配器一起传给直播页，
+  /// 由页面内部提供平台切换。
   Widget? _livePage() {
-    final adapter = _registry.byId('bilibili');
-    if (adapter == null || !adapter.supportsLive) return null;
+    final liveAdapters =
+        _registry.adapters.where((a) => a.supportsLive).toList();
+    if (liveAdapters.isEmpty) return null;
+
     return LiveScreen(
-      adapter: adapter,
-      onOpenOriginal: (room) => openInBrowser(
-        'https://live.bilibili.com/${room.roomId}',
-      ),
+      adapters: liveAdapters,
+      onOpenOriginal: (adapter, room) {
+        // 原平台直播间地址按平台拼；拼不出就退回视频页链接。
+        final url = switch (adapter.id) {
+          'bilibili' => 'https://live.bilibili.com/${room.roomKey}',
+          'douyin' => 'https://live.douyin.com/${room.roomKey}',
+          _ => null,
+        };
+        if (url != null) openInBrowser(url);
+      },
     );
   }
 
@@ -274,7 +283,12 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
           service: _service,
           onOpenVideo: (v) => _openDetail(v),
           onOpenSourcePicker: _openSourcePicker,
+          onOpenLinkIntake: _openLinkIntake,
         ),
+        // 短视频页切走时暂停、切回时恢复（用户主动暂停过则不恢复）。
+        onFeedVisibilityChanged: (visible) {
+          unawaited(_feedController.setPageActive(visible));
+        },
         // 直播页：只在平台确实声明 supportsLive 时注入，
         // 否则标签栏保持四项，不出现空页面。
         livePage: _livePage(),

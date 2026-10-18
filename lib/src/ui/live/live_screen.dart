@@ -1,7 +1,16 @@
-/// B 站直播：列表页。
+/// 直播：列表页（支持多平台）。
 ///
-/// 数据来源：[PlatformAdapter.fetchLiveRooms]（`room/v3/area/getRoomList`）。
+/// 数据来源：[PlatformAdapter.fetchLiveRooms]。
 /// 只展示平台真实返回的房间，不做任何本地伪造。
+///
+/// # 多平台
+///
+/// [adapters] 传入所有 `supportsLive` 的适配器。
+///  - 只有一个平台时不显示平台切换（B站单独接入时的原样）
+///  - 多个平台时在标题下显示平台胶囊，切换即换数据源
+///
+/// **每个平台的分区、房间号类型、是否支持筛选都不同**，
+/// 因此切换平台时会把分区与列表一并重置，不混用状态。
 library;
 
 import 'package:flutter/material.dart';
@@ -16,14 +25,20 @@ import 'live_room_screen.dart';
 class LiveScreen extends StatefulWidget {
   const LiveScreen({
     super.key,
-    required this.adapter,
+    required this.adapters,
+    this.initialAdapterId,
     this.onOpenOriginal,
   });
 
-  final PlatformAdapter adapter;
+  /// 所有支持直播的平台适配器。至少一个。
+  final List<PlatformAdapter> adapters;
+
+  /// 初始选中的平台 id。为 null 时用第一个。
+  final String? initialAdapterId;
 
   /// 打开原平台直播间（兜底入口）。
-  final void Function(LiveRoomSummary room)? onOpenOriginal;
+  final void Function(PlatformAdapter adapter, LiveRoomSummary room)?
+      onOpenOriginal;
 
   @override
   State<LiveScreen> createState() => _LiveScreenState();
@@ -36,6 +51,8 @@ class _LiveScreenState extends State<LiveScreen>
   final List<LiveRoomSummary> _rooms = [];
   final List<LiveArea> _areas = [];
 
+  late PlatformAdapter _adapter;
+
   int _page = 1;
   bool _loading = false;
   bool _hasMore = true;
@@ -45,12 +62,20 @@ class _LiveScreenState extends State<LiveScreen>
   /// 当前选中的一级分区（null = 全部）。
   int? _areaId;
 
+  /// 列表代际。切换平台/刷新时递增，用于让旧请求的结果作废——
+  /// 否则慢的旧平台响应会覆盖新平台列表（"切过去看到的是上一个平台的内容"）。
+  int _generation = 0;
+
   @override
   bool get wantKeepAlive => true;
 
   @override
   void initState() {
     super.initState();
+    _adapter = widget.adapters.firstWhere(
+      (a) => a.id == widget.initialAdapterId,
+      orElse: () => widget.adapters.first,
+    );
     _scroll.addListener(_onScroll);
     _loadAreas();
     _load(reset: true);
@@ -71,9 +96,11 @@ class _LiveScreenState extends State<LiveScreen>
   }
 
   Future<void> _loadAreas() async {
+    final adapter = _adapter;
     try {
-      final areas = await widget.adapter.fetchLiveAreas();
-      if (!mounted) return;
+      final areas = await adapter.fetchLiveAreas();
+      // 期间切换了平台：丢弃
+      if (!mounted || adapter.id != _adapter.id) return;
       setState(() {
         _areas
           ..clear()
@@ -81,12 +108,17 @@ class _LiveScreenState extends State<LiveScreen>
       });
     } catch (_) {
       // 分区失败不影响列表，静默降级为"全部"
+      if (!mounted) return;
+      setState(() => _areas.clear());
     }
   }
 
   Future<void> _load({bool reset = false}) async {
     if (_loading) return;
     if (!reset && !_hasMore) return;
+
+    final adapter = _adapter;
+    final generation = reset ? ++_generation : _generation;
 
     setState(() {
       _loading = true;
@@ -98,12 +130,13 @@ class _LiveScreenState extends State<LiveScreen>
     });
 
     try {
-      final page = await widget.adapter.fetchLiveRooms(
+      final page = await adapter.fetchLiveRooms(
         page: reset ? 1 : _page,
         pageSize: 20,
         parentAreaId: _areaId,
       );
-      if (!mounted) return;
+      // 期间切换了平台：丢弃这次结果
+      if (!mounted || generation != _generation) return;
       setState(() {
         if (reset) _rooms.clear();
         _rooms.addAll(page.items);
@@ -113,13 +146,15 @@ class _LiveScreenState extends State<LiveScreen>
         _error = null;
       });
     } on FusionException catch (e) {
-      if (!mounted) return;
+      if (!mounted || generation != _generation) return;
       setState(() => _error = e);
     } catch (e) {
-      if (!mounted) return;
-      setState(() => _error = normalizeError(e, platformId: 'bilibili'));
+      if (!mounted || generation != _generation) return;
+      setState(() => _error = normalizeError(e, platformId: adapter.id));
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && generation == _generation) {
+        setState(() => _loading = false);
+      }
     }
   }
 
@@ -129,14 +164,37 @@ class _LiveScreenState extends State<LiveScreen>
     _load(reset: true);
   }
 
+  void _selectPlatform(PlatformAdapter adapter) {
+    if (adapter.id == _adapter.id) return;
+    // 平台不同 → 分区、列表、分页全部重置，绝不混用
+    _generation++;
+    setState(() {
+      _adapter = adapter;
+      _rooms.clear();
+      _areas.clear();
+      _areaId = null;
+      _page = 1;
+      _hasMore = true;
+      _loadedOnce = false;
+      _error = null;
+      _loading = false;
+    });
+    _loadAreas();
+    _load(reset: true);
+  }
+
   Future<void> _openRoom(LiveRoomSummary room) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => LiveRoomScreen(
-          adapter: widget.adapter,
-          roomId: room.roomId,
+          adapter: _adapter,
+          roomKey: room.roomKey,
           initialTitle: room.title,
           initialUname: room.uname,
+          onOpenOriginal:
+              widget.onOpenOriginal == null
+                  ? null
+                  : () => widget.onOpenOriginal!(_adapter, room),
         ),
       ),
     );
@@ -180,6 +238,26 @@ class _LiveScreenState extends State<LiveScreen>
                 ],
               ),
             ),
+
+            // 平台切换（仅当接入多个直播平台时显示）
+            if (widget.adapters.length > 1)
+              SizedBox(
+                height: 34,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppleSpace.lg,
+                  ),
+                  children: [
+                    for (final adapter in widget.adapters)
+                      _AreaChip(
+                        label: adapter.displayName,
+                        selected: adapter.id == _adapter.id,
+                        onTap: () => _selectPlatform(adapter),
+                      ),
+                  ],
+                ),
+              ),
 
             // 分区筛选
             if (_areas.isNotEmpty)
@@ -244,7 +322,7 @@ class _LiveScreenState extends State<LiveScreen>
 
     return RefreshIndicator(
       onRefresh: () => _load(reset: true),
-      child: GridView.builder(
+      child: ListView.separated(
         controller: _scroll,
         padding: const EdgeInsets.fromLTRB(
           AppleSpace.lg,
@@ -252,17 +330,13 @@ class _LiveScreenState extends State<LiveScreen>
           AppleSpace.lg,
           AppleSpace.xxxl,
         ),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 2,
-          mainAxisSpacing: AppleSpace.md,
-          crossAxisSpacing: AppleSpace.md,
-          childAspectRatio: 0.82,
-        ),
         itemCount: _rooms.length,
+        separatorBuilder: (_, _) => const SizedBox(height: AppleSpace.lg),
         itemBuilder: (context, index) {
           final room = _rooms[index];
           return _LiveRoomCard(
-            key: ValueKey<int>(room.roomId),
+            // 用 roomKey 而不是 roomId：抖音房间号是 19 位字符串
+            key: ValueKey<String>(room.roomKey),
             room: room,
             onTap: () => _openRoom(room),
           );
@@ -291,6 +365,9 @@ class _AreaChip extends StatelessWidget {
       padding: const EdgeInsets.only(right: AppleSpace.sm),
       child: GestureDetector(
         onTap: onTap,
+        // opaque：胶囊内部有 Padding 与文字，默认 translucent 会让
+        // 点击落在空白处时穿透到下层。这里显式要求整个矩形可点。
+        behavior: HitTestBehavior.opaque,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
           decoration: BoxDecoration(
@@ -310,7 +387,21 @@ class _AreaChip extends StatelessWidget {
   }
 }
 
-/// 直播房间卡片。
+/// 直播房间卡片（单列大卡）。
+///
+/// # 为什么是单列大封面
+///
+/// 之前是两列网格、`childAspectRatio: 0.82`，实测在 1080p 手机上
+/// 每张卡只有约 168dp 宽，封面被压到 168×205，标题要挤两行、
+/// 主播名再占一行，信息密度过高且封面看不清。
+///
+/// 直播是**内容消费**场景，封面本身就是最重要的信息（主播状态、
+/// 画面内容、是否在打比赛）。因此改为单列：
+///  - 封面 16:9 大图（约 344×194dp），占据卡片主体
+///  - 封面内叠加：左上「直播」角标、右下在线人数
+///  - 封面下两行信息：标题（1 行）、主播名 + 分区（1 行）
+///
+/// 这与主流短视频/直播产品的列表一致，不再是"工具面板"式的密集格子。
 class _LiveRoomCard extends StatelessWidget {
   const _LiveRoomCard({
     super.key,
@@ -327,13 +418,15 @@ class _LiveRoomCard extends StatelessWidget {
 
     return GestureDetector(
       onTap: onTap,
+      behavior: HitTestBehavior.opaque,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 封面
-          Expanded(
+          // ── 封面 16:9 ──────────────────────────────────
+          AspectRatio(
+            aspectRatio: 16 / 9,
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(AppleRadius.md),
+              borderRadius: BorderRadius.circular(AppleRadius.lg),
               child: Stack(
                 fit: StackFit.expand,
                 children: [
@@ -341,106 +434,176 @@ class _LiveRoomCard extends StatelessWidget {
                     Image.network(
                       room.coverUrl!,
                       fit: BoxFit.cover,
-                      // 限制解码尺寸，避免网格里多张原图同时解码
-                      cacheWidth: 480,
+                      // 大卡需要更高分辨率，但仍在合理范围
+                      cacheWidth: 800,
+                      // 加载中显示占位色，避免闪白
+                      frameBuilder: (_, child, frame, sync) {
+                        if (sync || frame != null) return child;
+                        return ColoredBox(color: c.fill);
+                      },
                       errorBuilder: (_, _, _) => ColoredBox(color: c.fill),
                     )
                   else
                     ColoredBox(color: c.fill),
 
-                  // 直播中标记
-                  Positioned(
-                    left: 6,
-                    top: 6,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
-                        vertical: 2,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFF3B30),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 4,
-                            height: 4,
-                            decoration: const BoxDecoration(
-                              color: Colors.white,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 3),
-                          const Text(
-                            '直播',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 9,
-                              fontWeight: FontWeight.w600,
-                              height: 1.2,
-                            ),
-                          ),
-                        ],
+                  // 底部渐变，保证角标可读
+                  const DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [Colors.transparent, Color(0x66000000)],
+                        stops: [0.55, 1.0],
                       ),
                     ),
                   ),
 
-                  // 人气
+                  // 左上：直播中角标
+                  Positioned(
+                    left: 8,
+                    top: 8,
+                    child: _LiveBadge(),
+                  ),
+
+                  // 右下：在线人数
                   if (room.online != null)
                     Positioned(
-                      right: 6,
-                      bottom: 6,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 5,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.55),
-                          borderRadius: BorderRadius.circular(3),
-                        ),
-                        child: Text(
-                          _formatOnline(room.online!),
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 9,
-                            height: 1.2,
-                          ),
-                        ),
-                      ),
+                      right: 8,
+                      bottom: 8,
+                      child: _ViewerCount(count: room.online!),
                     ),
                 ],
               ),
             ),
           ),
-          const SizedBox(height: 6),
-          // 标题
+
+          const SizedBox(height: AppleSpace.sm),
+
+          // ── 标题（单行，超出省略）─────────────────────
           Text(
             room.title,
-            maxLines: 2,
+            maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: AppleType.footnote.copyWith(
+            style: AppleType.subheadlineEmphasized.copyWith(
               color: c.label,
               height: 1.3,
             ),
           ),
-          const SizedBox(height: 2),
-          // 主播 + 分区
+
+          const SizedBox(height: 3),
+
+          // ── 主播 + 分区 ────────────────────────────────
           Row(
             children: [
-              Icon(Icons.person_outline_rounded, size: 11, color: c.tertiaryLabel),
-              const SizedBox(width: 2),
+              // 主播小头像
+              if (room.faceUrl != null)
+                Padding(
+                  padding: const EdgeInsets.only(right: 5),
+                  child: ClipOval(
+                    child: Image.network(
+                      room.faceUrl!,
+                      width: 16,
+                      height: 16,
+                      fit: BoxFit.cover,
+                      cacheWidth: 48,
+                      errorBuilder: (_, _, _) => const SizedBox(
+                        width: 16,
+                        height: 16,
+                      ),
+                    ),
+                  ),
+                ),
               Expanded(
                 child: Text(
                   room.uname,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: AppleType.caption2.copyWith(color: c.tertiaryLabel),
+                  style: AppleType.caption1.copyWith(color: c.secondaryLabel),
                 ),
               ),
+              if (room.areaName != null) ...[
+                const SizedBox(width: AppleSpace.sm),
+                Text(
+                  room.areaName!,
+                  style: AppleType.caption2.copyWith(color: c.tertiaryLabel),
+                ),
+              ],
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 「直播中」角标。
+class _LiveBadge extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2.5),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFF3B30),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 4,
+            height: 4,
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 3),
+          const Text(
+            '直播',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              height: 1.2,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 在线人数角标。
+class _ViewerCount extends StatelessWidget {
+  const _ViewerCount({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.visibility_outlined,
+            size: 10,
+            color: Colors.white70,
+          ),
+          const SizedBox(width: 3),
+          Text(
+            _formatOnline(count),
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 10,
+              fontWeight: FontWeight.w500,
+              height: 1.2,
+            ),
           ),
         ],
       ),

@@ -95,8 +95,19 @@ class MockAdapter implements PlatformAdapter {
       throw _noLive('fetchLiveRoomInfo');
 
   @override
+  Future<LiveRoomInfo> fetchLiveRoomInfoByKey(String roomKey) =>
+      throw _noLive('fetchLiveRoomInfoByKey');
+
+  @override
   Future<LiveStream> resolveLiveStream(int roomId, {int? quality}) =>
       throw _noLive('resolveLiveStream');
+
+  @override
+  Future<LiveStream> resolveLiveStreamByKey(
+    String roomKey, {
+    int? quality,
+  }) =>
+      throw _noLive('resolveLiveStreamByKey');
 
   @override
   Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) =>

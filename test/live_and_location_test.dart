@@ -35,13 +35,44 @@ void main() {
       expect(_bili().supportsLive, isTrue);
     });
 
-    test('抖音如实声明不支持直播', () {
-      expect(_douyin().supportsLive, isFalse);
+    // 2026-10-18：抖音直播已接入。
+    //
+    // 此前这里是 `expect(_douyin().supportsLive, isFalse)`，
+    // 依据是"抖音直播接口受 Argus 保护、无公开端点"。
+    // 该结论只查了 `/aweme/` 系接口，没查 webcast 系。
+    // 实测 `webcast.amemv.com/webcast/feed/` **匿名可用**，
+    // 无需签名也无需登录，6/6 房间带可播放 HLS 地址。
+    // 因此断言改为 true，并把"为什么推翻"记在这里。
+    test('抖音声明支持直播（2026-10-18 接入 webcast/feed）', () {
+      expect(_douyin().supportsLive, isTrue);
     });
 
-    test('抖音的直播方法明确抛错，不返回空列表', () async {
+    test('抖音直播分区不可用：返回空列表而不是编造分区', () async {
+      // 实测 /webcast/room/partition/、/webcast/tag/list/ 均不可用。
+      // 平台做不到分区，必须如实返回空，让 UI 不渲染筛选。
+      final areas = await _douyin().fetchLiveAreas();
+      expect(areas, isEmpty,
+          reason: '没有可用分区接口时不得编造分区名');
+    });
+
+    test('抖音按分区筛选时明确报错，不静默忽略筛选条件', () async {
+      // 接口没有分区参数。若静默忽略，用户选了"游戏"却看到全部内容，
+      // 会以为是筛选坏了。必须明确抛 capabilityUnavailable。
       expect(
-        () => _douyin().fetchLiveRooms(),
+        () => _douyin().fetchLiveRooms(parentAreaId: 1),
+        throwsA(
+          isA<FusionException>().having(
+            (e) => e.code,
+            'code',
+            FusionErrorCode.capabilityUnavailable,
+          ),
+        ),
+      );
+    });
+
+    test('抖音直播弹幕如实声明不支持（不返回假端点）', () async {
+      expect(
+        () => _douyin().fetchLiveDanmakuEndpoint(1),
         throwsA(
           isA<FusionException>().having(
             (e) => e.code,

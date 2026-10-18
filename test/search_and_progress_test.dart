@@ -229,8 +229,18 @@ class FakeSearchAdapter implements PlatformAdapter {
       throw UnimplementedError('live not supported in test stub');
 
   @override
+  Future<LiveRoomInfo> fetchLiveRoomInfoByKey(String roomKey) =>
+      throw UnimplementedError('live not supported in test stub');
+
+
+  @override
   Future<LiveRoomInfo> fetchLiveRoomInfo(int roomId) =>
       throw UnimplementedError('live not supported in test stub');
+
+  @override
+  Future<LiveStream> resolveLiveStreamByKey(String roomKey, {int? quality}) =>
+      throw UnimplementedError('live not supported in test stub');
+
 
   @override
   Future<LiveStream> resolveLiveStream(int roomId, {int? quality}) =>

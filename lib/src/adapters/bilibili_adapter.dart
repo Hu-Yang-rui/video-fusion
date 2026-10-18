@@ -51,6 +51,18 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
   static const String _apiBase = 'https://api.bilibili.com';
   static const String _referer = 'https://www.bilibili.com/';
 
+  /// 是否已经记录过 `reply_control` 的键名（只记一次，避免刷屏）。
+  ///
+  /// 用于验证"登录后平台是否开始下发 location"——见 [_replyToComment]。
+  static bool _loggedReplyControlKeys = false;
+
+  /// 当前这次评论请求是否带了登录态。
+  ///
+  /// 只用于上面那条一次性诊断日志，让"登录前后"的差异在日志里
+  /// 可区分——否则看到 keys 里没有 location 也无法判断是
+  /// "没登录"还是"登录了但平台不给"。
+  bool _currentRequestAuthenticated = false;
+
   /// 推荐流来源标识。
   static const String feedSourceRcmd = 'bilibili:rcmd';
   static const String feedSourcePopular = 'bilibili:popular';
@@ -1457,7 +1469,6 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
 
     final json = result.jsonObject(platformId: id);
     _assertApiOk(json, endpoint: '/room/v1/Room/get_info');
-
     final data = json['data'];
     if (data is! Map) {
       throw FusionException(
@@ -1689,6 +1700,43 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
         _ => '流畅',
       };
 
+  /// 按字符串房间号取详情。
+  ///
+  /// B站的房间号是数字，这里直接转成 int 后走原有实现。
+  /// 显式覆盖是为了让编译器确认"该平台已实现直播"，而不是靠
+  /// 抽象类的默认抛错。
+  @override
+  Future<LiveRoomInfo> fetchLiveRoomInfoByKey(String roomKey) {
+    final numeric = int.tryParse(roomKey);
+    if (numeric == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '直播间号无效。',
+        technicalMessage: 'bilibili roomKey "$roomKey" is not numeric',
+        platformId: id,
+      );
+    }
+    return fetchLiveRoomInfo(numeric);
+  }
+
+  /// 按字符串房间号解析播放流。B站房间号是数字，直接转发。
+  @override
+  Future<LiveStream> resolveLiveStreamByKey(
+    String roomKey, {
+    int? quality,
+  }) {
+    final numeric = int.tryParse(roomKey);
+    if (numeric == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '直播间号无效。',
+        technicalMessage: 'bilibili roomKey "$roomKey" is not numeric',
+        platformId: id,
+      );
+    }
+    return resolveLiveStream(numeric, quality: quality);
+  }
+
   @override
   Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) async {
     final result = await _http.get(
@@ -1908,6 +1956,9 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     final url = '$_apiBase/x/v2/reply/main'
         '?type=1&oid=$aid&mode=3&next=$cursor&ps=$safeSize';
 
+    // 记录本次是否带登录态，供 [reply_control] 诊断日志区分场景。
+    _currentRequestAuthenticated = session != null;
+
     final result = await _http.get(
       url,
       headers: {
@@ -2009,12 +2060,40 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     // B 站把属地放在 `reply_control.location`，原始值是
     // 「IP属地：广东」这种带前缀的字符串。
     //
-    // 实测（2026-10）：**未登录请求的响应里完全没有该字段**，
-    // `reply_control` 只有 max_line / time_desc / translation_switch 等。
-    // 因此未登录时恒为 null，UI 不显示地区——不猜测、不伪造。
+    // 实测（2026-10-18，7 种请求面 × 20 个视频 × 60 条评论）：
+    // **匿名请求的响应里完全没有该字段**，整个响应体里连字符串
+    // "location" 都不出现，`reply_control` 只有
+    // max_line / sub_reply_entry_text / time_desc /
+    // translation_switch / support_share 这些。
+    //
+    // 测过的请求面（全部为 0）：
+    //   - /x/v2/reply/main（mode=0/2/3，带与不带完整设备指纹）
+    //   - /x/v2/reply/wbi/main（**正确 wbi 签名**，code=0，19 条）
+    //   - /x/v2/reply（旧接口，sort=0/1/2）
+    //   - /x/v2/reply/reply（二级评论）
+    //   - APP 端 api.bilibili.com + appkey 签名（mobi_app=android）
+    //   - APP 端 app.bilibili.com
+    //   - 带 bili_ticket 风控 token
+    //
+    // 因此匿名时恒为 null，UI 不显示地区——不猜测、不伪造。
     final replyControl = raw['reply_control'] is Map
         ? Map<String, Object?>.from(raw['reply_control'] as Map)
         : const <String, Object?>{};
+
+    // 一次性诊断：把实际收到的 reply_control 键名记下来。
+    //
+    // 目的：等用户用真实账号登录后，看一眼日志就知道平台是否**开始**
+    // 下发 location —— 这是"登录后到底能不能拿到属地"唯一可靠的判定依据，
+    // 比任何推断都准。只在 debug 级别输出一次，不含任何用户数据。
+    if (!_loggedReplyControlKeys) {
+      _loggedReplyControlKeys = true;
+      _logger.debug('bilibili reply_control keys', {
+        'keys': replyControl.keys.toList(),
+        'hasLocation': replyControl.containsKey('location'),
+        'authenticated': _currentRequestAuthenticated,
+      });
+    }
+
     final ipLocation = _parseIpLocation(replyControl['location']);
 
     return VideoComment(
@@ -2043,9 +2122,15 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
   /// 只保留地区本身供 UI 以低视觉权重展示。
   ///
   /// 返回 null 表示平台未提供——调用方不得补默认值。
+  ///
+  /// **只接受字符串**。这里刻意不用 `_nullableString`：那个辅助函数会
+  /// 把任意类型 `toString()`，于是 `location: 12345` 会变成字符串
+  /// `"12345"`、`location: {"name":"广东"}` 会变成 `"{name: 广东}"`，
+  /// 两者都会被当成真实地区显示给用户——这正是"把空值填成虚构地区"。
   static String? _parseIpLocation(Object? raw) {
-    final text = _nullableString(raw)?.trim();
-    if (text == null || text.isEmpty) return null;
+    if (raw is! String) return null;
+    final text = raw.trim();
+    if (text.isEmpty) return null;
 
     // 剥离「IP属地：」「IP属地:」前缀（中英文冒号都可能有）
     var value = text;

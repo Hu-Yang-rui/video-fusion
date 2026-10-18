@@ -302,6 +302,25 @@ abstract class PlatformAdapter {
     );
   }
 
+  /// 拉取直播间详情（按字符串房间号）。
+  ///
+  /// 默认实现把 [roomKey] 解析成数字后走 [fetchLiveRoomInfo]。
+  /// 房间号不是数字的平台（抖音）必须覆盖本方法。
+  Future<LiveRoomInfo> fetchLiveRoomInfoByKey(String roomKey) {
+    final numeric = int.tryParse(roomKey);
+    if (numeric == null) {
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持这种直播间标识。',
+        technicalMessage:
+            'Adapter $id: roomKey "$roomKey" is not numeric and '
+            'fetchLiveRoomInfoByKey was not overridden',
+        platformId: id,
+      );
+    }
+    return fetchLiveRoomInfo(numeric);
+  }
+
   /// 拉取直播间详情。
   Future<LiveRoomInfo> fetchLiveRoomInfo(int roomId) {
     throw FusionException(
@@ -310,6 +329,30 @@ abstract class PlatformAdapter {
       technicalMessage: 'Adapter $id does not implement fetchLiveRoomInfo',
       platformId: id,
     );
+  }
+
+  /// 解析直播播放流。
+  ///
+  /// 返回的地址带时效签名，调用方**不得持久化**。
+  ///
+  /// 默认实现把 [roomKey] 解析成数字后走 [resolveLiveStream]。
+  /// 房间号不是数字的平台必须覆盖本方法。
+  Future<LiveStream> resolveLiveStreamByKey(
+    String roomKey, {
+    int? quality,
+  }) {
+    final numeric = int.tryParse(roomKey);
+    if (numeric == null) {
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持这种直播间标识。',
+        technicalMessage:
+            'Adapter $id: roomKey "$roomKey" is not numeric and '
+            'resolveLiveStreamByKey was not overridden',
+        platformId: id,
+      );
+    }
+    return resolveLiveStream(numeric, quality: quality);
   }
 
   /// 解析直播播放流。
