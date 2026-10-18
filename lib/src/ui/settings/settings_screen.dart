@@ -22,6 +22,7 @@ import '../../design/apple_tokens.dart';
 import '../../design/components/apple_controls.dart';
 import '../../design/components/apple_layout.dart';
 import '../mobile/qr_login_page.dart';
+import 'cookie_sheet.dart';
 
 /// 设置页。
 class SettingsScreen extends StatefulWidget {
@@ -47,6 +48,11 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final Map<String, PlatformSession> _sessions = {};
   bool _loadingSessions = true;
+
+  /// 已展开技术详情的平台 ID。
+  ///
+  /// 平台能力说明是长文本，默认收起，避免设置页被技术细节塞满。
+  final Set<String> _expandedPlatforms = {};
 
   @override
   void initState() {
@@ -177,17 +183,85 @@ class _SettingsScreenState extends State<SettingsScreen> {
       subtitle: connected
           ? '${session.displayName} · 已连接'
           : (_loadingSessions ? '正在检查…' : '未连接'),
-      trailing: connected
-          ? AppleTextButton(
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 未连接时给"导入"，已连接时给"导出"——
+          // 两个动作在语义上是互斥的，不需要同时出现。
+          if (connected)
+            AppleTextButton(
+              label: '导出',
+              onPressed: () => _exportCookie(adapter, session),
+            )
+          else
+            AppleTextButton(
+              label: '导入',
+              onPressed: () => _importCookie(adapter),
+            ),
+          const SizedBox(width: AppleSpace.sm),
+          if (connected)
+            AppleTextButton(
               label: '解绑',
               color: c.red,
               onPressed: () => _disconnect(adapter),
             )
-          : AppleTextButton(
+          else
+            AppleTextButton(
               label: '连接',
               onPressed: () => _connect(adapter),
             ),
-      onTap: connected ? null : () => _connect(adapter),
+        ],
+      ),
+      // 已连接时点整行 = 重新导入（换账号或修复过期凭证），
+      // 未连接时点整行 = 扫码登录。
+      onTap: connected
+          ? () => _importCookie(adapter, replace: true)
+          : () => _connect(adapter),
+    );
+  }
+
+  /// 导入 Cookie。
+  ///
+  /// [replace] 为 true 表示覆盖已有会话（已连接状态下点整行触发）。
+  Future<void> _importCookie(
+    PlatformAdapter adapter, {
+    bool replace = false,
+  }) async {
+    if (replace) {
+      final ok = await _confirm(
+        '重新导入 ${adapter.displayName} Cookie？',
+        '当前登录状态会被粘贴的 Cookie 覆盖。',
+      );
+      if (ok != true) return;
+    }
+
+    final session = await showCookieImportSheet(
+      context,
+      platformHint: adapter.id,
+      platformLabel: adapter.displayName,
+    );
+    if (session == null) return;
+
+    await widget.vault.save(session);
+    await _loadSessions();
+    widget.onSessionChanged?.call();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已导入 ${adapter.displayName} Cookie')),
+      );
+    }
+  }
+
+  /// 导出 Cookie。
+  Future<void> _exportCookie(
+    PlatformAdapter adapter,
+    PlatformSession session,
+  ) async {
+    await showCookieExportSheet(
+      context,
+      session: session,
+      platformLabel: adapter.displayName,
     );
   }
 
@@ -253,8 +327,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _buildPlatforms(AppleColors c) {
     return AppleGroupedSection(
-      header: '已接入平台',
-      footer: '能力标注依据实际验证结果。未验证的能力不会标注为可用。',
+      header: '平台支持',
+      footer: '标注依据实际验证结果，未验证的能力不会标注为可用。',
       children: [
         for (final adapter in widget.registry.adapters)
           if (adapter.id != 'mock') _buildPlatformRow(c, adapter),
@@ -262,77 +336,88 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  /// 平台支持行。
+  ///
+  /// 这里刻意只给**用户能感知的能力**（能不能在应用内播放、
+  /// 能不能搜、有没有内容），不暴露内部标识、能力矩阵或
+  /// 逐条技术说明——那些属于开发文档，不属于设置界面。
+  /// 需要排查时展开「详情」才看到完整说明。
   Widget _buildPlatformRow(AppleColors c, PlatformAdapter adapter) {
     final caps = adapter.capabilities;
-    final feedCount = adapter.feedSources.length;
-    final availableFeeds = adapter.feedSources.where((s) => s.available).length;
+    final availableFeeds =
+        adapter.feedSources.where((s) => s.available).length;
 
-    final tags = <String>[
+    // 面向用户的一句话总结
+    final summary = <String>[
       if (caps.supportsNativePlayback) '应用内播放',
-      if (caps.supportsMetadata) '元数据',
       if (adapter.supportsSearch) '搜索',
-      if (availableFeeds > 0) '内容 $availableFeeds/$feedCount',
-      if (feedCount > 0 && availableFeeds == 0) '推荐流不可用',
+      if (availableFeeds > 0) '内容浏览',
+      if (adapter.supportsLive) '直播',
     ];
 
+    final expanded = _expandedPlatforms.contains(adapter.id);
+
     return Padding(
-      padding: const EdgeInsets.all(AppleSpace.lg),
+      padding: const EdgeInsets.fromLTRB(
+        AppleSpace.lg,
+        AppleSpace.md,
+        AppleSpace.lg,
+        AppleSpace.md,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Text(
-                adapter.displayName,
-                style: AppleType.bodyEmphasized.copyWith(color: c.label),
-              ),
-              const SizedBox(width: AppleSpace.sm),
-              Text(
-                adapter.id,
-                style: AppleType.caption2.copyWith(color: c.tertiaryLabel),
-              ),
-            ],
-          ),
-          const SizedBox(height: AppleSpace.xs + 2),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              for (final t in tags)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 7,
-                    vertical: 2.5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: c.fill,
-                    borderRadius: BorderRadius.circular(AppleRadius.xs - 1),
-                  ),
-                  child: Text(
-                    t,
-                    style: AppleType.caption2.copyWith(
-                      fontSize: 10.5,
-                      color: c.secondaryLabel,
-                      height: 1.2,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          if (caps.notes.isNotEmpty) ...[
-            const SizedBox(height: AppleSpace.sm),
-            for (final n in caps.notes)
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
+              Expanded(
                 child: Text(
-                  '· $n',
-                  style: AppleType.caption1.copyWith(
-                    color: c.secondaryLabel,
-                    height: 1.4,
-                  ),
+                  adapter.displayName,
+                  style: AppleType.body.copyWith(color: c.label),
                 ),
               ),
+              if (caps.notes.isNotEmpty)
+                GestureDetector(
+                  onTap: () => setState(() {
+                    if (expanded) {
+                      _expandedPlatforms.remove(adapter.id);
+                    } else {
+                      _expandedPlatforms.add(adapter.id);
+                    }
+                  }),
+                  child: Text(
+                    expanded ? '收起' : '详情',
+                    style: AppleType.caption1.copyWith(color: c.blue),
+                  ),
+                ),
+            ],
+          ),
+          if (summary.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(
+              summary.join(' · '),
+              style: AppleType.caption1.copyWith(color: c.tertiaryLabel),
+            ),
           ],
+          if (expanded)
+            Padding(
+              padding: const EdgeInsets.only(top: AppleSpace.sm),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final n in caps.notes)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 3),
+                      child: Text(
+                        '· $n',
+                        style: AppleType.caption2.copyWith(
+                          color: c.secondaryLabel,
+                          height: 1.45,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
         ],
       ),
     );

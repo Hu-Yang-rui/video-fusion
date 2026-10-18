@@ -404,11 +404,12 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
               '人气 ${_fmt(info.online!)}',
               style: AppleType.caption2.copyWith(color: Colors.white54),
             ),
-          // 流信息：协议 + 清晰度。让用户知道当前看的是什么流。
+          // 只显示清晰度，不显示协议名（HLS/FLV 是技术细节，
+          // 普通观众只关心"画质怎么样"）。
           if (_stream != null) ...[
             const SizedBox(width: AppleSpace.sm),
             Text(
-              '${_stream!.protocolLabel}·${_stream!.qualityLabel}',
+              _stream!.qualityLabel,
               style: AppleType.caption2.copyWith(color: Colors.white38),
             ),
           ],

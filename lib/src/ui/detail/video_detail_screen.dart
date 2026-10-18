@@ -1,17 +1,34 @@
 /// 长视频详情页（Apple 风格）。
 ///
-/// 结构（自上而下）：
-///  1. 播放器区域（16:9，沉浸式黑色背景，自绘控制条）
-///  2. 标题与统计
-///  3. 作者行（头像 + 名称 + 关注位）
-///  4. 描述（可展开）
-///  5. 播放能力说明（如实展示当前使用的是哪种播放方式）
-///  6. 相关推荐
+/// # 信息架构
 ///
-/// 与竖滑流的关键差异：
-///  - 这里是**长视频场景**：完整播放、进度恢复、清晰度切换、全屏
-///  - 使用独立的播放器实例，不与推荐流共享
-///  - 支持横屏（全屏时自动旋转）
+/// 内容优先，不把每块信息包成卡片：
+///
+/// ```
+/// ┌──────────────────────────┐
+/// │  播放器（16:9，自绘控制条）  │
+/// ├──────────────────────────┤
+/// │  标题（大字号，视觉主体）    │
+/// │  平台 · 播放数 · 日期        │
+/// │                          │
+/// │  ●头像  作者名              │
+/// │                          │
+/// │  简介正文（可展开）          │
+/// │                          │
+/// │  💬 查看 2129 条评论    ›   │
+/// │                          │
+/// │  技术信息  ›（默认收起）     │
+/// │                          │
+/// │  [在原平台打开]             │
+/// └──────────────────────────┘
+/// ```
+///
+/// 设计要点：
+///  - 标题、元信息、作者、简介用**留白与排版**分区，不靠卡片边框
+///  - 评论入口是一行可点的内容行，不是按钮
+///  - 播放方式 / 分辨率 / 是否支持倍速这类**技术细节默认收起**，
+///    普通用户不需要看到；需要排查时展开即可
+///  - 与竖滑流的差异：这里支持完整播放、进度恢复、清晰度、全屏
 library;
 
 import 'dart:async';
@@ -20,15 +37,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
 import '../../core/video_service.dart';
 import '../../design/apple_tokens.dart';
 import '../../design/components/apple_controls.dart';
-import '../../design/components/apple_layout.dart';
 import '../../design/components/video_widgets.dart';
 import '../../models/playback.dart';
 import '../../models/unified_video.dart';
 import '../../player/player_controller.dart';
+import '../interaction/interaction_controller.dart';
+import '../interaction/interaction_widgets.dart';
 
 /// 长视频详情页。
 class VideoDetailScreen extends StatefulWidget {
@@ -36,6 +55,7 @@ class VideoDetailScreen extends StatefulWidget {
     super.key,
     required this.video,
     required this.service,
+    this.vault,
     this.onOpenOriginal,
     this.initialPosition,
     this.onProgressChanged,
@@ -43,6 +63,11 @@ class VideoDetailScreen extends StatefulWidget {
 
   final UnifiedVideo video;
   final VideoService service;
+
+  /// 凭证保险库。为 null 时详情页不显示评论入口
+  /// （评论需要登录态判断，没有 vault 就无法确定能力）。
+  final CredentialVault? vault;
+
   final void Function(UnifiedVideo)? onOpenOriginal;
 
   /// 续播位置（来自观看历史）。
@@ -67,12 +92,28 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
   bool _showControls = true;
   bool _descriptionExpanded = false;
   bool _fullscreen = false;
+  bool _techExpanded = false;
   Timer? _controlsTimer;
+
+  /// 互动控制器（评论、点赞等）。仅在有 vault 时创建。
+  InteractionController? _interaction;
 
   @override
   void initState() {
     super.initState();
     _resolveAndLoad();
+
+    final vault = widget.vault;
+    if (vault != null) {
+      final ctrl = InteractionController(
+        video: widget.video,
+        service: widget.service,
+        vault: vault,
+      );
+      // 异步初始化登录态，不阻塞首帧
+      unawaited(ctrl.init());
+      _interaction = ctrl;
+    }
   }
 
   Future<void> _resolveAndLoad() async {
@@ -176,6 +217,7 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
   void dispose() {
     _controlsTimer?.cancel();
     _sub?.cancel();
+    _interaction?.dispose();
     _player?.dispose();
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -410,22 +452,23 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
   }
 
   /// 详情内容区。
+  ///
+  /// 内容优先：用留白与排版分区，而不是把每块信息包成卡片。
+  /// 技术细节（播放方式/分辨率/倍速支持）默认收起。
   Widget _buildContent(AppleColors c) {
     final v = widget.video;
-    final caps = _player?.capabilities;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: AppleSpace.huge),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── 标题与统计 ────────────────────────────────
-          Container(
-            color: c.secondaryGroupedBackground,
+          // ── 标题与元信息（无卡片，靠排版建立层级）──────
+          Padding(
             padding: const EdgeInsets.fromLTRB(
+              AppleSpace.pageInset,
               AppleSpace.lg,
-              AppleSpace.lg,
-              AppleSpace.lg,
+              AppleSpace.pageInset,
               AppleSpace.md,
             ),
             child: Column(
@@ -435,225 +478,129 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
                   v.title,
                   style: AppleType.title3.copyWith(
                     color: c.label,
-                    height: 1.32,
+                    height: 1.3,
                   ),
                 ),
                 const SizedBox(height: AppleSpace.sm),
-                Row(
+                // 元信息一行，低视觉权重
+                Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: AppleSpace.xs,
+                  runSpacing: 4,
                   children: [
                     PlatformChip(platformId: v.platformId),
-                    const SizedBox(width: AppleSpace.sm),
                     if (v.stats.viewCount != null)
-                      Text(
-                        '${_fmtCount(v.stats.viewCount!)}次播放',
-                        style: AppleType.caption1.copyWith(
-                          color: c.secondaryLabel,
-                        ),
-                      ),
-                    if (v.publishedAt != null) ...[
-                      Text(
-                        ' · ',
-                        style: AppleType.caption1.copyWith(
-                          color: c.tertiaryLabel,
-                        ),
-                      ),
-                      Text(
-                        _fmtDate(v.publishedAt!),
-                        style: AppleType.caption1.copyWith(
-                          color: c.secondaryLabel,
-                        ),
-                      ),
-                    ],
+                      _metaText(c, '${_fmtCount(v.stats.viewCount!)}次播放'),
+                    if (v.publishedAt != null)
+                      _metaText(c, _fmtDate(v.publishedAt!)),
+                    if (v.durationLabel != null)
+                      _metaText(c, v.durationLabel!),
                   ],
                 ),
               ],
             ),
           ),
 
-          const SizedBox(height: AppleSpace.lg),
-
-          // ── 作者 ──────────────────────────────────────
-          AppleGroupedSection(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(AppleSpace.lg),
-                child: Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 20,
-                      backgroundColor: c.fill,
-                      backgroundImage: v.author.avatarUrl != null
-                          ? NetworkImage(
-                              v.author.avatarUrl!,
-                              headers: const {
-                                'Referer': 'https://www.bilibili.com/',
-                              },
-                            )
-                          : null,
-                      child: v.author.avatarUrl == null
-                          ? Text(
-                              (v.author.name ?? '?').characters.first,
-                              style: AppleType.subheadlineEmphasized.copyWith(
-                                color: c.secondaryLabel,
-                              ),
-                            )
-                          : null,
-                    ),
-                    const SizedBox(width: AppleSpace.md),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            v.author.name ?? '未知作者',
-                            style: AppleType.bodyEmphasized.copyWith(
-                              color: c.label,
-                            ),
+          // ── 作者行（无卡片）──────────────────────────
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppleSpace.pageInset,
+              vertical: AppleSpace.sm,
+            ),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 18,
+                  backgroundColor: c.fill,
+                  backgroundImage: v.author.avatarUrl != null
+                      ? ResizeImage.resizeIfNeeded(
+                          72,
+                          72,
+                          NetworkImage(
+                            v.author.avatarUrl!,
+                            headers: const {
+                              'Referer': 'https://www.bilibili.com/',
+                            },
                           ),
-                          if (v.author.platformAuthorId != null)
-                            Text(
-                              'ID: ${v.author.platformAuthorId}',
-                              style: AppleType.caption1.copyWith(
-                                color: c.tertiaryLabel,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ],
+                        )
+                      : null,
+                  child: v.author.avatarUrl == null
+                      ? Text(
+                          (v.author.name ?? '?').characters.first,
+                          style: AppleType.subheadlineEmphasized.copyWith(
+                            color: c.secondaryLabel,
+                          ),
+                        )
+                      : null,
                 ),
-              ),
-            ],
+                const SizedBox(width: AppleSpace.md),
+                Expanded(
+                  child: Text(
+                    v.author.name ?? '未知作者',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppleType.bodyEmphasized.copyWith(color: c.label),
+                  ),
+                ),
+              ],
+            ),
           ),
 
-          const SizedBox(height: AppleSpace.lg),
-
-          // ── 描述 ──────────────────────────────────────
+          // ── 简介（无卡片）────────────────────────────
           if (v.description != null && v.description!.trim().isNotEmpty)
-            AppleGroupedSection(
-              header: '简介',
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(AppleSpace.lg),
-                  child: GestureDetector(
-                    onTap: () => setState(
-                      () => _descriptionExpanded = !_descriptionExpanded,
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          v.description!.trim(),
-                          maxLines: _descriptionExpanded ? null : 3,
-                          overflow: _descriptionExpanded
-                              ? TextOverflow.visible
-                              : TextOverflow.ellipsis,
-                          style: AppleType.footnote.copyWith(
-                            color: c.label,
-                            height: 1.5,
-                          ),
-                        ),
-                        if (v.description!.trim().length > 80) ...[
-                          const SizedBox(height: AppleSpace.xs),
-                          Text(
-                            _descriptionExpanded ? '收起' : '展开',
-                            style: AppleType.footnoteEmphasized.copyWith(
-                              color: c.blue,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-
-          const SizedBox(height: AppleSpace.lg),
-
-          // ── 播放能力（如实说明）────────────────────────
-          AppleGroupedSection(
-            header: '播放信息',
-            footer: '应用内播放使用设备本地解码，不经过网页容器。'
-                '视频直链由平台签发，具有有效期，过期后需重新获取。',
-            children: [
-              AppleListRow(
-                leadingIcon: Icons.play_circle_outline_rounded,
-                title: '播放方式',
-                trailingText: _playbackModeLabel(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                AppleSpace.pageInset,
+                AppleSpace.sm,
+                AppleSpace.pageInset,
+                AppleSpace.sm,
               ),
-              if (caps != null) ...[
-                AppleListRow(
-                  leadingIcon: Icons.speed_rounded,
-                  title: '可调节倍速',
-                  trailingText: caps.canSetRate ? '支持' : '不支持',
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => setState(
+                  () => _descriptionExpanded = !_descriptionExpanded,
                 ),
-                AppleListRow(
-                  leadingIcon: Icons.timeline_rounded,
-                  title: '可拖动进度',
-                  trailingText: caps.canSeek ? '支持' : '不支持',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      v.description!.trim(),
+                      maxLines: _descriptionExpanded ? null : 3,
+                      overflow: _descriptionExpanded
+                          ? TextOverflow.visible
+                          : TextOverflow.ellipsis,
+                      style: AppleType.subheadline.copyWith(
+                        color: c.secondaryLabel,
+                        height: 1.5,
+                      ),
+                    ),
+                    if (v.description!.trim().length > 80) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        _descriptionExpanded ? '收起' : '展开',
+                        style: AppleType.caption1.copyWith(color: c.blue),
+                      ),
+                    ],
+                  ],
                 ),
-              ],
-              if (v.width != null && v.height != null)
-                AppleListRow(
-                  leadingIcon: Icons.aspect_ratio_rounded,
-                  title: '视频分辨率',
-                  trailingText: '${v.width}×${v.height}',
-                ),
-              if (v.durationLabel != null)
-                AppleListRow(
-                  leadingIcon: Icons.schedule_rounded,
-                  title: '时长',
-                  trailingText: v.durationLabel!,
-                ),
-            ],
-          ),
+              ),
+            ),
+
+          const SizedBox(height: AppleSpace.sm),
+          _hairline(c),
+
+          // ── 评论入口（一行可点内容，不是按钮）────────
+          if (_interaction != null)
+            _buildCommentEntry(c, _interaction!),
+
+          _hairline(c),
+
+          // ── 技术信息（默认收起）──────────────────────
+          _buildTechDisclosure(c),
 
           const SizedBox(height: AppleSpace.lg),
 
-          // ── 诊断（受限说明）────────────────────────────
-          if (v.diagnostics.limitations.isNotEmpty)
-            AppleGroupedSection(
-              header: '当前环境限制',
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(AppleSpace.lg),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      for (final l in v.diagnostics.limitations)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 4),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '· ',
-                                style: AppleType.footnote.copyWith(
-                                  color: c.secondaryLabel,
-                                ),
-                              ),
-                              Expanded(
-                                child: Text(
-                                  l,
-                                  style: AppleType.footnote.copyWith(
-                                    color: c.secondaryLabel,
-                                    height: 1.45,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-
-          const SizedBox(height: AppleSpace.xl),
-
-          // ── 原平台入口 ────────────────────────────────
+          // ── 原平台入口 ──────────────────────────────
           Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: AppleSpace.pageInset,
@@ -669,6 +616,182 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
       ),
     );
   }
+
+  /// 元信息文字（低权重）。
+  Widget _metaText(AppleColors c, String text) => Text(
+        text,
+        style: AppleType.caption1.copyWith(color: c.tertiaryLabel),
+      );
+
+  /// 细分割线（内容区之间）。
+  Widget _hairline(AppleColors c) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: AppleSpace.pageInset),
+        child: SizedBox(
+          height: 0.5,
+          child: ColoredBox(color: c.separator),
+        ),
+      );
+
+  /// 评论入口。
+  ///
+  /// 做成"一行内容"而不是按钮：用户浏览视频时，
+  /// 评论是内容的一部分，不是需要额外点击的工具。
+  Widget _buildCommentEntry(AppleColors c, InteractionController ctrl) {
+    return ListenableBuilder(
+      listenable: ctrl,
+      builder: (context, _) {
+        final count = ctrl.commentTotal;
+        final label = count > 0
+            ? '查看 ${_fmtCount(count)} 条评论'
+            : '查看评论';
+        return InkWell(
+          onTap: () => _openComments(ctrl),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppleSpace.pageInset,
+              vertical: AppleSpace.md,
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.chat_bubble_outline_rounded,
+                  size: 17,
+                  color: c.secondaryLabel,
+                ),
+                const SizedBox(width: AppleSpace.sm),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: AppleType.subheadline.copyWith(
+                      color: c.label,
+                    ),
+                  ),
+                ),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  size: 18,
+                  color: c.tertiaryLabel,
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openComments(InteractionController ctrl) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => CommentSheet(controller: ctrl),
+    );
+  }
+
+  /// 技术信息折叠区。
+  ///
+  /// 播放方式、分辨率、是否支持倍速这类信息对普通用户没有意义，
+  /// 只在需要排查问题时展开。这是本次去工具化的关键改动：
+  /// 之前它们直接以两整块卡片占据详情页下半屏。
+  Widget _buildTechDisclosure(AppleColors c) {
+    final v = widget.video;
+    final caps = _player?.capabilities;
+    final limitations = v.diagnostics.limitations;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        InkWell(
+          onTap: () => setState(() => _techExpanded = !_techExpanded),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppleSpace.pageInset,
+              vertical: AppleSpace.md,
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.info_outline_rounded,
+                  size: 15,
+                  color: c.tertiaryLabel,
+                ),
+                const SizedBox(width: AppleSpace.sm),
+                Text(
+                  '技术信息',
+                  style: AppleType.caption1.copyWith(color: c.tertiaryLabel),
+                ),
+                const Spacer(),
+                Icon(
+                  _techExpanded
+                      ? Icons.expand_less_rounded
+                      : Icons.expand_more_rounded,
+                  size: 16,
+                  color: c.tertiaryLabel,
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_techExpanded)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppleSpace.pageInset,
+              0,
+              AppleSpace.pageInset,
+              AppleSpace.md,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _techRow(c, '播放方式', _playbackModeLabel()),
+                if (caps != null) ...[
+                  _techRow(c, '倍速调节', caps.canSetRate ? '支持' : '不支持'),
+                  _techRow(c, '拖动进度', caps.canSeek ? '支持' : '不支持'),
+                ],
+                if (v.width != null && v.height != null)
+                  _techRow(c, '分辨率', '${v.width}×${v.height}'),
+                if (limitations.isNotEmpty) ...[
+                  const SizedBox(height: AppleSpace.sm),
+                  for (final l in limitations)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 3),
+                      child: Text(
+                        '· $l',
+                        style: AppleType.caption2.copyWith(
+                          color: c.tertiaryLabel,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _techRow(AppleColors c, String label, String value) => Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 80,
+              child: Text(
+                label,
+                style: AppleType.caption2.copyWith(color: c.tertiaryLabel),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                value,
+                style: AppleType.caption2.copyWith(color: c.secondaryLabel),
+              ),
+            ),
+          ],
+        ),
+      );
 
   String _playbackModeLabel() {
     final s = _source;

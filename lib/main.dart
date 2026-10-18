@@ -226,6 +226,7 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
         builder: (_) => VideoDetailScreen(
           video: video,
           service: _service,
+          vault: _vault,
           onOpenOriginal: _openOriginal,
           initialPosition: resumeAt,
           onProgressChanged: (pos, dur) {
