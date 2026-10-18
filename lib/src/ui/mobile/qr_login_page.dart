@@ -28,6 +28,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
+import '../../adapters/platform_adapter.dart';
 import '../../core/qr_login.dart';
 import '../../design/apple_tokens.dart';
 import '../../design/components/apple_controls.dart';
@@ -223,6 +224,54 @@ class _QrLoginPageState extends State<QrLoginPage> {
                         height: 1.45,
                       ),
                     ),
+
+                    // 抖音专用提示：**不要截图后从相册选图**。
+                    //
+                    // 实测（2026-10-18）：把本页二维码截图保存，用抖音
+                    // 「扫一扫 → 相册」选这张图，抖音会拒绝并提示
+                    //   "该抖音二维码用于登录，为保障安全，
+                    //     请使用抖音扫一扫进行扫码"
+                    //
+                    // 这不是二维码无效 —— 恰恰相反，说明抖音正确识别了
+                    // 这是一张登录码。抖音的安全策略要求**实时取景扫描**，
+                    // 防止截图被转发给他人代扫。
+                    //
+                    // 只有抖音有这条限制，B站允许相册选图，因此按平台区分。
+                    if (widget.adapter is PlatformAdapter &&
+                        (widget.adapter as PlatformAdapter).id == 'douyin') ...[
+                      const SizedBox(height: AppleSpace.sm),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: AppleSpace.sm,
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.only(top: 1.5),
+                              child: Icon(
+                                Icons.info_outline_rounded,
+                                size: 12,
+                                color: c.tertiaryLabel,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                '请用另一台手机的抖音直接对准屏幕扫；'
+                                '截图后从相册选图会被抖音拒绝（安全策略）。',
+                                style: AppleType.caption2.copyWith(
+                                  color: c.tertiaryLabel,
+                                  height: 1.4,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+
                     const SizedBox(height: AppleSpace.xl),
 
                     _buildQrArea(c),
