@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    video_fusion - MONOCHROME layer for themed icons (Android 13+).
+    The system tints this silhouette with the wallpaper palette, so it is one
+    solid shape; the translucent back layer is intentionally omitted.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M 48.96,33.67 C 44.99,31.22 43,32.33 43,37 L 43,71 C 43,75.67 44.99,76.78 48.96,74.33 L 76.04,57.67 C 80.01,55.22 80.01,52.78 76.04,50.33 Z" />
+</vector>
