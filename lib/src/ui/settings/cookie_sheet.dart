@@ -7,6 +7,8 @@
 /// 安全提示是强制的：导出内容含明文凭证，必须让用户看见。
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -285,6 +287,70 @@ class _CookieExportSheet extends StatefulWidget {
 class _CookieExportSheetState extends State<_CookieExportSheet> {
   bool _revealed = false;
 
+  /// 复制结果反馈。
+  ///
+  /// **为什么不用 SnackBar**：本 sheet 由 `showModalBottomSheet` 打开，
+  /// 它的 context 挂在 modal route 上，`ScaffoldMessenger.of(context)`
+  /// 找不到外层 Scaffold 的 messenger，SnackBar 要么不显示、
+  /// 要么被 sheet 本身遮住。这正是"复制后没有任何提示"的根因。
+  ///
+  /// 改为 sheet 内的内联状态条：位置确定、一定可见、不依赖外部 messenger。
+  _CopyFeedback? _feedback;
+  Timer? _feedbackTimer;
+
+  @override
+  void dispose() {
+    _feedbackTimer?.cancel();
+    super.dispose();
+  }
+
+  /// 执行复制并如实反馈结果。
+  ///
+  /// 只有 [Clipboard.setData] 真的没抛异常才算成功；
+  /// 内容为空时明确提示"没有可复制的内容"，不谎报成功。
+  Future<void> _copy(String text, {required String what}) async {
+    _feedbackTimer?.cancel();
+
+    if (text.isEmpty) {
+      setState(() {
+        _feedback = _CopyFeedback(
+          ok: false,
+          message: '没有可复制的$what',
+        );
+      });
+      _scheduleFeedbackClear();
+      return;
+    }
+
+    try {
+      await Clipboard.setData(ClipboardData(text: text));
+      if (!mounted) return;
+      setState(() {
+        _feedback = _CopyFeedback(
+          ok: true,
+          // 只说明"复制了什么类别"，绝不把内容本身写进提示
+          message: '已复制$what，请妥善保管',
+        );
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _feedback = _CopyFeedback(
+          ok: false,
+          message: '复制失败，请重试',
+        );
+      });
+    }
+    _scheduleFeedbackClear();
+  }
+
+  void _scheduleFeedbackClear() {
+    _feedbackTimer?.cancel();
+    _feedbackTimer = Timer(const Duration(seconds: 2, milliseconds: 500), () {
+      if (mounted) setState(() => _feedback = null);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = AppleColors.of(context);
@@ -399,6 +465,15 @@ class _CookieExportSheetState extends State<_CookieExportSheet> {
                 ),
               ],
 
+              // 复制结果反馈（内联，不依赖 SnackBar）
+              if (_feedback != null) ...[
+                const SizedBox(height: AppleSpace.md),
+                _CopyFeedbackBar(
+                  key: ValueKey(_feedback!.message),
+                  feedback: _feedback!,
+                ),
+              ],
+
               const SizedBox(height: AppleSpace.lg),
 
               Row(
@@ -414,18 +489,10 @@ class _CookieExportSheetState extends State<_CookieExportSheet> {
                     Expanded(
                       child: ApplePrimaryButton(
                         label: '复制完整格式',
-                        onPressed: () async {
-                          await Clipboard.setData(
-                            ClipboardData(text: jsonText),
-                          );
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('已复制到剪贴板，请妥善保管'),
-                              ),
-                            );
-                          }
-                        },
+                        onPressed: () => _copy(
+                          jsonText,
+                          what: '完整凭证内容',
+                        ),
                       ),
                     ),
                   ],
@@ -454,14 +521,7 @@ class _CookieExportSheetState extends State<_CookieExportSheet> {
             ),
             const Spacer(),
             GestureDetector(
-              onTap: () async {
-                await Clipboard.setData(ClipboardData(text: text));
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('已复制')),
-                  );
-                }
-              },
+              onTap: () => _copy(text, what: label),
               child: Text(
                 '复制',
                 style: AppleType.caption1.copyWith(color: c.blue),
@@ -491,6 +551,69 @@ class _CookieExportSheetState extends State<_CookieExportSheet> {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ── 复制反馈 ──────────────────────────────────────────────────
+
+/// 一次复制操作的结果。
+class _CopyFeedback {
+  const _CopyFeedback({required this.ok, required this.message});
+
+  final bool ok;
+
+  /// 面向用户的提示文字。
+  ///
+  /// **不得包含 Cookie 内容或任何凭证片段**——只描述操作结果。
+  final String message;
+}
+
+/// 复制结果反馈条。
+///
+/// 内联在 sheet 内，位置固定在按钮上方，一定可见。
+/// 用淡入 + 轻微上移表达"刚刚发生"，2.5 秒后自动消失。
+class _CopyFeedbackBar extends StatelessWidget {
+  const _CopyFeedbackBar({super.key, required this.feedback});
+
+  final _CopyFeedback feedback;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    final color = feedback.ok ? c.green : c.red;
+
+    return AnimatedOpacity(
+      opacity: 1,
+      duration: AppleMotion.fast,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppleSpace.md,
+          vertical: AppleSpace.sm,
+        ),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(AppleRadius.sm),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              feedback.ok
+                  ? Icons.check_circle_rounded
+                  : Icons.error_outline_rounded,
+              size: 15,
+              color: color,
+            ),
+            const SizedBox(width: AppleSpace.sm),
+            Expanded(
+              child: Text(
+                feedback.message,
+                style: AppleType.footnote.copyWith(color: color),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

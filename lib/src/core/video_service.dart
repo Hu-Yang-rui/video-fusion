@@ -602,6 +602,7 @@ class VideoService {
     // 播放直链缓存（短 TTL）
     final cached = _cache.playback.peek(video.id);
     if (cached != null && !cached.stale) {
+      _logger.info('playback: cache hit', {'video': video.id});
       return PlaybackOutcome(
         videoId: video.id,
         attempts: [
@@ -615,11 +616,24 @@ class VideoService {
       );
     }
 
+    // 测量解析耗时：区分"缓存命中"与"真实网络解析"，
+    // 便于定位 1–2 秒延迟到底出在哪一层。
+    final sw = Stopwatch()..start();
     final outcome = await _policy.resolve(video);
+    sw.stop();
+
     final source = outcome.source;
     if (source != null && source is NativePlaybackSource) {
       _cache.playback.put(video.id, source);
     }
+
+    _logger.info('playback: resolved', {
+      'video': video.id,
+      'elapsedMs': sw.elapsedMilliseconds,
+      'mode': source?.mode.name ?? 'none',
+      'attempts': outcome.attempts.length,
+    });
+
     return outcome;
   }
 

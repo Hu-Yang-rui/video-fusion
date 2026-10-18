@@ -134,7 +134,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
         .whereType<QrLoginCapable>()
         .toList();
 
-    if (loginCapable.isEmpty) {
+    // 支持 Cookie 导入但**不支持**扫码的平台（当前是抖音）。
+    // 这些平台的扫码登录被平台签名拦截，如实告知用户走导入路径。
+    final importOnly = widget.registry.adapters
+        .where((a) => a.id != 'mock')
+        .where((a) => a is! QrLoginCapable)
+        .toList();
+
+    if (loginCapable.isEmpty && importOnly.isEmpty) {
       return AppleGroupedSection(
         header: '账号',
         children: [
@@ -157,7 +164,63 @@ class _SettingsScreenState extends State<SettingsScreen> {
       children: [
         for (final adapter in loginCapable)
           _buildAccountRow(c, adapter as PlatformAdapter),
+        for (final adapter in importOnly)
+          _buildImportOnlyRow(c, adapter),
       ],
+    );
+  }
+
+  /// 仅支持 Cookie 导入的平台行。
+  ///
+  /// 抖音的扫码登录需要平台 `sign` 参数，该签名依赖 JS 运行时状态，
+  /// 无法在纯 Dart 中复现（详见 `DouyinLoginClient` 的文档）。
+  /// 因此这里不显示「连接」（那会引导用户进入必然失败的流程），
+  /// 只给「导入」，并说明原因。
+  Widget _buildImportOnlyRow(AppleColors c, PlatformAdapter adapter) {
+    final session = _sessions[adapter.id];
+    final connected = session != null;
+
+    return AppleListRow(
+      leading: Container(
+        width: 29,
+        height: 29,
+        decoration: BoxDecoration(
+          color: connected ? c.green : c.fill,
+          borderRadius: BorderRadius.circular(AppleRadius.xs),
+        ),
+        child: Icon(
+          connected ? Icons.check_rounded : Icons.person_outline_rounded,
+          size: 17,
+          color: connected ? Colors.white : c.secondaryLabel,
+        ),
+      ),
+      title: adapter.displayName,
+      subtitle: connected
+          ? '${session.displayName} · 已连接'
+          : (_loadingSessions ? '正在检查…' : '需导入 Cookie 登录'),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (connected)
+            AppleTextButton(
+              label: '导出',
+              onPressed: () => _exportCookie(adapter, session),
+            )
+          else
+            AppleTextButton(
+              label: '导入',
+              onPressed: () => _importCookie(adapter),
+            ),
+          const SizedBox(width: AppleSpace.sm),
+          if (connected)
+            AppleTextButton(
+              label: '解绑',
+              color: c.red,
+              onPressed: () => _disconnect(adapter),
+            ),
+        ],
+      ),
+      onTap: connected ? null : () => _importCookie(adapter),
     );
   }
 

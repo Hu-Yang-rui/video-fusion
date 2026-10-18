@@ -24,7 +24,11 @@
 | **抖音推荐流** | ✅ **已验证**（APP 端公开接口） |
 | **抖音热榜** | ✅ **已验证**（50 条真实热搜） |
 | **抖音应用内播放** | ✅ **已验证**（mp4 直链，ftypisom） |
-| 抖音详情 / 搜索 / 评论 / 互动 | ❌ 需 Argus 签名，不实现 |
+| **抖音评论读取** | ✅ **已验证**（隐藏 WebView 签名桥，20 条真实评论） |
+| **抖音评论 IP 属地** | ✅ **已验证**（`ip_label`，无需登录） |
+| 抖音扫码登录 | ⚠️ 二维码可获取，轮询需 `sign`（纯 Dart 不可达） |
+| 抖音 Cookie 导入登录 | ✅ 已验证（31 项测试） |
+| 抖音点赞 / 关注 / 搜索 / 详情 | ❌ 需 Argus 签名，不实现 |
 | TikTok | ❌ 未接入（网络不可达，未实测） |
 
 > 能力标注依据实测结果。未验证的能力不会标注为可用。
@@ -36,11 +40,11 @@
 
 ## 界面
 
-四个主页面，Apple HIG 风格：
+三个主页面（接入直播的平台会多一个），Apple HIG 风格：
 
 - **推荐** — 全屏竖滑短视频流，滑到即播
 - **发现** — 长视频网格浏览 + 跨平台搜索
-- **媒体库** — 观看记录与续播
+- **直播** — 直播列表与直播间（仅 B 站，条件显示）
 - **设置** — 多平台账号管理与能力说明
 
 设计系统位于 `lib/src/design/`：
@@ -67,7 +71,7 @@ lib/
     ├── feed/         推荐页（竖滑流）
     ├── discover/     发现页
     ├── detail/       长视频详情页
-    ├── library/      媒体库
+    ├── live/         直播列表与直播间
     ├── settings/     设置
     └── interaction/  互动（点赞/评论/投币/收藏）
 ```
@@ -106,6 +110,7 @@ flutter test test/interaction_live_test.dart --tags network
 
 **可用**：推荐流与热榜走 APP 端公开接口 `api.amemv.com`，无需签名。
 播放地址实测为 `video/mp4` 直链（`ftypisom` 头），可原生播放。
+评论通过应用内隐藏 WebView 由页面 secsdk 签名获取，实测 20 条真实评论。
 
 **不可用**：`/aweme/v1/aweme/detail/`（详情）、`/aweme/v1/general/search/`（搜索，502）、
 `/aweme/v1/challenge/detail/`（话题）均返回空响应，需要 `X-Argus` 签名。
@@ -118,11 +123,29 @@ Argus 的签名逻辑是**远程下发的 JS**（`bytegecko.com` CDN）并在 **
 > 注：Web 端常见的 `a_bogus`、`X-Gorgon`、`UIFID_TEMP` 在 APP 端**完全不存在**，
 > 扫描 259 万字符串命中 0 次。Web 与 APP 是两套独立的风控体系。
 
+#### 抖音登录
+
+扫码登录协议已完整逆向：
+
+| 环节 | 状态 |
+|---|---|
+| `get_qrcode` 获取二维码 | ✅ 纯 Dart 可用（19 个固定参数 + XOR 编码的设备指纹） |
+| `check_qrconnect` 轮询状态 | ❌ 需要 `sign` 参数 |
+
+`sign` 的推导过程：`qs` 解码后是 10 个参数名，尝试
+md5/sha1/sha256 × 5 种拼接 × 4 种 salt × HMAC，全部不匹配。
+它依赖 JS 运行时状态（`performance.timeOrigin` 等），**纯 Dart 无法复现**。
+
+因此应用内提供的是 **Cookie 导入登录**：
+从浏览器 F12 → Network → Request Headers 复制 Cookie 后粘贴导入。
+
 ### B站
 
 - 未登录时 `playurl` 只下发 480P/360P（接口宣称支持 1080P+，但实发不符）
 - 评论旧接口 `/x/v2/reply` 未登录只给 3 条，必须用 `/x/v2/reply/main` 游标分页
 - 搜索接口未签名时有 412 限流风险
+- **评论 IP 属地匿名不可得**：8 个接口 × 3 种 UA = 24 种组合全部验证，
+  `reply_control` 只有 `max_line` / `time_desc` / `translation_switch` / `support_share` 四个键
 
 ### TikTok
 

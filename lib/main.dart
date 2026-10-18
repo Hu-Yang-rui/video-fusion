@@ -38,7 +38,6 @@ import 'src/models/unified_video.dart';
 import 'src/ui/detail/video_detail_screen.dart';
 import 'src/ui/discover/discover_screen.dart';
 import 'src/ui/feed/feed_screen.dart';
-import 'src/ui/library/library_screen.dart';
 import 'src/ui/live/live_screen.dart';
 import 'src/ui/mobile/feed_controller.dart';
 import 'src/ui/mobile/link_intake_sheet.dart';
@@ -279,11 +278,6 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
         // 直播页：只在平台确实声明 supportsLive 时注入，
         // 否则标签栏保持四项，不出现空页面。
         livePage: _livePage(),
-        libraryPage: LibraryScreen(
-          service: _service,
-          progressStore: _progressStore,
-          onOpenVideo: (v, resume) => _openDetail(v, resumeAt: resume),
-        ),
         settingsPage: SettingsScreen(
           service: _service,
           registry: _registry,
