@@ -21,6 +21,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -269,21 +270,39 @@ class _QrLoginPageState extends State<QrLoginPage> {
               : Stack(
                   alignment: Alignment.center,
                   children: [
-                    // 纯 Dart 本地渲染，不加载任何网页
-                    QrImageView(
-                      data: challenge.qrContent,
-                      version: QrVersions.auto,
-                      size: 208,
-                      backgroundColor: Colors.white,
-                      eyeStyle: const QrEyeStyle(
-                        eyeShape: QrEyeShape.square,
-                        color: Color(0xFF101012),
+                    // 两种来源，二选一：
+                    //
+                    //  1. 平台直接下发图片（抖音）：直接展示，**不得**
+                    //     再交给 QrImageView 编码——那会把 base64 字符串
+                    //     本身编成二维码，画出来扫不出来。
+                    //  2. 平台只给内容字符串（B站）：纯 Dart 本地渲染。
+                    if (challenge.hasImage)
+                      Image.memory(
+                        base64Decode(challenge.qrImageBase64!),
+                        width: 208,
+                        height: 208,
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, _, _) => Icon(
+                          Icons.broken_image_outlined,
+                          size: 48,
+                          color: c.tertiaryLabel,
+                        ),
+                      )
+                    else
+                      QrImageView(
+                        data: challenge.qrContent,
+                        version: QrVersions.auto,
+                        size: 208,
+                        backgroundColor: Colors.white,
+                        eyeStyle: const QrEyeStyle(
+                          eyeShape: QrEyeShape.square,
+                          color: Color(0xFF101012),
+                        ),
+                        dataModuleStyle: const QrDataModuleStyle(
+                          dataModuleShape: QrDataModuleShape.square,
+                          color: Color(0xFF101012),
+                        ),
                       ),
-                      dataModuleStyle: const QrDataModuleStyle(
-                        dataModuleShape: QrDataModuleShape.square,
-                        color: Color(0xFF101012),
-                      ),
-                    ),
                     if (_isExpiredOrDone) _buildQrOverlay(c),
                   ],
                 ),

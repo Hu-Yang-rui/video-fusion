@@ -33,6 +33,7 @@ class HttpResult {
     required this.attempts,
     required this.durationMs,
     this.redirectChain = const [],
+    this.setCookies = const [],
   });
 
   final int statusCode;
@@ -42,6 +43,34 @@ class HttpResult {
   final int attempts;
   final int durationMs;
   final List<String> redirectChain;
+
+  /// 原始 `Set-Cookie` 头（未合并、未解析）。
+  ///
+  /// **必须**单独保存而不是塞进 [headers]：`dart:io` 的
+  /// `headers.forEach` 会把同名多值用逗号拼成一个字符串，
+  /// 而 Cookie 的 `Expires` 本身含逗号，拼接后无法可靠切分。
+  ///
+  /// 扫码登录类流程（抖音 passport）靠它下发会话凭证，
+  /// 丢弃它等于永远换不到 Cookie。
+  final List<String> setCookies;
+
+  /// 把 [setCookies] 解析成 name → value。
+  ///
+  /// 只取第一个 `name=value` 段，忽略 Path/Domain/Expires 等属性。
+  /// 值为空的 cookie（服务端用 Max-Age=0 删 cookie）会被跳过。
+  Map<String, String> get parsedSetCookies {
+    final out = <String, String>{};
+    for (final raw in setCookies) {
+      final pair = raw.split(';').first.trim();
+      final eq = pair.indexOf('=');
+      if (eq <= 0) continue;
+      final name = pair.substring(0, eq).trim();
+      final value = pair.substring(eq + 1).trim();
+      if (name.isEmpty || value.isEmpty) continue;
+      out[name] = value;
+    }
+    return out;
+  }
 
   bool get isSuccess => statusCode >= 200 && statusCode < 300;
 
@@ -195,6 +224,10 @@ class FusionHttpClient {
           responseHeaders[name] = values.join(', ');
         });
 
+        // Set-Cookie 单独取原始多值，避免逗号合并破坏解析。
+        final setCookies =
+            response.headers['set-cookie'] ?? const <String>[];
+
         final durationMs = DateTime.now().difference(startedAt).inMilliseconds;
         final accepted = spec.acceptStatuses != null
             ? spec.acceptStatuses!.contains(status)
@@ -216,6 +249,7 @@ class FusionHttpClient {
             attempts: attempt + 1,
             durationMs: durationMs,
             redirectChain: redirectChain,
+            setCookies: setCookies,
           );
         }
 

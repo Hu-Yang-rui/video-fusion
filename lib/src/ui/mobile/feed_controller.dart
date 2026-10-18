@@ -117,6 +117,14 @@ class FeedController extends ChangeNotifier {
   /// 每屏的降级播放源（官方嵌入 / 外链）。
   final Map<int, PlaybackSource> _fallbackSources = {};
 
+  /// 内容来源代际。切换来源时递增，用于让上一个来源残留的
+  /// 后台预解析任务作废——否则它会把旧列表第 i 项的播放源
+  /// 写进新列表的第 i 项（列表下标相同但视频不同）。
+  int _sourceGeneration = 0;
+
+  /// 正在预解析中的屏序号，避免重复发请求。
+  final Set<int> _prefetching = {};
+
   PlaybackSource? playbackSourceOf(int index) =>
       _sources[index] ?? _fallbackSources[index];
 
@@ -173,6 +181,9 @@ class FeedController extends ChangeNotifier {
   /// 切换内容来源并重新加载。
   Future<void> loadSource(FeedSource source) async {
     _source = source;
+    // 让上一个来源的预解析任务全部作废
+    _sourceGeneration++;
+    _prefetching.clear();
     _items.clear();
     _states.clear();
     _errors.clear();
@@ -271,16 +282,21 @@ class FeedController extends ChangeNotifier {
   void _prefetchUpcoming({required int from, int count = 2}) {
     if (from < 0 || from >= _items.length) return;
 
+    final generation = _sourceGeneration;
     final end = (from + count).clamp(0, _items.length);
     for (var i = from; i < end; i++) {
+      // 已经解析过、或正在解析中，跳过（快速连续滑动时避免重复请求）
+      if (_sources.containsKey(i) || _prefetching.contains(i)) continue;
+
       final video = _items[i];
-      // 已经解析过的跳过
-      if (_sources.containsKey(i)) continue;
+      _prefetching.add(i);
 
       unawaited(() async {
         try {
           final outcome = await _service.resolvePlayback(video);
-          if (_disposed) return;
+          // 页面已销毁，或期间切换了内容来源：结果作废。
+          // 否则会把旧列表第 i 项写进新列表第 i 项。
+          if (_disposed || generation != _sourceGeneration) return;
           final src = outcome.source;
           // 只缓存 native 源；其它模式在真正切换时再处理
           if (src is NativePlaybackSource && _sources[i] == null) {
@@ -290,6 +306,8 @@ class FeedController extends ChangeNotifier {
         } catch (e) {
           // 预热失败不影响任何用户可见状态
           _logger.debug('feed: prefetch failed', {'index': i, 'error': '$e'});
+        } finally {
+          _prefetching.remove(i);
         }
       }());
     }
@@ -325,6 +343,15 @@ class FeedController extends ChangeNotifier {
     notifyListeners();
 
     await _ensurePlayable(index);
+
+    // 起播后立刻预解析后续两屏。
+    //
+    // 只在首屏加载时预解析是不够的：用户滑到第 3 屏后，
+    // 第 4、5 屏仍是冷的，下一次滑动又要等一次 playurl 往返。
+    // 这里每次成功起播都向前预热，滑动越多命中率越高。
+    if (!_disposed && _states[index] == FeedItemState.ready) {
+      _prefetchUpcoming(from: index + 1, count: 2);
+    }
   }
 
   /// 更新当前屏序号（滑动过程中调用，不触发播放）。
@@ -339,6 +366,22 @@ class FeedController extends ChangeNotifier {
     }
   }
 
+  /// 等待内核拿到时长。
+  ///
+  /// `load()` 内部的 `open()` 已经 await，多数源在返回时 duration 就绪；
+  /// 少数源要等首个分片才有时长。这里给一个短窗口，
+  /// 避免把"还没拿到时长"误判成"播放失败"而清掉缓存重来。
+  Future<void> _awaitDuration({int timeoutMs = 900}) async {
+    if (_snapshot.duration.inMilliseconds > 0) return;
+    final deadline = DateTime.now().add(Duration(milliseconds: timeoutMs));
+    while (DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      if (_disposed) return;
+      if (_snapshot.duration.inMilliseconds > 0) return;
+      if (_snapshot.phase == PlayerPhase.failed) return;
+    }
+  }
+
   /// 确保第 [index] 屏已解析播放源并加载到内核。
   Future<void> _ensurePlayable(int index) async {
     final video = _items[index];
@@ -350,6 +393,9 @@ class FeedController extends ChangeNotifier {
       notifyListeners();
       await _player?.load(existing);
       await _player?.play();
+      // play() 已改为不阻塞（起播修复走后台），这里补一个短窗口等时长，
+      // 避免把"时长还没到"误判成失败。
+      await _awaitDuration();
       // 以快照为准判断是否真的起播，而不是假定成功
       final ok = _snapshot.duration.inMilliseconds > 0 &&
           _snapshot.phase != PlayerPhase.failed;
@@ -405,6 +451,7 @@ class FeedController extends ChangeNotifier {
 
         await _player?.load(source);
         await _player?.play();
+        await _awaitDuration();
 
         // 以快照为准：duration 解析成功且非 failed 才算 ready。
         // 仅看 phase 不够——phase 可能是 ready 但 duration 为 0
@@ -464,29 +511,52 @@ class FeedController extends ChangeNotifier {
 
   /// 当前是否允许切换播放/暂停。
   ///
-  /// 判断依据是**播放器的实时状态**，不是快照 phase。
-  /// 快照由 media_kit 事件流驱动，暂停/恢复与事件到达之间有延迟；
-  /// 用快照判断会让连续两次点击读到同一个旧值，
-  /// 表现为"暂停后点不回来"。
+  /// 判据是**媒体是否真的被打开过**，而不是 `duration > 0`。
   ///
-  /// 只要已加载出时长（即媒体真的打开了），就允许切换。
-  /// 加载中（duration 为 0）与失败态不响应。
+  /// 历史实现要求 `duration > 0`，但存在两类合法场景会误判：
+  ///  - 部分源的时长要等首个分片到达才知道，此前 duration 为 0；
+  ///  - 直播/无时长媒体永远没有 duration。
+  /// 这两种情况下用户点画面完全无响应，看起来像"暂停坏了"。
+  ///
+  /// 因此改为看快照 phase 是否处于"已加载"的任一态。
+  /// 真正的播放/暂停判定交给内核实时状态（见 [FusionPlayerController.togglePlay]）。
   bool get canTogglePlay {
     final p = _player;
     if (p == null) return false;
-    if (_snapshot.phase == PlayerPhase.failed) return false;
-    if (_snapshot.duration.inMilliseconds <= 0) return false;
-    return true;
+    return switch (_snapshot.phase) {
+      PlayerPhase.ready ||
+      PlayerPhase.playing ||
+      PlayerPhase.paused ||
+      PlayerPhase.buffering ||
+      PlayerPhase.completed =>
+        true,
+      PlayerPhase.idle || PlayerPhase.loading || PlayerPhase.failed => false,
+    };
   }
 
   /// 切换播放/暂停。
   ///
   /// 直接委托给播放内核，不在这里维护第二份播放状态——
   /// 两套状态必然发散，是"点了没反应"类缺陷的常见来源。
+  /// 内核内部会做串行化与"播完后回到开头"处理。
   Future<void> togglePlay() async {
     final p = _player;
     if (p == null) return;
-    await p.playOrPause();
+    await p.togglePlay();
+  }
+
+  /// 短视频页是否处于前台。
+  ///
+  /// 切到「发现」「设置」时视频必须停下来——否则声音会在后台继续播。
+  /// 切回时若用户没有主动暂停过，则自动恢复。
+  Future<void> setPageActive(bool active) async {
+    final p = _player;
+    if (p == null) return;
+    if (active) {
+      await p.restoreFromSuspend();
+    } else {
+      await p.suspend();
+    }
   }
 
   Future<void> seek(Duration position) async {

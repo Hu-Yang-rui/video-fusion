@@ -89,16 +89,52 @@ void main() {
       expect(src, contains('sign'));
     });
 
-    test('不含任何伪造的成功分支', () {
-      // 不得出现 status='success' 就直接返回 succeeded 且带 session
-      final fakeSuccess = RegExp(
-        r"DouyinLoginPhase\.succeeded[\s\S]{0,80}session:",
-      );
+    test('登录成功只有一个出口，且必须先校验凭证', () {
+      // 旧断言是一条正则：禁止 `succeeded` 附近出现 `session:`。
+      // 那是为了防"status=confirmed 就直接伪造 session"。
+      // 但凭证换取实现后，合法的 succeeded 本来就该带 session，
+      // 正则会把正确代码也判为违规。
+      //
+      // 改为断言真正的不变量：succeeded 只有一个返回点（便于审计），
+      // 且该路径必须经过 _buildSession 的空值检查。
+      // 统计"把相位置为 succeeded"的位置（不含 getter 里的比较）
+      final succeededReturns =
+          RegExp(r'phase: DouyinLoginPhase\.succeeded').allMatches(src).length;
+      expect(succeededReturns, 1,
+          reason: '只允许一个 succeeded 出口，任何新增都必须过审');
+
       expect(
-        fakeSuccess.hasMatch(src),
-        isFalse,
-        reason: '不能凭空构造 session 冒充登录成功',
+        src.contains('if (session == null)'),
+        isTrue,
+        reason: '拿到凭证前必须先判空，空则如实报失败',
       );
+
+      expect(
+        src.contains('final session = _buildSession();'),
+        isTrue,
+        reason: '会话必须由真实 cookie 构造，不能内联伪造',
+      );
+    });
+
+    test('会话凭证必须来自真实下发的 cookie', () {
+      // _buildSession 只在命中会话 cookie 时才产出会话
+      for (final key in ['sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard']) {
+        expect(src.contains("'$key'"), isTrue,
+            reason: '必须识别会话 cookie：$key');
+      }
+      expect(
+        src.contains('if (!hasSession) return null;'),
+        isTrue,
+        reason: '没有会话 cookie 时必须返回 null，不得兜底造一个',
+      );
+    });
+
+    test('HTTP 层必须接住 Set-Cookie', () {
+      final httpSrc =
+          File('lib/src/core/http_client.dart').readAsStringSync();
+      expect(httpSrc.contains('set-cookie'), isTrue,
+          reason: 'Set-Cookie 必须单独读取，否则会话凭证被丢弃');
+      expect(httpSrc.contains('parsedSetCookies'), isTrue);
     });
   });
 

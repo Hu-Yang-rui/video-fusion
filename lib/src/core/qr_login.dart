@@ -45,13 +45,29 @@ class QrLoginChallenge {
     required this.challengeKey,
     required this.createdAt,
     this.expiresIn = const Duration(minutes: 3),
+    this.qrImageBase64,
   });
 
   /// 平台标识。
   final String platformId;
 
   /// 二维码要编码的内容（一个 URL 字符串，由平台提供）。
+  ///
+  /// 仅当 [qrImageBase64] 为 null 时用于本地渲染二维码。
   final String qrContent;
+
+  /// 平台**直接下发**的二维码图片（base64 PNG）。
+  ///
+  /// 抖音 passport 返回的是一张已渲染好的 PNG，不是待编码的字符串。
+  /// 若把它当文本交给 `QrImageView` 二次编码，画出来的是一个
+  /// 内容为"base64 字符串"的二维码——**扫不出来**，
+  /// 用户看到的就是"二维码无效"。
+  ///
+  /// 因此有这个字段时，UI 必须直接展示图片，不做二次编码。
+  final String? qrImageBase64;
+
+  /// 是否由平台下发了现成图片。
+  bool get hasImage => qrImageBase64 != null && qrImageBase64!.isNotEmpty;
 
   /// 轮询用的挑战标识。
   final String challengeKey;

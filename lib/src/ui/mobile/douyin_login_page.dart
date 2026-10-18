@@ -53,6 +53,17 @@ class _DouyinLoginPageState extends State<DouyinLoginPage> {
   Timer? _timer;
   bool _requesting = false;
 
+  /// 是否已登录成功。成功后停止一切轮询，且不再覆盖状态。
+  bool _succeeded = false;
+
+  /// 单次轮询是否仍在进行。
+  ///
+  /// `Timer.periodic` 的回调是 async 的：上一次请求若超过 2 秒
+  /// （网络慢、风控重试），下一次回调会与它**并发**发出，
+  /// 造成同一 token 被重复轮询、响应乱序覆盖状态。
+  /// 用这个标志把轮询变成串行的。
+  bool _pollInFlight = false;
+
   @override
   void initState() {
     super.initState();
@@ -67,8 +78,12 @@ class _DouyinLoginPageState extends State<DouyinLoginPage> {
 
   Future<void> _request() async {
     _timer?.cancel();
+    _timer = null;
+    _pollInFlight = false;
+    widget.client.resetCookies();
     setState(() {
       _requesting = true;
+      _succeeded = false;
       _error = null;
       _challenge = null;
       _poll = null;
@@ -97,10 +112,13 @@ class _DouyinLoginPageState extends State<DouyinLoginPage> {
 
   void _startPolling(DouyinQrChallenge challenge) {
     _timer = Timer.periodic(const Duration(seconds: 2), (t) async {
-      if (!mounted) {
+      if (!mounted || _succeeded) {
         t.cancel();
         return;
       }
+      // 串行化：上一次还没回来就跳过这一拍，不并发轮询。
+      if (_pollInFlight) return;
+
       if (challenge.isExpired) {
         t.cancel();
         setState(() {
@@ -112,16 +130,58 @@ class _DouyinLoginPageState extends State<DouyinLoginPage> {
         return;
       }
 
-      final result = await widget.client.pollQrStatus(challenge);
-      if (!mounted) return;
+      _pollInFlight = true;
+      DouyinLoginPollResult result;
+      try {
+        result = await widget.client.pollQrStatus(challenge);
+      } finally {
+        _pollInFlight = false;
+      }
+
+      // 页面已销毁，或期间已登录成功：结果作废，
+      // 不能覆盖已成功的状态。
+      if (!mounted || _succeeded) return;
+
+      // 登录成功：保存凭证并回调，然后停止轮询。
+      if (result.phase == DouyinLoginPhase.succeeded &&
+          result.session != null) {
+        t.cancel();
+        _timer = null;
+        await _persistSession(result.session!);
+        if (!mounted) return;
+        setState(() {
+          _succeeded = true;
+          _poll = result;
+        });
+        return;
+      }
+
       setState(() => _poll = result);
 
       // 被拦截或过期就停止轮询，不空转
       if (result.phase == DouyinLoginPhase.blocked ||
           result.phase == DouyinLoginPhase.expired) {
         t.cancel();
+        _timer = null;
       }
     });
+  }
+
+  /// 把会话写入加密保险库。
+  ///
+  /// 写入失败必须让用户知道——"看起来登上了但下次打开又没了"
+  /// 是最难排查的一类问题。
+  Future<void> _persistSession(PlatformSession session) async {
+    try {
+      await widget.vault.save(session);
+      widget.onLoggedIn?.call(session);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _succeeded = false;
+        _error = normalizeError(e, platformId: 'douyin');
+      });
+    }
   }
 
   @override
@@ -294,6 +354,17 @@ class _DouyinLoginPageState extends State<DouyinLoginPage> {
         if (poll.phase == DouyinLoginPhase.expired) ...[
           const SizedBox(height: AppleSpace.md),
           AppleSecondaryButton(label: '刷新二维码', onPressed: _request),
+        ],
+        if (poll.phase == DouyinLoginPhase.blocked) ...[
+          const SizedBox(height: AppleSpace.md),
+          AppleSecondaryButton(label: '重新获取二维码', onPressed: _request),
+        ],
+        if (_succeeded) ...[
+          const SizedBox(height: AppleSpace.md),
+          ApplePrimaryButton(
+            label: '完成',
+            onPressed: () => Navigator.of(context).maybePop(),
+          ),
         ],
       ],
     );

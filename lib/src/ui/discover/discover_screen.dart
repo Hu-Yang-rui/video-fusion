@@ -28,11 +28,18 @@ class DiscoverScreen extends StatefulWidget {
     required this.service,
     required this.onOpenVideo,
     this.onOpenSourcePicker,
+    this.onOpenLinkIntake,
   });
 
   final VideoService service;
   final void Function(UnifiedVideo) onOpenVideo;
   final VoidCallback? onOpenSourcePicker;
+
+  /// 打开「链接接入」面板。
+  ///
+  /// 该能力原先挂在短视频顶栏（一个加链图标），
+  /// 属于工具语义、且占用视频画面，已移到本页工具栏。
+  final VoidCallback? onOpenLinkIntake;
 
   @override
   State<DiscoverScreen> createState() => _DiscoverScreenState();
@@ -158,19 +165,32 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
               subtitle: _searchMode
                   ? '搜索「$_query」'
                   : (_active?.label ?? '浏览长视频'),
-              trailing: AppleIconButton(
-                icon: _searchMode ? Icons.close_rounded : Icons.search_rounded,
-                onPressed: () {
-                  setState(() {
-                    _searchMode = !_searchMode;
-                    if (!_searchMode) {
-                      _searchCtrl.clear();
-                      _query = '';
-                      _reload();
-                    }
-                  });
-                },
-                color: c.label,
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (widget.onOpenLinkIntake != null && !_searchMode)
+                    AppleIconButton(
+                      icon: Icons.add_link_rounded,
+                      onPressed: widget.onOpenLinkIntake,
+                      color: c.label,
+                    ),
+                  AppleIconButton(
+                    icon: _searchMode
+                        ? Icons.close_rounded
+                        : Icons.search_rounded,
+                    onPressed: () {
+                      setState(() {
+                        _searchMode = !_searchMode;
+                        if (!_searchMode) {
+                          _searchCtrl.clear();
+                          _query = '';
+                          _reload();
+                        }
+                      });
+                    },
+                    color: c.label,
+                  ),
+                ],
               ),
             ),
 

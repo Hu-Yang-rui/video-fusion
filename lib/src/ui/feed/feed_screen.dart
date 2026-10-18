@@ -25,7 +25,7 @@ import '../../core/errors.dart';
 import '../../core/video_service.dart';
 import '../../design/apple_tokens.dart';
 import '../../design/components/video_widgets.dart';
-import '../../models/feed.dart';
+
 import '../../models/unified_video.dart';
 import '../../player/player_controller.dart';
 import '../interaction/interaction_controller.dart';
@@ -307,11 +307,8 @@ class _FeedScreenState extends State<FeedScreen> {
             child: IgnorePointer(
               ignoring: !_showUi,
               child: _TopBar(
-                sources: c.source,
                 loggedInLabel: widget.loggedInLabel,
-                onOpenSourcePicker: widget.onOpenSourcePicker,
                 onOpenLogin: widget.onOpenLogin,
-                onOpenLinkIntake: widget.onOpenLinkIntake,
               ),
             ),
           ),
@@ -541,18 +538,12 @@ class _FeedStage extends StatelessWidget {
 /// 顶部悬浮栏。
 class _TopBar extends StatelessWidget {
   const _TopBar({
-    required this.sources,
     required this.loggedInLabel,
-    required this.onOpenSourcePicker,
     required this.onOpenLogin,
-    required this.onOpenLinkIntake,
   });
 
-  final FeedSource? sources;
   final String? loggedInLabel;
-  final VoidCallback onOpenSourcePicker;
   final VoidCallback onOpenLogin;
-  final VoidCallback onOpenLinkIntake;
 
   @override
   Widget build(BuildContext context) {
@@ -574,22 +565,15 @@ class _TopBar extends StatelessWidget {
           ],
         ),
       ),
+      // 顶栏只保留"账号"这一项用户功能。
+      //
+      // 历史版本这里还有「内容来源」下拉与「链接接入」按钮：
+      //  - 内容来源是平台选择器，属于工具语义，已移到「发现」页的来源分段；
+      //  - 链接接入属于外部内容导入，已移到「发现」页工具栏。
+      // 视频画面上不再叠加任何平台选择/工具入口。
       child: Row(
         children: [
-          // 内容来源
-          _GlassButton(
-            label: sources?.label ?? '推荐',
-            icon: Icons.expand_more_rounded,
-            onTap: onOpenSourcePicker,
-          ),
           const Spacer(),
-          // 链接接入
-          _GlassIconButton(
-            icon: Icons.add_link_rounded,
-            onTap: onOpenLinkIntake,
-          ),
-          const SizedBox(width: AppleSpace.sm),
-          // 账号
           _GlassIconButton(
             icon: loggedInLabel == null
                 ? Icons.person_outline_rounded
@@ -598,51 +582,6 @@ class _TopBar extends StatelessWidget {
             highlighted: loggedInLabel != null,
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// 毛玻璃按钮。
-class _GlassButton extends StatelessWidget {
-  const _GlassButton({
-    required this.label,
-    required this.icon,
-    required this.onTap,
-  });
-
-  final String label;
-  final IconData icon;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Container(
-        padding: const EdgeInsets.only(left: 12, right: 8, top: 7, bottom: 7),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(AppleRadius.pill),
-          border: Border.all(
-            color: Colors.white.withValues(alpha: 0.12),
-            width: 0.5,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              label,
-              style: AppleType.footnoteEmphasized.copyWith(
-                color: Colors.white,
-                fontSize: 14,
-              ),
-            ),
-            Icon(icon, size: 16, color: Colors.white),
-          ],
-        ),
       ),
     );
   }
@@ -948,16 +887,6 @@ class _ActionRail extends StatelessWidget {
             Clipboard.setData(ClipboardData(text: video.canonicalUrl));
             _toast(context, '链接已复制');
           },
-        ),
-        const SizedBox(height: AppleSpace.lg),
-
-        // 原平台
-        InteractionRailButton(
-          icon: Icons.open_in_new_rounded,
-          activeIcon: Icons.open_in_new_rounded,
-          label: '原平台',
-          active: false,
-          onTap: onOpenOriginal,
         ),
         const SizedBox(height: AppleSpace.lg),
 

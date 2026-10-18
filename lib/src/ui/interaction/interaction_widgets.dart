@@ -408,6 +408,10 @@ class _CommentSheetState extends State<CommentSheet> {
                   ),
                   const AppleDivider(indent: 0),
 
+                  // IP 属地缺失时给一句明确说明（面板级，不是每条评论）。
+                  if (_ipLocationNotice(ctrl) != null)
+                    _IpLocationNotice(text: _ipLocationNotice(ctrl)!),
+
                   Expanded(
                     child: _buildBody(c, ctrl, sheetScroll),
                   ),
@@ -418,6 +422,22 @@ class _CommentSheetState extends State<CommentSheet> {
         );
       },
     );
+  }
+
+  /// 属地缺失说明文案。可得时不返回内容（不占位、不空行）。
+  ///
+  /// 三种缺失原因分开表述：未登录是可以改变的状态，
+  /// 已登录仍无则是平台限制——混为一谈会让用户反复登录却始终拿不到。
+  static String? _ipLocationNotice(InteractionController ctrl) {
+    return switch (ctrl.ipLocationAvailability) {
+      IpLocationAvailability.unavailableAnonymous =>
+        '评论 IP 属地暂不可用：未登录时平台不下发该字段。登录后可能可得。',
+      IpLocationAvailability.unavailableLoggedIn =>
+        '评论 IP 属地暂不可用：当前账号下平台未下发该字段。',
+      IpLocationAvailability.available ||
+      IpLocationAvailability.unknown =>
+        null,
+    };
   }
 
   Widget _buildBody(
@@ -716,5 +736,51 @@ class _CommentTile extends StatelessWidget {
     if (diff.inHours > 0) return '${diff.inHours} 小时前';
     if (diff.inMinutes > 0) return '${diff.inMinutes} 分钟前';
     return '刚刚';
+  }
+}
+
+/// 评论面板顶部的属地缺失说明条。
+///
+/// 刻意做得轻：一行小字 + 信息图标，不占卡片、不加重底色。
+/// 它的作用是"如实告知"，不是提醒用户去做什么。
+class _IpLocationNotice extends StatelessWidget {
+  const _IpLocationNotice({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppleSpace.lg,
+        AppleSpace.sm,
+        AppleSpace.lg,
+        AppleSpace.xs,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 1.5),
+            child: Icon(
+              Icons.info_outline_rounded,
+              size: 13,
+              color: c.tertiaryLabel,
+            ),
+          ),
+          const SizedBox(width: AppleSpace.xs),
+          Expanded(
+            child: Text(
+              text,
+              style: AppleType.caption2.copyWith(
+                color: c.tertiaryLabel,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

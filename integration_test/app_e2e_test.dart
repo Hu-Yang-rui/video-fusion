@@ -34,9 +34,10 @@ import 'package:video_fusion/src/models/feed.dart';
 import 'package:video_fusion/src/models/unified_video.dart';
 import 'package:video_fusion/src/models/playback.dart';
 import 'package:video_fusion/src/player/player_controller.dart';
+import 'package:video_fusion/src/core/video_progress_store.dart';
+import 'package:video_fusion/src/design/apple_theme.dart';
 import 'package:video_fusion/src/ui/mobile/feed_controller.dart';
-import 'package:video_fusion/src/ui/mobile/mobile_theme.dart';
-import 'package:video_fusion/src/ui/mobile/settings_page.dart';
+import 'package:video_fusion/src/ui/settings/settings_screen.dart';
 
 ({VideoService service, PlatformRegistry registry}) _realStack() {
   final logger = FusionLogger(minLevel: LogLevel.error);
@@ -331,57 +332,62 @@ void main() {
   });
 
   group('真实环境 · UI', () {
-    testWidgets('设置页如实展示平台能力与来源可用性', (tester) async {
+    testWidgets('设置页如实展示账号与平台支持', (tester) async {
       final stack = _realStack();
+      final logger = FusionLogger(minLevel: LogLevel.error);
+
       await tester.pumpWidget(MaterialApp(
-        theme: MobileTheme.dark(),
-        home: SettingsPage(
+        theme: AppleTheme.light(),
+        home: SettingsScreen(
           service: stack.service,
+          registry: stack.registry,
           vault: CredentialVault(
             storage: InMemorySecureStore(),
-            logger: FusionLogger(enabled: false),
+            logger: logger,
           ),
-          onLogout: () async {},
+          progressStore: VideoProgressStore(
+            storage: InMemoryStore(),
+            logger: logger,
+          ),
         ),
       ));
-      await tester.pumpAndSettle();
+      // 设置页会异步读凭证，等它稳定
+      await tester.pumpAndSettle(const Duration(seconds: 2));
 
       // 顶部可见区域
       expect(find.text('设置'), findsOneWidget);
-      expect(find.text('内容来源'), findsOneWidget);
-      expect(find.text('账号'), findsOneWidget);
+      expect(find.text('账号'), findsWidgets);
 
-      // 内容来源区应如实标注抖音推荐不可用
-      expect(find.textContaining('抖音'), findsWidgets,
-          reason: '内容来源区应列出抖音来源');
-      expect(find.textContaining('风控'), findsWidgets,
-          reason: '不可用原因必须如实展示');
+      // 两个真实平台都应出现在账号区
+      expect(find.text('哔哩哔哩'), findsWidgets,
+          reason: '账号区应列出 B站');
+      expect(find.text('抖音'), findsWidgets,
+          reason: '账号区应列出抖音');
 
-      // 下方内容需要滚动（ListView 惰性构建），用 scrollUntilVisible 更稳
+      // 滚动到「平台支持」区，确认能力如实标注
       await tester.scrollUntilVisible(
-        find.text('平台能力'),
-        300,
-        scrollable: find.byType(Scrollable).first,
-        maxScrolls: 30,
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.text('平台能力'), findsOneWidget);
-      expect(find.text('哔哩哔哩'), findsWidgets);
-      // 抖音需要平台签名，必须如实标注为受限
-      expect(find.text('需平台签名'), findsWidgets,
-          reason: '抖音的签名依赖必须如实标注');
-
-      // 继续滚动到合规说明
-      await tester.scrollUntilVisible(
-        find.textContaining('不使用任何 WebView'),
+        find.text('平台支持'),
         300,
         scrollable: find.byType(Scrollable).first,
         maxScrolls: 40,
       );
       await tester.pumpAndSettle();
-      expect(find.textContaining('不索取'), findsWidgets,
-          reason: '必须展示不索取账号密码的合规说明');
+      expect(find.text('平台支持'), findsOneWidget);
+
+      // 滚动到「存储与隐私」区，确认凭证保护级别如实告知
+      await tester.scrollUntilVisible(
+        find.text('存储与隐私'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+        maxScrolls: 60,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('凭证存储'), findsOneWidget);
+      expect(
+        find.textContaining('系统安全存储'),
+        findsWidgets,
+        reason: '必须如实说明凭证用系统安全存储加密保存',
+      );
     });
   });
 }

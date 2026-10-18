@@ -18,6 +18,21 @@ import '../../core/video_service.dart';
 import '../../models/interaction.dart';
 import '../../models/unified_video.dart';
 
+/// 评论 IP 属地的可得性。
+enum IpLocationAvailability {
+  /// 尚未加载评论，或评论为空——此时不提示任何东西。
+  unknown,
+
+  /// 至少有一条评论带属地，正常展示。
+  available,
+
+  /// 未登录，平台不下发属地。登录后可能可得。
+  unavailableAnonymous,
+
+  /// 已登录但平台仍不下发。这是平台限制，登录也解决不了。
+  unavailableLoggedIn,
+}
+
 /// 单个视频的互动控制器。
 ///
 /// 每个详情页/当前屏持有一个实例，避免不同视频的状态互相污染。
@@ -102,6 +117,29 @@ class InteractionController extends ChangeNotifier {
 
   bool _commentsLoadedOnce = false;
   bool get commentsLoadedOnce => _commentsLoadedOnce;
+
+  // ── IP 属地可得性 ───────────────────────────────────────────
+
+  /// 当前已加载评论的属地覆盖情况。
+  ///
+  /// 需求要求"数据不存在时明确显示暂不可用"，但**不能**在每条评论上
+  /// 都印一遍——20 条评论印 20 次"暂不可用"是噪音，不是信息。
+  ///
+  /// 因此在面板层给一句明确说明，单条评论缺失时整段不渲染。
+  /// 三种缺失原因要分开，因为它们对应的用户行动完全不同：
+  ///  - 未登录 → 提示去登录
+  ///  - 已登录仍无 → 平台限制，登录也拿不到，别让用户白试
+  ///  - 尚未加载 → 不提示
+  IpLocationAvailability get ipLocationAvailability {
+    if (!_commentsLoadedOnce) return IpLocationAvailability.unknown;
+    if (_comments.isEmpty) return IpLocationAvailability.unknown;
+    if (_comments.any((c) => c.ipLocation != null)) {
+      return IpLocationAvailability.available;
+    }
+    return _session == null
+        ? IpLocationAvailability.unavailableAnonymous
+        : IpLocationAvailability.unavailableLoggedIn;
+  }
 
   // ── 最近一次操作反馈 ────────────────────────────────────────
 
