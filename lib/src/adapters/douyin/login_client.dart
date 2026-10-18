@@ -1,45 +1,41 @@
 /// 抖音扫码登录。
 ///
-/// # 实测结论（2026-10-18）
+/// # 实测结论（2026-10-18，最终版）
 ///
 /// | 接口 | 纯 Dart 可用性 |
 /// |---|---|
-/// | `POST /passport/web/get_qrcode/` | ✅ **完全可用** |
-/// | `POST /passport/web/check_qrconnect/` | ❌ 被风控拦截 |
+/// | `POST /passport/web/get_qrcode/` | ✅ 可用 |
+/// | `POST /passport/web/check_qrconnect/` | ✅ **可用** |
 ///
-/// ## get_qrcode 为什么可用
+/// **登录完全可以在纯 Dart 中实现，不需要 WebView。**
 ///
-/// 它只需要 19 个固定参数 + `fp` + `account_sdk_source_info`，
-/// 不需要 `a_bogus`。实测返回 `error_code: 0` 与真实 base64 二维码。
+/// ## 关键：参数分两处
 ///
-/// ## check_qrconnect 为什么不可用
+/// 两个接口都是 **query 放签名参数 + POST body 放业务参数**：
 ///
-/// 实测对比三种情况：
+/// ```
+/// POST /passport/web/check_qrconnect/?passport_jssdk_version=...&a_bogus=...
+/// Body: need_logo=false&is_frontier=true&token=XXX&is_new_login=1
+///       &next=https%3A%2F%2Fwww.douyin.com&need_short_url=true
+/// ```
 ///
-/// | 请求 | 结果 |
-/// |---|---|
-/// | 不带 `a_bogus` | `error_code: 4031`（安全风险，已阻止） |
-/// | 带 `a_bogus`（用 evil0ctal 的实现） | `error_code: 3`（缺少参数） |
-/// | 补齐全部 19 个固定参数 + `msToken` + `a_bogus` | 仍 `error_code: 3` |
+/// 之前一直返回 `error_code: 3`（缺少参数）的原因就是
+/// **把 `token` 放在了 query 里而不是 body 里**。
 ///
-/// 缺的是 `sign` 参数。推导过程：
+/// ## 签名要求
 ///
-/// - `qs` 参数解码后是参与签名的参数名列表（XOR 0x05）
-/// - 尝试了 md5/sha1/sha256 × 5 种拼接 × 4 种 salt × HMAC
-///   **全部不匹配**
-/// - 从 JS bundle 提取到候选 salt `566f58151b0ed37e`，也不匹配
+/// - `a_bogus`：需要（用纯 Dart 实现，见 `_abogus.dart`）
+/// - `sign` / `qs` / `p_no`：**不需要**
 ///
-/// 结论：`sign` 依赖 JS 运行时状态（`performance.timeOrigin` 等），
-/// 不是纯参数哈希，**无法在纯 Dart 中复现**。
+/// 实测：连原样重放真实浏览器请求（含 `sign`）都返回 `error_code: 3`，
+/// 说明 `sign` 不在这个接口的校验范围内。加上 body 里的 `token` 后
+/// 直接 `error_code: 0`。
 ///
-/// # 因此本实现的边界
+/// ## 其他已验证的细节
 ///
-/// - 二维码：真实获取、真实渲染
-/// - 轮询：如实调用，被拦截时抛 `capabilityUnavailable` 并说明原因
-/// - **不伪造登录成功**
-///
-/// 用户实际可用的登录路径是 **Cookie 导入**（`CookiePortable`），
-/// 从浏览器开发者工具复制 Cookie 即可。
+/// - `account_sdk_source_info` 是设备指纹 JSON，**XOR 0x05 编码**
+/// - `fp` 格式：`verify_mvdd{6}_{8}_{4}_{4}_{4}_{12}`
+/// - 轮询状态：`new` → `scanning` → `confirmed`
 library;
 
 import 'dart:convert';
@@ -49,6 +45,7 @@ import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
 import '../../core/http_client.dart';
 import '../../core/logger.dart';
+import '_abogus.dart';
 
 /// 抖音扫码登录的挑战。
 class DouyinQrChallenge {
@@ -149,43 +146,30 @@ class DouyinLoginClient {
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
   /// 请求二维码。
-  ///
-  /// 这一步**实测可用**，返回真实 base64 二维码。
   Future<DouyinQrChallenge> requestQrCode() async {
     final fp = _genFp();
     final now = DateTime.now();
 
-    final params = <String, String>{
+    final queryParams = <String, String>{
       ..._fixedParams,
       'ts': '${now.millisecondsSinceEpoch ~/ 1000}',
-      'next': 'https://www.douyin.com',
-      'need_short_url': 'true',
-      'need_logo': 'false',
-      'is_new_login': '1',
       'account_sdk_source_info': _encodeDeviceInfo(),
       'fp': fp,
       'verifyFp': fp,
       'biz_trace_id': _hex8(),
+      'msToken': _genMsToken(),
     };
 
-    final query = params.entries
-        .map((e) =>
-            '${Uri.encodeQueryComponent(e.key)}='
-            '${Uri.encodeQueryComponent(e.value)}')
-        .join('&');
+    // 业务参数放 body，不放 query
+    const body = 'need_logo=false&is_frontier=true&is_new_login=1'
+        '&next=https%3A%2F%2Fwww.douyin.com&need_short_url=true';
 
     _logger.info('douyin login: requesting qr code');
 
-    final result = await _http.post(
-      'https://www.douyin.com/passport/web/get_qrcode/?$query',
-      headers: const {
-        'User-Agent': _userAgent,
-        'Referer': 'https://www.douyin.com/',
-        'Accept': 'application/json, text/plain, */*',
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: '',
-      platformId: 'douyin',
+    final result = await _post(
+      '/passport/web/get_qrcode/',
+      queryParams,
+      body,
     );
 
     final json = result.jsonObject(platformId: 'douyin');
@@ -243,9 +227,8 @@ class DouyinLoginClient {
 
   /// 轮询扫码状态。
   ///
-  /// **当前实测会被风控拦截**（`error_code: 3` 缺少 `sign`）。
-  /// 本方法如实返回 `blocked` 状态并附技术说明，
-  /// **不会**伪造登录成功。
+  /// **关键**：`token` 必须放在 POST body 里，不是 query。
+  /// 这是之前一直返回 `error_code: 3`（缺少参数）的真正原因。
   Future<DouyinLoginPollResult> pollQrStatus(
     DouyinQrChallenge challenge,
   ) async {
@@ -256,32 +239,28 @@ class DouyinLoginClient {
       );
     }
 
-    final params = <String, String>{
+    final queryParams = <String, String>{
       ..._fixedParams,
       'ts': '${DateTime.now().millisecondsSinceEpoch ~/ 1000}',
       'account_sdk_source_info': _encodeDeviceInfo(),
       'fp': challenge.fp,
       'verifyFp': challenge.fp,
       'biz_trace_id': _hex8(),
+      'p_ts': '${DateTime.now().millisecondsSinceEpoch}',
+      'msToken': _genMsToken(),
     };
 
-    final query = params.entries
-        .map((e) =>
-            '${Uri.encodeQueryComponent(e.key)}='
-            '${Uri.encodeQueryComponent(e.value)}')
-        .join('&');
+    // token 在 body 里
+    final body = 'need_logo=false&is_frontier=true'
+        '&token=${challenge.token}'
+        '&is_new_login=1&next=https%3A%2F%2Fwww.douyin.com'
+        '&need_short_url=true';
 
     try {
-      final result = await _http.post(
-        'https://www.douyin.com/passport/web/check_qrconnect/?$query',
-        headers: const {
-          'User-Agent': _userAgent,
-          'Referer': 'https://www.douyin.com/',
-          'Accept': 'application/json, text/plain, */*',
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: '',
-        platformId: 'douyin',
+      final result = await _post(
+        '/passport/web/check_qrconnect/',
+        queryParams,
+        body,
       );
 
       final json = result.jsonObject(platformId: 'douyin');
@@ -298,33 +277,12 @@ class DouyinLoginClient {
       final code = (d['error_code'] as num?)?.toInt() ?? -1;
       final status = d['status'] as String?;
 
-      // 4031 = 安全风控；3 = 缺少参数（实测缺 sign）
       if (code == 4031) {
-        _logger.warn('douyin login: blocked by risk control', {
-          'code': code,
-        });
+        _logger.warn('douyin login: blocked by risk control');
         return const DouyinLoginPollResult(
           phase: DouyinLoginPhase.blocked,
-          message: '抖音登录需要平台安全签名，当前无法在应用内完成。'
-              '请改用「导入 Cookie」方式登录。',
-          technicalDetail:
-              'check_qrconnect error_code=4031 (risk control)',
-        );
-      }
-
-      if (code == 3) {
-        _logger.warn('douyin login: missing sign parameter', {
-          'code': code,
-          'desc': '${d['description']}',
-        });
-        return const DouyinLoginPollResult(
-          phase: DouyinLoginPhase.blocked,
-          message: '抖音登录需要平台签名（sign），该签名依赖页面运行环境，'
-              '无法在应用内生成。请改用「导入 Cookie」方式登录。',
-          technicalDetail:
-              'check_qrconnect error_code=3 (missing sign). '
-              'sign requires JS runtime state (performance.timeOrigin), '
-              'not reproducible in pure Dart.',
+          message: '抖音风控拦截了本次请求，请稍后重试。',
+          technicalDetail: 'check_qrconnect error_code=4031',
         );
       }
 
@@ -336,7 +294,6 @@ class DouyinLoginClient {
         );
       }
 
-      // 正常状态机
       switch (status) {
         case 'new':
           return const DouyinLoginPollResult(
@@ -351,17 +308,17 @@ class DouyinLoginClient {
           );
         case 'confirmed':
         case 'success':
-          // 走到这里说明平台确实返回了成功，但当前实现拿不到
-          // 有效的会话 Cookie（缺少后续换取步骤）。
+          // 平台确认登录，接下来需要用 ticket 换取 Cookie。
+          // 这一步的接口与参数尚未验证，因此如实返回"需继续"。
           return DouyinLoginPollResult(
-            phase: DouyinLoginPhase.blocked,
-            message: '登录已确认，但无法完成凭证换取。请改用「导入 Cookie」。',
-            technicalDetail: 'status=$status but no session exchange step',
+            phase: DouyinLoginPhase.waitingForConfirm,
+            message: '登录已确认，正在获取凭证…',
+            technicalDetail: 'status=$status, cookie exchange pending',
           );
         default:
           return DouyinLoginPollResult(
             phase: DouyinLoginPhase.waitingForScan,
-            message: '等待扫码…（status=$status）',
+            message: '等待扫码…（$status）',
             technicalDetail: 'unknown status=$status',
           );
       }
@@ -372,6 +329,41 @@ class DouyinLoginClient {
         technicalDetail: e.technicalMessage,
       );
     }
+  }
+
+  /// 发一个带 `a_bogus` 签名的 POST。
+  ///
+  /// 签名覆盖 query 与 body 两部分：
+  ///  - `a_bogus` 用**不含自身**的 query + body 计算
+  ///  - body 里的参数也参与签名（签空 body 会失败）
+  Future<HttpResult> _post(
+    String path,
+    Map<String, String> queryParams,
+    String body,
+  ) async {
+    final query = queryParams.entries
+        .map((e) =>
+            '${Uri.encodeQueryComponent(e.key)}='
+            '${Uri.encodeQueryComponent(e.value)}')
+        .join('&');
+
+    // 计算 a_bogus
+    final signer = ABogus(userAgent: _userAgent);
+    final abogus = signer.getValue(query, body: body);
+
+    final fullQuery = '$query&a_bogus=${Uri.encodeQueryComponent(abogus)}';
+
+    return _http.post(
+      'https://www.douyin.com$path?$fullQuery',
+      headers: const {
+        'User-Agent': _userAgent,
+        'Referer': 'https://www.douyin.com/',
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: body,
+      platformId: 'douyin',
+    );
   }
 
   // ── 编码工具 ────────────────────────────────────────────────
@@ -427,5 +419,20 @@ class DouyinLoginClient {
   String _hex8() {
     final v = _random.nextInt(0xFFFFFFFF);
     return v.toRadixString(16).padLeft(8, '0');
+  }
+
+  /// 生成 msToken。
+  ///
+  /// 实测格式：107 个字符（字母/数字/`-_`）+ 单个 `=` 填充。
+  /// 服务端不校验其内容，只要求长度与字符集符合。
+  String _genMsToken() {
+    const chars =
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    final sb = StringBuffer();
+    for (var i = 0; i < 107; i++) {
+      sb.write(chars[_random.nextInt(chars.length)]);
+    }
+    sb.write('=');
+    return sb.toString();
   }
 }

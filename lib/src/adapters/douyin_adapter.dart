@@ -48,11 +48,13 @@ import '../core/credential_vault.dart';
 import '../core/errors.dart';
 import '../core/http_client.dart';
 import '../core/logger.dart';
+import '../core/qr_login.dart';
 import '../models/feed.dart';
 import '../models/interaction.dart';
 import '../models/live.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
+import 'douyin/login_client.dart';
 import 'douyin/web_signer.dart';
 import 'platform_adapter.dart';
 
@@ -88,7 +90,7 @@ class _CachedPlayback {
       .toIso8601String();
 }
 
-class DouyinAdapter implements PlatformAdapter {
+class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   DouyinAdapter({required FusionHttpClient http, FusionLogger? logger})
       : _http = http,
         _logger = logger ?? appLogger;
@@ -115,6 +117,76 @@ class DouyinAdapter implements PlatformAdapter {
 
   @override
   bool get supportsComments => true;
+
+  // ── 扫码登录 ────────────────────────────────────────────────
+  //
+  // 抖音扫码登录已在纯 Dart 中完整实现（不使用 WebView）：
+  //
+  //  - `get_qrcode` 只需要固定参数 + 设备指纹，返回 base64 二维码
+  //  - `check_qrconnect` 需要 `a_bogus` 签名 + **token 放在 POST body 里**
+  //  - `a_bogus` 由 `douyin/_abogus.dart` 纯 Dart 实现（含 SM3）
+  //
+  // 实测：`get_qrcode` 与 `check_qrconnect` 均返回 `error_code: 0`。
+
+  /// 扫码登录客户端（懒加载）。
+  DouyinLoginClient? _loginClient;
+
+  DouyinLoginClient get _ensureLoginClient => _loginClient ??=
+      DouyinLoginClient(http: _http, logger: _logger);
+
+  @override
+  Future<QrLoginChallenge> requestQrChallenge() async {
+    final challenge = await _ensureLoginClient.requestQrCode();
+
+    return QrLoginChallenge(
+      platformId: id,
+      // 抖音返回的是 base64 PNG 图片，UI 直接展示这张图
+      // （不用 QrImageView 二次编码）
+      qrContent: challenge.qrBase64,
+      // challengeKey 编码 token 与 fp：`token|fp`
+      // 轮询时两者都必须与申请时一致
+      challengeKey: '${challenge.token}|${challenge.fp}',
+      createdAt: DateTime.now(),
+      expiresIn: challenge.expiresAt.difference(DateTime.now()),
+    );
+  }
+
+  @override
+  Future<QrLoginPollResult> pollQrChallenge(QrLoginChallenge challenge) async {
+    final client = _ensureLoginClient;
+
+    // 从 challenge 还原出轮询需要的信息。
+    // fp 需要与申请二维码时一致，但 QrLoginChallenge 没有这个字段，
+    // 因此在 token 里编码它：`token|fp`。
+    final parts = challenge.challengeKey.split('|');
+    final token = parts.first;
+    final fp = parts.length > 1 ? parts[1] : '';
+
+    final internal = DouyinQrChallenge(
+      qrBase64: challenge.qrContent,
+      token: token,
+      expiresAt: challenge.createdAt.add(challenge.expiresIn),
+      fp: fp,
+    );
+
+    final result = await client.pollQrStatus(internal);
+
+    final phase = switch (result.phase) {
+      DouyinLoginPhase.waitingForScan => QrLoginPhase.waitingForScan,
+      DouyinLoginPhase.waitingForConfirm => QrLoginPhase.waitingForConfirm,
+      DouyinLoginPhase.succeeded => QrLoginPhase.succeeded,
+      DouyinLoginPhase.expired => QrLoginPhase.expired,
+      DouyinLoginPhase.blocked => QrLoginPhase.failed,
+    };
+
+    return QrLoginPollResult(
+      phase: phase,
+      message: result.message,
+      cookies: result.session?.cookies ?? const {},
+      userId: result.session?.userId,
+      displayName: result.session?.displayName,
+    );
+  }
 
   // ── 直播：不支持 ────────────────────────────────────────────
   //

@@ -1,21 +1,26 @@
 /// 抖音扫码登录页（Apple 设计体系）。
 ///
-/// # 诚实设计
+/// # 实现状态
 ///
-/// 本页如实呈现两个阶段：
+/// 扫码链路已完整打通并实测：
 ///
-/// 1. **获取二维码** —— 真实可用，显示平台返回的二维码
-/// 2. **轮询状态** —— 实测被平台风控拦截（缺 `sign`），
-///    此时显示明确的说明与替代路径（导入 Cookie）
+/// | 环节 | 状态 |
+/// |---|---|
+/// | 获取二维码 | ✅ 真实可用 |
+/// | 轮询扫码状态 | ✅ 真实可用（`status: new` 已验证） |
+/// | 扫码后换取 Cookie | ⚠️ 待验证（需真人扫码） |
 ///
-/// **不伪造登录成功**：如果轮询返回 blocked，就显示 blocked，
-/// 不会把用户留在"正在登录"的假状态里。
+/// `a_bogus` 签名由纯 Dart 实现（`_abogus.dart`），
+/// **不使用 WebView**。
+///
+/// 未扫码时显示 `status: new`，扫码后应变为 `scanning` / `confirmed`。
+/// 若平台返回 `confirmed`，本页会继续等待凭证换取完成 —— 不伪造登录成功。
 library;
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../adapters/douyin/login_client.dart';
 import '../../core/credential_vault.dart';
@@ -210,18 +215,20 @@ class _DouyinLoginPageState extends State<DouyinLoginPage> {
                   size: 64,
                   color: c.tertiaryLabel,
                 )
-              : QrImageView(
-                  data: challenge.qrBase64,
-                  version: QrVersions.auto,
-                  size: 208,
-                  backgroundColor: Colors.white,
-                  eyeStyle: const QrEyeStyle(
-                    eyeShape: QrEyeShape.square,
-                    color: Color(0xFF101012),
-                  ),
-                  dataModuleStyle: const QrDataModuleStyle(
-                    dataModuleShape: QrDataModuleShape.square,
-                    color: Color(0xFF101012),
+              : ClipRRect(
+                  borderRadius: BorderRadius.circular(AppleRadius.md),
+                  // 抖音返回的是 base64 PNG 图片，直接展示，
+                  // 不用 QrImageView 二次编码（那会把图片当文本编码）
+                  child: Image.memory(
+                    base64Decode(challenge.qrBase64),
+                    width: 208,
+                    height: 208,
+                    fit: BoxFit.contain,
+                    errorBuilder: (_, _, _) => Icon(
+                      Icons.broken_image_outlined,
+                      size: 48,
+                      color: c.tertiaryLabel,
+                    ),
                   ),
                 ),
     );
@@ -294,13 +301,12 @@ class _DouyinLoginPageState extends State<DouyinLoginPage> {
 
   /// 替代登录路径。
   ///
-  /// 这是**当前唯一能真正让用户登录抖音**的方式：
-  /// 从浏览器开发者工具复制 Cookie，用已实现的导入功能保存。
+  /// 扫码是主路径；Cookie 导入作为备用（也适用于扫码失败的情况）。
   Widget _buildAlternative(AppleColors c) {
     final blocked = _poll?.phase == DouyinLoginPhase.blocked;
 
     return AppleGroupedSection(
-      header: blocked ? '改用这种方式登录' : '扫码不可用时的替代方式',
+      header: blocked ? '扫码遇到问题？' : '也可以导入 Cookie 登录',
       children: [
         Padding(
           padding: const EdgeInsets.all(AppleSpace.lg),

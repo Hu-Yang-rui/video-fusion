@@ -49,11 +49,29 @@ void main() {
       src = File('lib/src/adapters/douyin/login_client.dart').readAsStringSync();
     });
 
-    test('被风控拦截时返回 blocked，不伪造成功', () {
+    test('风控拦截时返回 blocked，不伪造成功', () {
       expect(src, contains('DouyinLoginPhase.blocked'));
-      // 4031 与 3 都必须映射到 blocked
+      // 4031（安全风险）必须映射到 blocked
       expect(src, contains('code == 4031'));
-      expect(src, contains('code == 3'));
+    });
+
+    test('token 放在 POST body 里（这是之前失败的原因）', () {
+      // 关键：token 在 body，不在 query
+      expect(
+        src.contains("'&token=\${challenge.token}'"),
+        isTrue,
+        reason: 'token 必须在 POST body 里，放 query 会返回 error_code 3',
+      );
+    });
+
+    test('使用纯 Dart 的 a_bogus 签名', () {
+      expect(src, contains('ABogus'));
+      expect(src, contains("import '_abogus.dart'"));
+    });
+
+    test('签名同时覆盖 query 与 body', () {
+      // a_bogus 必须基于完整 query + body 计算
+      expect(src, contains('getValue(query, body: body)'));
     });
 
     test('不保存无法验证的 Cookie', () {
