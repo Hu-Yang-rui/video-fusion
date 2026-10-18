@@ -212,6 +212,28 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   @override
   bool get supportsLive => true;
 
+  /// 抖音直播分区筛选：**客户端本地过滤**。
+  ///
+  /// # 为什么不是服务端筛选
+  ///
+  /// 抖音**没有可用的分区列表/分区房间接口**。实测以下全部返回
+  /// `url doesn't match` 或 404：
+  ///
+  /// ```
+  /// /webcast/room/partition/   /webcast/room/tag/list/
+  /// /webcast/category/list/    /webcast/room/tab/
+  /// /webcast/room/area/        /webcast/partition/
+  /// ```
+  ///
+  /// 但 `webcast/feed` 的每条房间都带真实的 `category` 码
+  /// （实测采集到 11 个：545/7832/546/1126/3828/4819/448/1129/7275/1128/3019）。
+  ///
+  /// 因此分区筛选的正确做法是：**拉 feed，按 category 在本地过滤**。
+  /// 这不是假数据——分区的房间、封面、主播、在线人数全是平台真实返回的，
+  /// 只是"筛选"这个动作在客户端完成。
+  ///
+  /// 代价：单个分区的内容量受限于一次 feed 返回的房间数。
+  /// 为了缓解，筛选时会多拉几批合并后再过滤。
   @override
   Future<LiveRoomPage> fetchLiveRooms({
     int page = 1,
@@ -219,36 +241,70 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     int? parentAreaId,
     int? areaId,
   }) async {
-    // 该接口没有分区参数，也没有稳定的游标。
-    // 传了 parentAreaId/areaId 说明调用方期望按分区筛选——
-    // 平台做不到，如实抛错而不是静默忽略筛选条件。
-    if (parentAreaId != null || areaId != null) {
-      throw FusionException(
-        code: FusionErrorCode.capabilityUnavailable,
-        userMessage: '抖音直播暂不支持按分区筛选。',
-        technicalMessage:
-            'webcast/feed has no partition parameter; '
-            'parentAreaId=$parentAreaId areaId=$areaId',
-        platformId: id,
+    // 抖音只用 areaId 表示 category 码；parentAreaId 无对应概念
+    final categoryFilter = areaId;
+
+    // 需要筛选时多拉几批，否则一次就够
+    final batches = categoryFilter == null ? 1 : 3;
+
+    final collected = <LiveRoomSummary>[];
+    final seen = <String>{};
+    for (var i = 0; i < batches; i++) {
+      final rooms = await _ensureLiveClient.fetchFeed(
+        count: pageSize.clamp(1, 20),
       );
+      for (final r in rooms) {
+        // 跨批次去重（推荐流会重复给同一房间）
+        if (seen.add(r.roomKey)) collected.add(r);
+      }
+      // 已经够多就提前结束
+      if (collected.length >= pageSize * 2) break;
     }
 
-    final rooms = await _ensureLiveClient.fetchFeed(
-      count: pageSize.clamp(1, 20),
-    );
+    final filtered = categoryFilter == null
+        ? collected
+        : collected.where((r) => r.categoryCode == categoryFilter).toList();
 
-    // 该接口没有可靠的 hasMore 语义（重复请求会给出不同集合），
-    // 因此只在拿到内容时声明还有更多，让列表可以继续下拉刷新。
+    // 筛选后可能为空——这是真实情况（该分区本批没有直播），
+    // 如实返回空列表，让 UI 显示空状态，不填充假数据。
     return LiveRoomPage(
-      items: rooms,
+      items: filtered,
       page: page,
-      hasMore: rooms.isNotEmpty,
-      totalCount: rooms.length,
+      hasMore: filtered.isNotEmpty,
+      totalCount: filtered.length,
       notes: [
-        '抖音直播推荐流，每次刷新会给出不同的直播间。',
-        if (rooms.isEmpty) '当前没有正在直播的房间。',
+        if (categoryFilter == null)
+          '抖音直播推荐流，每次刷新会给出不同的直播间。'
+        else
+          '抖音不支持服务端分区筛选，此处按分区码在本地过滤；'
+              '结果受本次推荐流内容限制。',
+        if (filtered.isEmpty && categoryFilter != null)
+          '该分区在本次拉取的内容里没有正在直播的房间。',
       ],
     );
+  }
+
+  /// 当前可用分区（从最近一次 feed 反推）。
+  ///
+  /// 抖音没有分区列表接口，所以只能"看到什么就列什么"。
+  /// 返回空表示还没拉过数据或本批无分区码。
+  @override
+  Future<List<LiveArea>> fetchLiveAreas() async {
+    try {
+      final rooms = await _ensureLiveClient.fetchFeed(count: 20);
+      final codes = _ensureLiveClient.categoriesIn(rooms);
+      return [
+        for (final code in codes)
+          if (DouyinLiveClient.categoryLabel(code) != null)
+            LiveArea(
+              id: code,
+              name: DouyinLiveClient.categoryLabel(code)!,
+            ),
+      ];
+    } catch (_) {
+      // 拿不到就返回空，UI 不渲染分区筛选
+      return const [];
+    }
   }
 
   @override
@@ -360,13 +416,6 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
         platformId: id,
       );
 
-  /// 抖音直播分区：**接口不可用**。
-  ///
-  /// 实测 `/webcast/room/partition/`、`/webcast/tag/list/` 均返回
-  /// `url doesn't match` 或 404。返回空列表让 UI 不渲染分区筛选，
-  /// 而不是编造分区名。
-  @override
-  Future<List<LiveArea>> fetchLiveAreas() async => const [];
 
   /// 抖音图片字段 `{"url_list":[...]}` 取第一张。
   static String? _firstUrl(Object? v) {

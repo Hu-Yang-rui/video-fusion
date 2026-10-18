@@ -33,6 +33,8 @@ class LiveRoomSummary {
     this.parentAreaName,
     this.uid,
     String? roomKey,
+    this.categoryCode,
+    this.categoryLabel,
   }) : _roomKey = roomKey;
 
   /// 直播间号（进入房间用）。
@@ -67,6 +69,21 @@ class LiveRoomSummary {
 
   /// 主播 UID。
   final int? uid;
+
+  /// 平台原始分区码（抖音 `category`，B站不用）。
+  ///
+  /// 抖音**没有可用的分区列表接口**（实测 `/webcast/room/partition/`、
+  /// `/webcast/room/tag/list/` 等全部返回 `url doesn't match`）。
+  /// 但 `webcast/feed` 的每条房间都带真实的 `category` 码，
+  /// 因此分区筛选只能**在客户端按这个码做本地过滤**，
+  /// 不能向平台请求"某个分区的房间"。
+  final int? categoryCode;
+
+  /// 分区展示名。
+  ///
+  /// 只对**实测确认过**的码做映射（见 `DouyinLiveClient.categoryLabel`），
+  /// 未知码为 null，UI 不展示分区名——不编造品类。
+  final String? categoryLabel;
 }
 
 /// 直播间详情。

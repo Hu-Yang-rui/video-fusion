@@ -213,6 +213,7 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
 
     return LiveScreen(
       adapters: liveAdapters,
+      vault: _vault,
       onOpenOriginal: (adapter, room) {
         // 原平台直播间地址按平台拼；拼不出就退回视频页链接。
         final url = switch (adapter.id) {

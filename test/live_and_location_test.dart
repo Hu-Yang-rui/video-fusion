@@ -12,6 +12,7 @@ library;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:video_fusion/src/adapters/bilibili_adapter.dart';
+import 'package:video_fusion/src/adapters/douyin/live_client.dart';
 import 'package:video_fusion/src/adapters/douyin_adapter.dart';
 import 'package:video_fusion/src/core/errors.dart';
 import 'package:video_fusion/src/core/http_client.dart';
@@ -47,27 +48,51 @@ void main() {
       expect(_douyin().supportsLive, isTrue);
     });
 
-    test('抖音直播分区不可用：返回空列表而不是编造分区', () async {
-      // 实测 /webcast/room/partition/、/webcast/tag/list/ 均不可用。
-      // 平台做不到分区，必须如实返回空，让 UI 不渲染筛选。
+    test('抖音分区：从 feed 反推，不编造分区名', () async {
+      // 抖音没有分区列表接口（实测 /webcast/room/partition/、
+      // /webcast/room/tag/list/、/webcast/category/list/ 全部
+      // url doesn't match 或 404）。
+      //
+      // 但 feed 的每条房间带真实 category 码，因此分区是
+      // "从实际数据反推"出来的，不是编造的。
+      //
+      // 这里用离线断言：分区名只能来自 categoryLabel 的已知映射。
+      // 真实网络下会返回若干 LiveArea，离线（无网络）返回空也合法。
       final areas = await _douyin().fetchLiveAreas();
-      expect(areas, isEmpty,
-          reason: '没有可用分区接口时不得编造分区名');
+      for (final a in areas) {
+        expect(a.name, isNotEmpty);
+        // 名字必须能在已知映射里找到，不能是编造的字符串
+        expect(
+          DouyinLiveClient.categoryLabel(a.id),
+          a.name,
+          reason: '分区名必须来自 categoryLabel 的实测映射',
+        );
+      }
     });
 
-    test('抖音按分区筛选时明确报错，不静默忽略筛选条件', () async {
-      // 接口没有分区参数。若静默忽略，用户选了"游戏"却看到全部内容，
-      // 会以为是筛选坏了。必须明确抛 capabilityUnavailable。
-      expect(
-        () => _douyin().fetchLiveRooms(parentAreaId: 1),
-        throwsA(
-          isA<FusionException>().having(
-            (e) => e.code,
-            'code',
-            FusionErrorCode.capabilityUnavailable,
-          ),
-        ),
-      );
+    test('抖音分区筛选：本地按 category 过滤，不是服务端筛选', () async {
+      // 旧断言是"传 parentAreaId 必须抛错"。
+      // 现在改为客户端本地过滤：拉 feed 后按 category 码筛。
+      // 这不是假数据——房间、封面、主播、在线人数全是平台真实返回的，
+      // 只是"筛选"动作在客户端完成。
+      //
+      // 离线环境下 feed 请求会失败或返回空，但**不应抛
+      // capabilityUnavailable**（那是"平台不支持"的语义，已不成立）。
+      try {
+        final page = await _douyin().fetchLiveRooms(areaId: 545);
+        // 拿到的房间必须真的属于该分区
+        for (final r in page.items) {
+          expect(r.categoryCode, 545,
+              reason: '本地过滤必须真的按 category 码筛');
+        }
+      } on FusionException catch (e) {
+        // 允许网络类失败，但不允许"不支持分区"这个语义
+        expect(
+          e.code,
+          isNot(FusionErrorCode.capabilityUnavailable),
+          reason: '分区筛选已实现（本地过滤），不应再报"不支持"',
+        );
+      }
     });
 
     test('抖音直播弹幕如实声明不支持（不返回假端点）', () async {

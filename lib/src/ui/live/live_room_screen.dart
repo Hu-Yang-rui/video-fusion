@@ -17,9 +17,13 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../../adapters/bilibili_live_interaction.dart';
 import '../../adapters/platform_adapter.dart';
+import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
+import '../../core/http_client.dart';
 import '../../core/live_danmaku.dart';
+import '../../core/logger.dart';
 import '../../design/apple_tokens.dart';
 import '../../models/live.dart';
 
@@ -27,6 +31,7 @@ class LiveRoomScreen extends StatefulWidget {
   const LiveRoomScreen({
     super.key,
     required this.adapter,
+    required this.vault,
     required this.roomKey,
     this.initialTitle,
     this.initialUname,
@@ -34,6 +39,9 @@ class LiveRoomScreen extends StatefulWidget {
   });
 
   final PlatformAdapter adapter;
+
+  /// 凭证保险库。互动写操作需要从这里读登录会话。
+  final CredentialVault vault;
 
   /// 跨平台房间标识（字符串）。
   ///
@@ -78,15 +86,56 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
   bool _showDanmakuOverlay = true;
   bool _showChat = true;
 
+  // ── 互动 ────────────────────────────────────────────────────
+  //
+  // 能力边界（实测 2026-10-18）：
+  //  - B站点赞/关注/发弹幕路径都存在，需登录凭证
+  //  - 抖音只有 digg/chat 路径存在，且需设备侧签名 → 不渲染按钮
+
+  late final BilibiliLiveInteraction _interaction;
+
+  /// 当前平台的登录会话。null = 未登录。
+  PlatformSession? _session;
+
+  final TextEditingController _danmakuCtrl = TextEditingController();
+
+  int _likeCount = 0;
+  bool _following = false;
+  bool _likeBusy = false;
+  bool _followBusy = false;
+  bool _danmakuBusy = false;
+
   @override
   void initState() {
     super.initState();
+    _interaction = BilibiliLiveInteraction(
+      http: FusionHttpClient(logger: appLogger),
+    );
+    _loadSession();
     _load();
+  }
+
+  /// 读取当前平台的登录会话。
+  ///
+  /// 互动写操作全部依赖它。读不到就按未登录处理，
+  /// UI 显示"登录后可操作"而不是伪造"已点赞"。
+  Future<void> _loadSession() async {
+    try {
+      final session = await widget.vault
+          .load(widget.adapter.id)
+          .timeout(const Duration(seconds: 5));
+      if (!mounted) return;
+      setState(() => _session = session);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _session = null);
+    }
   }
 
   @override
   void dispose() {
     _flushTimer?.cancel();
+    _danmakuCtrl.dispose();
     _danmaku?.dispose();
     _player?.dispose();
     super.dispose();
@@ -446,30 +495,344 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
   Widget _buildChat() {
     if (!_showChat) return const SizedBox.shrink();
 
+    // 消息区 + 底部互动栏
     return Container(
       color: const Color(0xFF121212),
-      child: ListView.builder(
-        // 反向列表：最新消息在底部，且自动跟随
-        reverse: true,
-        padding: const EdgeInsets.symmetric(
-          horizontal: AppleSpace.md,
-          vertical: AppleSpace.sm,
-        ),
-        itemCount: _messages.length,
-        itemBuilder: (context, index) {
-          final m = _messages[_messages.length - 1 - index];
-          return _ChatLine(
-            key: ValueKey('${m.receivedAt.microsecondsSinceEpoch}_$index'),
-            message: m,
-          );
-        },
+      child: Column(
+        children: [
+          Expanded(
+            child: _messages.isEmpty
+                ? _buildChatPlaceholder()
+                : ListView.builder(
+                    // 反向列表：最新消息在底部，且自动跟随
+                    reverse: true,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppleSpace.md,
+                      vertical: AppleSpace.sm,
+                    ),
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      final m = _messages[_messages.length - 1 - index];
+                      return _ChatLine(
+                        key: ValueKey(
+                            '${m.receivedAt.microsecondsSinceEpoch}_$index'),
+                        message: m,
+                      );
+                    },
+                  ),
+          ),
+          _buildInteractionBar(),
+        ],
       ),
     );
   }
 
+  /// 消息区为空时的说明。
+  ///
+  /// 抖音直播没有可用弹幕端点，B站未登录也拿不到 token。
+  /// 这里**如实说明原因**，不放假弹幕、不显示"连接中"。
+  Widget _buildChatPlaceholder() {
+    final reason = widget.adapter.id == 'douyin'
+        ? '抖音直播暂不提供弹幕'
+        : (_danmakuState == DanmakuConnectionState.failed
+            ? '弹幕连接失败（需要登录）'
+            : '暂无弹幕');
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(AppleSpace.lg),
+        child: Text(
+          reason,
+          textAlign: TextAlign.center,
+          style: AppleType.footnote.copyWith(color: Colors.white38),
+        ),
+      ),
+    );
+  }
+
+  /// 底部互动栏：点赞 / 关注 / 发弹幕。
+  ///
+  /// 能力边界（实测）：
+  ///  - B站：点赞、关注、发弹幕**路径都存在**，需要登录凭证
+  ///  - 抖音：`digg`/`chat` 路径存在但需签名，其余路径不存在
+  ///
+  /// 因此：
+  ///  - B站显示全部三个入口，未登录时点击引导登录
+  ///  - 抖音只显示"点赞"（digg 路径存在），且未登录时如实说明
+  ///  - **不渲染注定失败的按钮**
+  Widget _buildInteractionBar() {
+    final isDouyin = widget.adapter.id == 'douyin';
+    final loggedIn = _session != null;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppleSpace.md,
+        vertical: AppleSpace.sm,
+      ),
+      decoration: const BoxDecoration(
+        border: Border(
+          top: BorderSide(color: Color(0x1AFFFFFF), width: 0.5),
+        ),
+      ),
+      child: Row(
+        children: [
+          // 点赞
+          _InteractionButton(
+            icon: Icons.favorite_rounded,
+            label: _likeCount > 0 ? '$_likeCount' : '点赞',
+            active: _likeCount > 0,
+            activeColor: const Color(0xFFFF3B30),
+            busy: _likeBusy,
+            onTap: () => _doLike(isDouyin: isDouyin, loggedIn: loggedIn),
+          ),
+          const SizedBox(width: AppleSpace.lg),
+
+          // 关注（抖音无可用接口，不显示）
+          if (!isDouyin)
+            _InteractionButton(
+              icon: _following ? Icons.person_rounded : Icons.person_add_rounded,
+              label: _following ? '已关注' : '关注',
+              active: _following,
+              busy: _followBusy,
+              onTap: () => _doFollow(loggedIn: loggedIn),
+            ),
+          if (!isDouyin) const SizedBox(width: AppleSpace.lg),
+
+          // 发弹幕输入框（仅 B站；抖音无可用端点）
+          if (!isDouyin)
+            Expanded(
+              child: _buildDanmakuInput(loggedIn: loggedIn),
+            )
+          else
+            Expanded(
+              child: Text(
+                '抖音直播暂不支持互动',
+                style: AppleType.caption1.copyWith(color: Colors.white38),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDanmakuInput({required bool loggedIn}) {
+    return SizedBox(
+      height: 34,
+      child: TextField(
+        controller: _danmakuCtrl,
+        enabled: loggedIn,
+        maxLength: 20,
+        textInputAction: TextInputAction.send,
+        onSubmitted: (_) => _sendDanmaku(),
+        style: const TextStyle(color: Colors.white, fontSize: 13),
+        decoration: InputDecoration(
+          counterText: '',
+          isDense: true,
+          hintText: loggedIn ? '发个弹幕…' : '登录后可发弹幕',
+          hintStyle: const TextStyle(color: Colors.white30, fontSize: 13),
+          filled: true,
+          fillColor: const Color(0x14FFFFFF),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: AppleSpace.md,
+            vertical: 8,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(17),
+            borderSide: BorderSide.none,
+          ),
+          suffixIcon: loggedIn
+              ? IconButton(
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  onPressed: _danmakuBusy ? null : _sendDanmaku,
+                  icon: _danmakuBusy
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.6,
+                            color: Colors.white54,
+                          ),
+                        )
+                      : const Icon(
+                          Icons.send_rounded,
+                          size: 16,
+                          color: Colors.white54,
+                        ),
+                )
+              : null,
+        ),
+      ),
+    );
+  }
+
+  // ── 互动动作 ────────────────────────────────────────────────
+
+  Future<void> _doLike({
+    required bool isDouyin,
+    required bool loggedIn,
+  }) async {
+    if (_likeBusy) return;
+
+    if (isDouyin) {
+      // 抖音 digg 路径存在但需设备侧签名，未实现
+      _toast('抖音直播点赞需要设备签名，暂未实现');
+      return;
+    }
+
+    if (!loggedIn) {
+      _toast('请先登录哔哩哔哩账号');
+      return;
+    }
+
+    setState(() => _likeBusy = true);
+    try {
+      final r = await _interaction.like(
+        roomId: _numericRoomId,
+        session: _session!,
+      );
+      if (!mounted) return;
+      if (r.ok) {
+        setState(() => _likeCount += 1);
+      } else {
+        _toast(r.message);
+      }
+    } on FusionException catch (e) {
+      if (mounted) _toast(e.userMessage);
+    } finally {
+      if (mounted) setState(() => _likeBusy = false);
+    }
+  }
+
+  Future<void> _doFollow({required bool loggedIn}) async {
+    if (_followBusy) return;
+    if (!loggedIn) {
+      _toast('请先登录哔哩哔哩账号');
+      return;
+    }
+    final anchorUid = _info?.uid ?? 0;
+    if (anchorUid <= 0) {
+      _toast('拿不到主播信息，暂时无法关注');
+      return;
+    }
+
+    setState(() => _followBusy = true);
+    try {
+      final target = !_following;
+      final r = await _interaction.follow(
+        uid: anchorUid,
+        follow: target,
+        session: _session!,
+      );
+      if (!mounted) return;
+      if (r.ok) {
+        setState(() => _following = target);
+      } else {
+        _toast(r.message);
+      }
+    } on FusionException catch (e) {
+      if (mounted) _toast(e.userMessage);
+    } finally {
+      if (mounted) setState(() => _followBusy = false);
+    }
+  }
+
+  Future<void> _sendDanmaku() async {
+    if (_danmakuBusy) return;
+    final text = _danmakuCtrl.text.trim();
+    if (text.isEmpty) return;
+
+    if (_session == null) {
+      _toast('请先登录哔哩哔哩账号');
+      return;
+    }
+
+    setState(() => _danmakuBusy = true);
+    try {
+      final r = await _interaction.sendDanmaku(
+        roomId: _numericRoomId,
+        message: text,
+        session: _session!,
+      );
+      if (!mounted) return;
+      if (r.ok) {
+        _danmakuCtrl.clear();
+        _toast('已发送');
+      } else {
+        _toast(r.message);
+      }
+    } on FusionException catch (e) {
+      if (mounted) _toast(e.userMessage);
+    } finally {
+      if (mounted) setState(() => _danmakuBusy = false);
+    }
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  /// 数字房间号。B站房间号是数字；抖音不是数字时返回 0，
+  /// 调用方据此避免发起无效写请求。
+  int get _numericRoomId => int.tryParse(widget.roomKey) ?? 0;
+
   static String _fmt(int n) {
     if (n >= 10000) return '${(n / 10000).toStringAsFixed(1)}万';
     return '$n';
+  }
+}
+
+/// 直播互动按钮（图标 + 文字/计数）。
+class _InteractionButton extends StatelessWidget {
+  const _InteractionButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.active = false,
+    this.activeColor,
+    this.busy = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool active;
+  final Color? activeColor;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = active ? (activeColor ?? Colors.white) : Colors.white70;
+    return GestureDetector(
+      onTap: busy ? null : onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          busy
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.8,
+                    color: Colors.white54,
+                  ),
+                )
+              : Icon(icon, size: 20, color: color),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            style: TextStyle(fontSize: 10, color: color, height: 1.2),
+          ),
+        ],
+      ),
+    );
   }
 }
 

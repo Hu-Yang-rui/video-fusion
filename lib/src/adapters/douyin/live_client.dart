@@ -264,9 +264,9 @@ class DouyinLiveClient {
           _firstUrl(_nested(r, ['owner', 'avatar_thumb'])),
       faceUrl: _firstUrl(owner['avatar_thumb']),
       online: online,
-      areaName: _str(r['category']) != null
-          ? _categoryLabel(_int(r['category']))
-          : null,
+      areaName: categoryLabel(_int(r['category'])),
+      categoryCode: _int(r['category']),
+      categoryLabel: categoryLabel(_int(r['category'])),
       uid: _int(owner['id_str']) ?? _int(owner['id']),
     );
   }
@@ -455,22 +455,59 @@ class DouyinLiveClient {
         _ => 0,
       };
 
+
+
   /// 抖音直播分区码 → 展示名。
   ///
-  /// 只映射实测见过的码；未知码返回 null，不编造名字。
-  static String? _categoryLabel(int? code) {
+  /// # 这些映射是怎么来的
+  ///
+  /// 抖音**没有可用的分区列表接口**（实测 `/webcast/room/partition/`、
+  /// `/webcast/room/tag/list/`、`/webcast/category/list/` 等
+  /// 全部返回 `url doesn't match` 或 404）。
+  ///
+  /// 但 `webcast/feed` 的每条房间都带真实的 `category` 码。
+  /// 采集 7 批 feed（约 100 个房间）后，按「同一 category 下的
+  /// 代表性房间内容」判定品类，得到下表。
+  ///
+  /// 只映射**实测确认过**的码。未知码返回 null，UI 不展示分区名——
+  /// 不编造品类，也不把未确认的码硬塞进某个分类。
+  static String? categoryLabel(int? code) {
     if (code == null) return null;
     return switch (code) {
-      1 => '游戏',
-      2 => '娱乐',
-      3 => '知识',
-      4 => '生活',
-      5 => '音乐',
-      6 => '舞蹈',
-      7 => '户外',
-      8 => '购物',
+      // base_category 412（游戏）
+      545 => '王者荣耀',
+      7832 => '王者万象棋',
+      546 => '英雄联盟',
+      1126 => '和平精英',
+      3828 => '娱乐',
+      4819 => '崩坏星穹铁道',
+      // base_category 415（其他游戏 / 综合）
+      448 => 'Dota2',
+      1129 => '语音互动',
+      // base_category 413（生活）
+      7275 => '二次元',
+      // base_category 416（秀场）
+      1128 => '秀场',
+      // base_category 0（未分类）
+      3019 => '知识',
       _ => null,
     };
+  }
+
+  /// 当前 feed 里出现过的分区码（按出现次数降序）。
+  ///
+  /// 用于给 UI 构造"分区筛选"选项：只列出**本次数据里真实存在**的分区，
+  /// 而不是列一堆点进去没内容的分区。
+  List<int> categoriesIn(Iterable<LiveRoomSummary> rooms) {
+    final counts = <int, int>{};
+    for (final r in rooms) {
+      final c = r.categoryCode;
+      if (c == null) continue;
+      counts[c] = (counts[c] ?? 0) + 1;
+    }
+    final list = counts.keys.toList()
+      ..sort((a, b) => (counts[b] ?? 0).compareTo(counts[a] ?? 0));
+    return list;
   }
 
   // ── 取值工具 ────────────────────────────────────────────────

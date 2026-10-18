@@ -16,6 +16,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../adapters/platform_adapter.dart';
+import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
 import '../../design/apple_tokens.dart';
 import '../../design/components/apple_layout.dart';
@@ -26,12 +27,16 @@ class LiveScreen extends StatefulWidget {
   const LiveScreen({
     super.key,
     required this.adapters,
+    required this.vault,
     this.initialAdapterId,
     this.onOpenOriginal,
   });
 
   /// 所有支持直播的平台适配器。至少一个。
   final List<PlatformAdapter> adapters;
+
+  /// 凭证保险库，透传给直播间用于互动写操作。
+  final CredentialVault vault;
 
   /// 初始选中的平台 id。为 null 时用第一个。
   final String? initialAdapterId;
@@ -188,6 +193,7 @@ class _LiveScreenState extends State<LiveScreen>
       MaterialPageRoute<void>(
         builder: (_) => LiveRoomScreen(
           adapter: _adapter,
+          vault: widget.vault,
           roomKey: room.roomKey,
           initialTitle: room.title,
           initialUname: room.uname,
