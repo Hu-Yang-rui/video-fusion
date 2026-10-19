@@ -1,15 +1,19 @@
 /// 应用主框架：底部导航栏 + 页面切换。
 ///
-/// 结构（对应 Apple 风格的信息架构）：
+/// # 信息架构（抖音式短视频结构）
+///
 ///  1. 推荐 —— 全屏竖滑短视频流（沉浸式，导航栏默认隐藏）
-///  2. 发现 —— 长视频浏览、分类、搜索（浅色列表界面）
-///  3. 直播 —— 直播列表与直播间（可选）
-///  4. 设置 —— 账号与平台管理
+///  2. 发现 —— 长视频浏览、分类、跨平台搜索
+///  3. 直播 —— B站 + 抖音统一直播入口（条件显示）
+///  4. 我的 —— 账号、收藏夹/稍后再看/历史等内容入口
+///
+/// 「设置」**不再是**一级导航项：它是低频功能，收进「我的」页的次级入口。
+/// 这样一级导航全部用于内容消费，符合短视频应用的使用习惯。
 ///
 /// 直播页是**可选**的：只有当接入的平台声明 supportsLive 时才注入，
 /// 否则导航栏保持三项，避免出现点了没内容的空页面。
 ///
-/// # 短视频页的导航栏交互（本次改造）
+/// # 短视频页的导航栏交互
 ///
 /// 短视频是内容消费场景，导航栏常驻会持续遮挡画面。因此：
 ///  - **默认隐藏**，视频占满全屏
@@ -35,6 +39,12 @@
 ///     不应弹出导航栏。
 ///
 /// 隐藏则宽松一些：导航栏可见时任意位置的上推都收起它。
+///
+/// ## 沉浸式页面用「标签 id」而不是下标判定
+///
+/// 直播标签是否出现会改变页面下标。因此"是否处于沉浸式页面"
+/// 一律按 [AppTab] 判断，不按 index 硬编码 —— 否则接入/移除
+/// 某个直播平台后，手势规则会错位到别的页面上。
 library;
 
 import 'package:flutter/material.dart';
@@ -46,13 +56,18 @@ import 'nav_gesture.dart';
 
 // 手势阈值与判定逻辑在 nav_gesture.dart（纯函数，可单元测试）。
 
+/// 一级导航的标签定义。
+///
+/// 用枚举而不是下标：直播是否在场会改变下标，但不会改变语义。
+enum AppTab { feed, discover, live, profile }
+
 /// 应用主框架。
 class AppShell extends StatefulWidget {
   const AppShell({
     super.key,
     required this.feedPage,
     required this.discoverPage,
-    required this.settingsPage,
+    required this.profilePage,
     this.livePage,
     this.initialIndex = 0,
     this.onFeedVisibilityChanged,
@@ -60,7 +75,9 @@ class AppShell extends StatefulWidget {
 
   final Widget feedPage;
   final Widget discoverPage;
-  final Widget settingsPage;
+
+  /// 「我的」页：账号 + 内容入口 + 设置次级入口。
+  final Widget profilePage;
 
   /// 直播页（可选）。为 null 时不显示直播标签。
   final Widget? livePage;
@@ -83,23 +100,37 @@ class AppShellState extends State<AppShell>
 
   int get currentIndex => _index;
 
+  /// 当前标签的语义。
+  AppTab get currentTab => _tabs[_index];
+
+  /// 页面顺序：推荐 / 发现 / [直播] / 我的。
+  List<AppTab> get _tabs => [
+        AppTab.feed,
+        AppTab.discover,
+        if (widget.livePage != null) AppTab.live,
+        AppTab.profile,
+      ];
+
   /// 短视频页的导航栏是否被手势唤出。
   ///
-  /// 只在 [_index] == 0 时有意义；其它页面导航栏常驻。
+  /// 只在当前处于推荐页时有意义；其它页面导航栏常驻。
   bool _feedNavVisible = false;
 
   bool get feedNavVisible => _feedNavVisible;
 
   /// 当前是否真的在显示导航栏。
-  bool get navBarVisible => _index != 0 || _feedNavVisible;
+  bool get navBarVisible => currentTab != AppTab.feed || _feedNavVisible;
 
-  /// 视频流页面：导航栏默认隐藏，以获得沉浸感。
-  bool get _immersive => _index == 0;
+  /// 沉浸式页面（只有推荐页是沉浸式）。
+  bool get _immersive => currentTab == AppTab.feed;
+
+  /// 「我的」标签的下标（登录引导等外部动作需要按语义跳转）。
+  int get profileIndex => _tabs.indexOf(AppTab.profile);
 
   late final AnimationController _navAnim = AnimationController(
     vsync: this,
     duration: AppleMotion.standard,
-    value: _index == 0 ? 0 : 1,
+    value: _immersive ? 0 : 1,
   );
 
   late final Animation<double> _navCurve = CurvedAnimation(
@@ -112,24 +143,32 @@ class AppShellState extends State<AppShell>
   Offset? _pointerDown;
   bool _pointerMoved = false;
 
-
+  /// 按语义标签跳转（供 main.dart 与设置入口使用）。
+  void goToTab(AppTab tab) {
+    final i = _tabs.indexOf(tab);
+    if (i < 0) return;
+    goTo(i);
+  }
 
   void goTo(int index) {
     if (index == _index) return;
-    final wasFeed = _index == 0;
+    if (index < 0 || index >= _tabs.length) return;
+    final wasFeed = currentTab == AppTab.feed;
+    final tabs = _tabs;
     setState(() {
       _index = index;
       // 离开短视频页时收起唤出的导航栏，回来时保持隐藏（沉浸）。
-      if (index != 0) _feedNavVisible = false;
+      if (tabs[index] != AppTab.feed) _feedNavVisible = false;
     });
-    if (wasFeed != (index == 0)) {
-      widget.onFeedVisibilityChanged?.call(index == 0);
+    final isFeed = _tabs[index] == AppTab.feed;
+    if (wasFeed != isFeed) {
+      widget.onFeedVisibilityChanged?.call(isFeed);
     }
     _syncNavAnimation();
   }
 
   void _setFeedNavVisible(bool visible) {
-    if (_index != 0) return;
+    if (!_immersive) return;
     if (_feedNavVisible == visible) return;
     setState(() => _feedNavVisible = visible);
     _syncNavAnimation();
@@ -172,7 +211,7 @@ class AppShellState extends State<AppShell>
       end: e.position,
       screenHeight: MediaQuery.sizeOf(context).height,
       navVisible: _feedNavVisible,
-      feedPageActive: _index == 0,
+      feedPageActive: currentTab == AppTab.feed,
     );
 
     switch (result) {
@@ -187,38 +226,21 @@ class AppShellState extends State<AppShell>
 
   @override
   Widget build(BuildContext context) {
-    final hasLive = widget.livePage != null;
+    final tabs = _tabs;
 
     final pages = <Widget>[
-      widget.feedPage,
-      widget.discoverPage,
-      if (hasLive) widget.livePage!,
-      widget.settingsPage,
+      for (final t in tabs)
+        switch (t) {
+          AppTab.feed => widget.feedPage,
+          AppTab.discover => widget.discoverPage,
+          AppTab.live => widget.livePage!,
+          AppTab.profile => widget.profilePage,
+        },
     ];
 
     // 标签项与 pages 一一对应。直播缺席时自动收起对应标签。
     final items = <AppleTabItem>[
-      const AppleTabItem(
-        icon: Icons.play_circle_outline_rounded,
-        activeIcon: Icons.play_circle_rounded,
-        label: '推荐',
-      ),
-      const AppleTabItem(
-        icon: Icons.explore_outlined,
-        activeIcon: Icons.explore_rounded,
-        label: '发现',
-      ),
-      if (hasLive)
-        const AppleTabItem(
-          icon: Icons.live_tv_outlined,
-          activeIcon: Icons.live_tv_rounded,
-          label: '直播',
-        ),
-      const AppleTabItem(
-        icon: Icons.settings_outlined,
-        activeIcon: Icons.settings_rounded,
-        label: '设置',
-      ),
+      for (final t in tabs) _itemOf(t),
     ];
 
     // 导航栏占据的垂直空间（含系统手势条）。
@@ -252,7 +274,7 @@ class AppShellState extends State<AppShell>
                     for (var i = 0; i < pages.length; i++)
                       Padding(
                         padding: EdgeInsets.only(
-                          bottom: i == 0 ? 0 : navBarSpace,
+                          bottom: tabs[i] == AppTab.feed ? 0 : navBarSpace,
                         ),
                         child: pages[i],
                       ),
@@ -300,6 +322,41 @@ class AppShellState extends State<AppShell>
       ),
     );
   }
+
+  static AppleTabItem _itemOf(AppTab tab) => switch (tab) {
+        AppTab.feed => const AppleTabItem(
+            icon: Icons.play_circle_outline_rounded,
+            activeIcon: Icons.play_circle_rounded,
+            label: '推荐',
+          ),
+        AppTab.discover => const AppleTabItem(
+            icon: Icons.explore_outlined,
+            activeIcon: Icons.explore_rounded,
+            label: '发现',
+          ),
+        AppTab.live => const AppleTabItem(
+            icon: Icons.live_tv_outlined,
+            activeIcon: Icons.live_tv_rounded,
+            label: '直播',
+          ),
+        AppTab.profile => const AppleTabItem(
+            icon: Icons.person_outline_rounded,
+            activeIcon: Icons.person_rounded,
+            label: '我的',
+          ),
+      };
+
+  /// 标签项数量（供测试与诊断：无直播 3 项 / 有直播 4 项）。
+  @visibleForTesting
+  static List<AppleTabItem> itemsFor({required bool hasLive}) => [
+        for (final t in [
+          AppTab.feed,
+          AppTab.discover,
+          if (hasLive) AppTab.live,
+          AppTab.profile,
+        ])
+          _itemOf(t),
+      ];
 }
 
 /// 为使用导航栏的页面提供底部安全内边距。

@@ -96,14 +96,32 @@ void main() {
     });
 
     test('抖音直播弹幕如实声明不支持（不返回假端点）', () async {
+      // 这条守护的是**不许伪造端点**，不是钉死某个错误码：
+      //  - `unsupportedPlatform`：本项目不实现（原始语义）
+      //  - `capabilityUnavailable`：平台有此能力但缺设备侧签名
+      // 两者都表达"拿不到"，都算如实。真正禁止的是"返回一个假 wss
+      // 地址让 UI 显示正在连接"。
+      //
+      // 实测失败链（2026-10-19）：wss 升级返回 HTTP/1.1 200 而非 101；
+      // im/fetch 匿名恒空 data；room/chat 需登录；历史弹幕端点全部
+      // url doesn't match；sign 类端点 404；本机无 sign.js。
       expect(
         () => _douyin().fetchLiveDanmakuEndpoint(1),
         throwsA(
-          isA<FusionException>().having(
-            (e) => e.code,
-            'code',
-            FusionErrorCode.unsupportedPlatform,
-          ),
+          isA<FusionException>()
+              .having(
+                (e) => e.code,
+                'code',
+                anyOf(
+                  FusionErrorCode.unsupportedPlatform,
+                  FusionErrorCode.capabilityUnavailable,
+                ),
+              )
+              .having(
+                (e) => e.technicalMessage,
+                'technicalMessage 必须交代具体失败点',
+                anyOf(contains('signature'), contains('wss'), contains('danmaku')),
+              ),
         ),
       );
     });

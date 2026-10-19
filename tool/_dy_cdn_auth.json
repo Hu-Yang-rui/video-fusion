@@ -1,0 +1,178 @@
+{
+  "at": "2026-10-18T16:34:12.772Z",
+  "rows": [
+    {
+      "room": "7698006824892812086",
+      "case": "原始地址(有效)",
+      "status": 200,
+      "len": 440,
+      "ct": "application/vnd.apple.mpegurl"
+    },
+    {
+      "room": "7698006824892812086",
+      "case": "expire 改过去",
+      "status": 403,
+      "len": 0,
+      "ct": null
+    },
+    {
+      "room": "7698006824892812086",
+      "case": "sign 破坏",
+      "status": 403,
+      "len": 0,
+      "ct": null
+    },
+    {
+      "room": "7698006824892812086",
+      "case": "分片原样",
+      "status": 200,
+      "len": 1743136,
+      "ct": "video/MP2T"
+    },
+    {
+      "room": "7698006824892812086",
+      "case": "stream 不存在",
+      "status": 403,
+      "len": 0,
+      "ct": null,
+      "bodyKind": "empty"
+    },
+    {
+      "room": "7697883913116568335",
+      "case": "原始地址(有效)",
+      "status": 200,
+      "len": 395,
+      "ct": "application/vnd.apple.mpegurl"
+    },
+    {
+      "room": "7697883913116568335",
+      "case": "expire 改过去",
+      "status": 403,
+      "len": 0,
+      "ct": null
+    },
+    {
+      "room": "7697883913116568335",
+      "case": "sign 破坏",
+      "status": 403,
+      "len": 0,
+      "ct": null
+    },
+    {
+      "room": "7697883913116568335",
+      "case": "分片原样",
+      "status": 200,
+      "len": 1246440,
+      "ct": "video/MP2T"
+    },
+    {
+      "room": "7697883913116568335",
+      "case": "stream 不存在",
+      "status": 403,
+      "len": 0,
+      "ct": null,
+      "bodyKind": "empty"
+    },
+    {
+      "room": "7698042974956948259",
+      "case": "原始地址(有效)",
+      "status": 200,
+      "len": 475,
+      "ct": "application/x-mpegURL"
+    },
+    {
+      "room": "7698042974956948259",
+      "case": "分片原样",
+      "status": 206,
+      "len": 188,
+      "ct": "video/mp2t"
+    },
+    {
+      "room": "7698042974956948259",
+      "case": "stream 不存在",
+      "status": 403,
+      "len": 238,
+      "ct": "text/html",
+      "bodyKind": "html"
+    },
+    {
+      "room": "7697945960702004003",
+      "case": "原始地址(有效)",
+      "status": 200,
+      "len": 508,
+      "ct": "application/x-mpegurl"
+    },
+    {
+      "room": "7697945960702004003",
+      "case": "wsSecret 破坏",
+      "status": 403,
+      "len": 2576,
+      "ct": "text/html"
+    },
+    {
+      "room": "7697945960702004003",
+      "case": "wsTime 改过去",
+      "status": 403,
+      "len": 2575,
+      "ct": "text/html"
+    },
+    {
+      "room": "7697945960702004003",
+      "case": "分片原样",
+      "status": 206,
+      "len": 188,
+      "ct": "video/MP2T"
+    },
+    {
+      "room": "7697945960702004003",
+      "case": "分片 wsSecret 破坏",
+      "status": 200,
+      "len": 2950660,
+      "ct": "video/MP2T"
+    },
+    {
+      "room": "7697945960702004003",
+      "case": "stream 不存在",
+      "status": 403,
+      "len": 2575,
+      "ct": "text/html",
+      "bodyKind": "html"
+    },
+    {
+      "room": "7698012437185891107",
+      "case": "原始地址(有效)",
+      "status": 200,
+      "len": 357,
+      "ct": "application/x-mpegurl"
+    },
+    {
+      "room": "7698012437185891107",
+      "case": "expire 改过去",
+      "status": 200,
+      "len": 357,
+      "ct": "application/x-mpegurl"
+    },
+    {
+      "room": "7698012437185891107",
+      "case": "sign 破坏",
+      "status": 200,
+      "len": 357,
+      "ct": "application/x-mpegurl"
+    },
+    {
+      "room": "7698012437185891107",
+      "case": "分片原样",
+      "status": 206,
+      "len": 188,
+      "ct": "video/MP2T"
+    },
+    {
+      "room": "7698012437185891107",
+      "case": "stream 不存在",
+      "status": 403,
+      "len": 0,
+      "ct": null,
+      "bodyKind": "empty"
+    }
+  ]
+}

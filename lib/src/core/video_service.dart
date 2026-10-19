@@ -51,12 +51,35 @@ class InteractionCapabilities {
     required this.like,
     required this.coin,
     required this.favorite,
+    this.favoriteFolders = false,
+    this.coinBalance = false,
+    this.watchLater = false,
+    this.follow = false,
+    this.savedContent = false,
   });
 
   final bool comments;
   final bool like;
   final bool coin;
   final bool favorite;
+
+  /// 是否支持"选择收藏夹"（列出账号的收藏夹）。
+  final bool favoriteFolders;
+
+  /// 是否支持读取硬币余额。
+  final bool coinBalance;
+
+  /// 是否支持"稍后再看"。
+  final bool watchLater;
+
+  /// 是否支持关注 / 取关 UP 主。
+  final bool follow;
+
+  /// 是否支持浏览已保存内容（收藏夹内条目、稍后再看列表）。
+  ///
+  /// 与 [favoriteFolders] 分开：能列出夹 ≠ 能列出夹里的视频。
+  /// UI 用这个决定"点开收藏夹看内容"是否可用，避免放死按钮。
+  final bool savedContent;
 
   static const InteractionCapabilities none = InteractionCapabilities(
     comments: false,
@@ -65,6 +88,13 @@ class InteractionCapabilities {
     favorite: false,
   );
 
+  /// 任一能力可用。
+  ///
+  /// 语义保持与既有一致（`comments || like || coin || favorite`）：
+  /// UI 早已按这个判断"要不要显示互动区"。新增的
+  /// [favoriteFolders]/[coinBalance]/[watchLater]/[follow]/[savedContent]
+  /// **不计入**这里，否则一个只支持"稍后再看"的平台会被判成
+  /// "有互动能力"，从而显示出点赞/收藏这类实际会失败的按钮。
   bool get hasAny => comments || like || coin || favorite;
 }
 
@@ -165,6 +195,206 @@ class VideoService {
       like: adapter.supportsLike,
       coin: adapter.supportsCoin,
       favorite: adapter.supportsFavorite,
+      favoriteFolders: adapter.supportsFavoriteFolders,
+      coinBalance: adapter.supportsCoinBalance,
+      watchLater: adapter.supportsWatchLater,
+      follow: adapter.supportsFollowAuthor,
+      savedContent: adapter.supportsSavedContent,
+    );
+  }
+
+  /// 该平台是否支持"选择收藏夹"。
+  ///
+  /// UI 据此决定渲染收藏夹选择面板还是只给一个收藏按钮——
+  /// 不支持时按钮点了必然失败，不该显示。
+  bool supportsFavoriteFoldersFor(String platformId) {
+    final adapter = _registry.byId(platformId);
+    return adapter?.supportsFavoriteFolders ?? false;
+  }
+
+  /// 该平台是否支持浏览已保存内容（收藏夹条目 / 稍后再看列表）。
+  bool supportsSavedContentFor(String platformId) {
+    final adapter = _registry.byId(platformId);
+    return adapter?.supportsSavedContent ?? false;
+  }
+
+  /// 该平台是否支持"逐夹归属扫描"（回答"这个视频在哪些夹里"）。
+  ///
+  /// 不支持时 UI 退化为"只知道收藏过，不知道在哪个夹"，
+  /// 收藏夹选择面板应据此不显示勾选状态。
+  bool supportsFolderOwnershipScanFor(String platformId) {
+    final adapter = _registry.byId(platformId);
+    return adapter?.supportsFolderOwnershipScan ?? false;
+  }
+
+  /// 扫描"该视频在哪些收藏夹里"。
+  ///
+  /// 归属判定的**唯一可靠途径**：B 站夹列表上的 `fav_state` 实测与
+  /// "该视频是否在此夹"无关（它是收藏夹自身状态，对自建夹恒为 0），
+  /// 所以这里必然是一次「夹数 × 翻页」的扫描。
+  ///
+  /// 代价真实存在（`ps` 上限 20、B 站第 6 个请求起 412、全量核对实测
+  /// 需要 144 个请求），所以：
+  ///  - [maxRequests] 是请求预算，超了就返回**部分结果**；
+  ///  - 只在 `InteractionState.favorited == true` 时调用；
+  ///  - 不要在轮询/滚动里调；
+  ///  - **只用于面板首次打开的勾选回显**。
+  ///
+  /// # 写入后的复查不要用这个方法
+  ///
+  /// 复查"刚收藏的项进没进目标夹"请走 [verifyRecentFavorite]：
+  /// 它只查目标夹的前 1~2 页（实测新项就在第 1 页），总共 2~3 个请求；
+  /// 而本方法为了回答"还在别的哪些夹里"必然贵一个数量级，
+  /// 放在每次写操作后面会把用户直接推进 412。
+  ///
+  /// 返回值是 [FolderOwnershipScan] 而不是夹 ID 列表：调用方必须能区分
+  /// "确认不包含"与"没核对到"，否则会把用户已收藏的夹显示成未勾选。
+  Future<FolderOwnershipScan> scanFoldersContainingVideo(
+    String platformId, {
+    required String platformVideoId,
+    required PlatformSession session,
+    int maxRequests = 6,
+  }) {
+    return _adapterFor(platformId).scanFoldersContainingVideo(
+      platformVideoId: platformVideoId,
+      session: session,
+      maxRequests: maxRequests,
+    );
+  }
+
+  /// 该平台的收藏接口是否支持"带收藏夹"（选择面板 + 写后复查）。
+  ///
+  /// 复查（[verifyRecentFavorite]）与选择面板是**同一个能力**的两种用法，
+  /// 所以这里复用 `supportsFavoriteFolders`，不另开一个 supports* 开关：
+  /// 平台要么两个都给，要么一个都不给，不存在"能选夹但不能复查"。
+  bool supportsFavoriteVerify(String platformId) =>
+      supportsFavoriteFoldersFor(platformId);
+
+  /// 复查"刚收藏/刚移出的项是否真的在目标夹里"（每夹 1~2 页，便宜）。
+  ///
+  /// [folderIds] 是**本次写入涉及的目标夹**：
+  ///  - 加入方向：期望返回**包含**这些夹 → 差集就是没生效的；
+  ///  - 移除方向：期望返回**空** → 非空就是没删掉的。
+  ///
+  /// 返回的是"已确认包含"的子集；**不在返回里不等于失败**
+  /// （页序不稳定、平台缓存滞后都可能让刚写入的项暂时看不到），
+  /// UI 应据此提示"未确认，请刷新"，而不是断言"收藏失败"。
+  /// 详见 [PlatformAdapter.verifyRecentFavorite]。
+  Future<List<int>> verifyRecentFavorite(
+    String platformId, {
+    required String platformVideoId,
+    required List<int> folderIds,
+    required PlatformSession session,
+    int maxPages = 2,
+  }) {
+    return _adapterFor(platformId).verifyRecentFavorite(
+      platformVideoId: platformVideoId,
+      folderIds: folderIds,
+      session: session,
+      maxPages: maxPages,
+    );
+  }
+
+  /// 取适配器，取不到就如实抛错（不返回空数据冒充"没有"）。
+  PlatformAdapter _adapterFor(String platformId) {
+    final adapter = _registry.byId(platformId);
+    if (adapter == null) {
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台尚未接入。',
+        technicalMessage: 'No adapter for $platformId',
+        platformId: platformId,
+      );
+    }
+    return adapter;
+  }
+
+  /// 拉取账号的收藏夹列表（id / 标题 / 条数 / 是否默认）。
+  ///
+  /// **不含**"某视频在哪些夹里"——平台没有这样的字段，
+  /// 归属必须单独调 [scanFoldersContainingVideo]。
+  Future<List<FavoriteFolder>> fetchFavoriteFolders(
+    String platformId, {
+    required PlatformSession session,
+  }) {
+    return _adapterFor(platformId).fetchFavoriteFolders(session: session);
+  }
+
+  /// 读取硬币余额。返回 null 表示平台没给这个字段（≠ 0 个币）。
+  Future<int?> fetchCoinBalance(
+    String platformId, {
+    required PlatformSession session,
+  }) {
+    return _adapterFor(platformId).fetchCoinBalance(session: session);
+  }
+
+  /// 该视频是否已在"稍后再看"里。
+  Future<bool> fetchWatchLater(
+    String platformId, {
+    required String platformVideoId,
+    required PlatformSession session,
+  }) {
+    return _adapterFor(platformId).fetchWatchLater(
+      platformVideoId: platformVideoId,
+      session: session,
+    );
+  }
+
+  /// 加入 / 移出"稍后再看"。
+  Future<InteractionResult> setWatchLater(
+    String platformId, {
+    required String platformVideoId,
+    required bool add,
+    required PlatformSession session,
+  }) {
+    return _adapterFor(platformId).setWatchLater(
+      platformVideoId: platformVideoId,
+      add: add,
+      session: session,
+    );
+  }
+
+  /// 关注 / 取关 UP 主。
+  Future<InteractionResult> setFollowAuthor(
+    String platformId, {
+    required String targetMid,
+    required bool follow,
+    required PlatformSession session,
+  }) {
+    return _adapterFor(platformId).setFollowAuthor(
+      targetMid: targetMid,
+      follow: follow,
+      session: session,
+    );
+  }
+
+  /// 拉取某个收藏夹里的内容。
+  Future<SavedVideoPage> fetchFavoriteFolderVideos(
+    String platformId,
+    int mediaId, {
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) {
+    return _adapterFor(platformId).fetchFavoriteFolderVideos(
+      mediaId,
+      session: session,
+      page: page,
+      pageSize: pageSize,
+    );
+  }
+
+  /// 拉取"稍后再看"列表。
+  Future<SavedVideoPage> fetchWatchLaterVideos(
+    String platformId, {
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) {
+    return _adapterFor(platformId).fetchWatchLaterVideos(
+      session: session,
+      page: page,
+      pageSize: pageSize,
     );
   }
 
@@ -238,16 +468,29 @@ class VideoService {
   }
 
   /// 收藏 / 取消收藏。
+  ///
+  /// [folderIds] / [removeFolderIds] 直接透传给适配器；两者都不传时
+  /// 按 [favorite] 走旧语义（true → 默认收藏夹，false → 从当前归属移出）。
+  ///
+  /// 返回值只表示"平台接受了请求"。B 站对不存在的收藏夹会回
+  /// `code=0`，且 `data.success_num` 恒为 0（实测 2026-10-19），
+  /// 都**不能**证明归属真的变了。因此**调用方要如实回显时
+  /// 必须在写入后调一次** [scanFoldersContainingVideo] 复查；
+  /// 这里不做复查，读写职责分开（复查开销由调用方按时机控制）。
   Future<InteractionResult> setFavorite(
     UnifiedVideo video, {
     required bool favorite,
     PlatformSession? session,
+    List<int>? folderIds,
+    List<int>? removeFolderIds,
   }) async {
     final adapter = _requireInteractionAdapter(video, session, '收藏');
     return adapter.setFavorite(
       video.platformVideoId,
       favorite: favorite,
       session: session!,
+      folderIds: folderIds,
+      removeFolderIds: removeFolderIds,
     );
   }
 

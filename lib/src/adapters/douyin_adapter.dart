@@ -313,17 +313,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
 
   @override
   Future<LiveRoomInfo> fetchLiveRoomInfoByKey(String roomKey) async {
-    final room = await _ensureLiveClient.findRoomInFeed(roomKey);
-    if (room == null) {
-      throw FusionException(
-        code: FusionErrorCode.videoNotFound,
-        userMessage: '这个直播间当前不在推荐流中，暂时无法获取详情。',
-        technicalMessage:
-            'room $roomKey not found in webcast/feed after 3 attempts',
-        platformId: id,
-        retryable: true,
-      );
-    }
+    final room = await _roomWithFallback(roomKey, context: 'room info');
 
     final owner = room['owner'] is Map
         ? Map<String, Object?>.from(room['owner'] as Map)
@@ -337,8 +327,10 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       shortId: 0,
       uid: _toInt(owner['id_str']) ?? _toInt(owner['id']) ?? 0,
       title: _nullableString(room['title']) ?? '抖音直播间',
-      // 抖音 status: 2 = 直播中（实测推荐流里的条目全是 2）
+      // 抖音 status: 2 = 直播中（实测推荐流与 room/info 里的条目全是 2）
       liveStatus: status == 2 ? 1 : 0,
+      // 人数以 room/info 为准：实测同一房间同一时刻 feed 7698 →
+      // room/info 7716 → 再请求 8017，feed 那个值明显更旧。
       online: _toInt(room['user_count']),
       description: _nullableString(room['introduction']),
       coverUrl: _firstUrl(room['cover']),
@@ -347,8 +339,117 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       liveStartTime: _toInt(room['create_time']) != null
           ? _epochToIso(_toInt(room['create_time'])!)
           : null,
-      // 抖音直播以竖屏为主（stream_orientation: 1）
-      isPortrait: _toInt(room['stream_orientation']) != 1,
+      isPortrait: _isPortraitRoom(room),
+    );
+  }
+
+  /// 房间是否为竖屏直播。
+  ///
+  /// # 判据（实测 12 房间，`tool/vf_dy_live_parse.mjs`）
+  ///
+  /// 读 `stream_url.extra` 里平台自声明的 width/height 与
+  /// `stream_orientation` 对齐：
+  ///
+  /// ```
+  /// stream_orientation == 1 → 1080x1920 / 1088x1920 → **竖屏**（手机直播，无 game_tag）
+  /// stream_orientation == 2 → 1920x1080 / 1920x1440 / 1024x768 → **横屏**
+  ///                        （王者荣耀、穿越火线、燕云十六声、金铲铲之战等游戏直播）
+  /// 汇总：{stream_orientation=2 → landscape: 7, stream_orientation=1 → portrait: 5}
+  /// ```
+  ///
+  /// 三个实现要点，每一个都对应一次真实的改错：
+  ///  1. **`!= 1` 是反的**（旧实现）。把 2 当竖屏，于是竖屏直播被按横屏
+  ///     16:9 contain 压成中间小条、横屏游戏直播被按竖屏 9:16 cover
+  ///     裁掉左右两侧。正确写法是 `== 1`。
+  ///  2. **顶层 `orientation` 恒为 0，无区分度**（12/12 房间实测），不能用。
+  ///  3. **`stream_orientation` 在 `stream_url` 里，房间顶层没有这个 key**
+  ///     （实测顶层命中 0/6）。因此 `room['stream_orientation']` 恒为 null，
+  ///     写成那样会让所有房间都判成横屏 —— 必须走
+  ///     `room['stream_url']['stream_orientation']`。
+  ///
+  /// 取值仍缺时（平台字段变了）按 `extra.width/height` 自己比，
+  /// 最后才退回 false（横屏）—— 宁可保守，不要瞎猜竖屏导致裁切。
+  static bool _isPortraitRoom(Map<String, Object?> room) {
+    final su = room['stream_url'] is Map
+        ? Map<String, Object?>.from(room['stream_url'] as Map)
+        : const <String, Object?>{};
+
+    // 兼容两种层级：实测只在 stream_url 里，但顶层也试一次以防平台改。
+    final orientation = _toInt(su['stream_orientation']) ??
+        _toInt(room['stream_orientation']);
+    if (orientation != null) return orientation == 1;
+
+    // 退回平台声明的分辨率：高大于宽即竖屏。
+    final extra = su['extra'] is Map
+        ? Map<String, Object?>.from(su['extra'] as Map)
+        : const <String, Object?>{};
+    final w = _toInt(extra['width']);
+    final h = _toInt(extra['height']);
+    if (w != null && h != null && w != h) return h > w;
+
+    return false;
+  }
+
+  /// 取房间对象：**先 `room/info` 直查，失败再回退推荐流翻找**。
+  ///
+  /// # 为什么是这条降级链
+  ///
+  ///  - `/webcast/room/info/` 实测**匿名可用**（必需参数只有
+  ///    `aid=6383` + `device_platform=web` + `version_code` 三个，见
+  ///    [DouyinLiveClient.fetchRoomInfo]），且**不间歇**：同房间连打 6 次
+  ///    全部返回 48 KB / 165 字段。它还会填 feed 里恒为空的顶层
+  ///    `hls_pull_url` 与 `flv_pull_url`，`user_count` 也更新鲜 ——
+  ///    所以它是首选。
+  ///  - 但**回退必须保留**：feed 是房间列表的唯一来源（平台没有可用的
+  ///    分区/房间列表接口），而且一旦 room/info 收紧风控
+  ///    （HTTP 200 + 空 body 等新形态），仍然要能进房间，
+  ///    而不是彻底打不开。
+  ///  - 曾经这里只有 feed 一条路，原因是当时的探针参数集缺
+  ///    `device_platform`，误判 room/info「54 组参数矩阵 0/54 全败」。
+  ///    那份假阴性的教训写在 [DouyinLiveClient._roomInfoQuery]。
+  ///
+  /// room/info 抛出的**语义性**错误（房间不存在 / 需登录）直接透出，
+  /// 不吞掉再走 feed —— 否则会把"房间没了"降级成"暂时找不到"，
+  /// 用户看到的文案就错了。只有**传输层/形态类**失败才回退。
+  Future<Map<String, Object?>> _roomWithFallback(
+    String roomKey, {
+    required String context,
+  }) async {
+    final client = _ensureLiveClient;
+    FusionException? roomInfoError;
+
+    try {
+      return await client.fetchRoomInfo(roomKey);
+    } on FusionException catch (e) {
+      // 房间确实不存在 / 参数错 / 需登录：这是确定答案，不要再用
+      // 概率性的 feed 翻找去掩盖它。
+      if (e.code == FusionErrorCode.videoNotFound ||
+          e.code == FusionErrorCode.loginRequired ||
+          e.code == FusionErrorCode.videoIdNotFound) {
+        rethrow;
+      }
+      roomInfoError = e;
+      _logger.warn('douyin live: room/info failed, falling back to feed', {
+        'roomKey': roomKey,
+        'context': context,
+        'code': e.code.name,
+      });
+    }
+
+    final room = await client.findRoomInFeed(roomKey);
+    if (room != null) return room;
+
+    // 两条路都没有：把 room/info 的原始失败一起带上，便于区分
+    // "端点被风控"与"房间不在了"。
+    final miss = client.takeLastFeedMiss();
+    throw FusionException(
+      code: roomInfoError?.code ?? FusionErrorCode.videoNotFound,
+      userMessage: '这个直播间当前无法进入，请稍后重试。',
+      technicalMessage:
+          'room $roomKey: room/info failed (${roomInfoError?.technicalMessage ?? 'n/a'}); '
+          'feed fallback miss: ${miss ?? 'no batch returned the room'}',
+      platformId: id,
+      retryable: true,
     );
   }
 
@@ -356,25 +457,62 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   Future<LiveStream> resolveLiveStream(int roomId, {int? quality}) =>
       resolveLiveStreamByKey('$roomId', quality: quality);
 
+  /// 解析直播播放地址。
+  ///
+  /// # 取值顺序：room/info 直查 → feed 翻找
+  ///
+  /// 见 [_roomWithFallback]。room/info 首选，因为它会填 feed 里恒为空的
+  /// 顶层 `hls_pull_url`（实测 311 B）与 `flv_pull_url`（4 档），
+  /// [DouyinLiveClient.parseStream] 的三级回退在它这条路上三级都能命中。
+  ///
+  /// # 地址类失败要**重取一次**再报错（关键实测结论）
+  ///
+  /// 抖音播放地址带 `expire` + `sign`，**时效很短**。实测同一时刻
+  /// 不同 CDN 节点的鉴权强度互不相同：
+  ///
+  /// ```
+  /// MCP_VCLOUD_LIVE      改 expire/sign → 403 len=0        （严格）
+  /// nginx / Tengine      改 expire/sign → 403 len=146–2575B（严格）
+  /// Bytedance NSS        改 expire      → 200 + 完整 #EXTM3U（★ 不校验）
+  ///                      改 sign        → 200               （★ 不校验）
+  ///                      改 stream 号   → 403               （只校验流是否存在）
+  /// ```
+  ///
+  /// 两个推论，都会直接影响排错方向：
+  ///  1. **HTTP 403 不是"下播/房间不存在"的判据**。它最常见的含义是
+  ///     "地址过期了"或"这个节点不接受当前 UA"，因此这里遇到取不到流
+  ///     一律**重新请求一次 room/info 拿新签名地址**，而不是直接抛错。
+  ///  2. **反过来也不能用"篡改签名会不会 403"来判断房间存活** ——
+  ///     在 NSS 类节点上篡改 expire/sign 依然返回 200 完整播放列表，
+  ///     那条推断会得出假结论（写这注释时差点栽过）。
+  ///     可靠存活判据只有两个：`room/info` 的 `status_code`（30001=不存在）
+  ///     与 `status`；以及对**原始下发地址**请求 playlist 拿到 2xx + `#EXTM3U`。
+  ///  3. **不要用 HEAD 判可用性**：实测 HEAD 一律 len=0，与死活无关。
+  ///
+  /// # 返回的 LiveStream 一定带 requestHeaders
+  ///
+  /// 抖音 CDN 在部分节点对 libmpv 默认 UA 返回 `HTTP 200 + 空 body`
+  /// （不报错、但没画面）。地址是有效的、流是 HEVC 且能硬解，
+  /// 所以黑屏根因是请求头，不是解码。适配器把这组头随流下发，
+  /// **包括每一个备选档位**，UI 层不需要也不允许知道任何平台细节。
+  ///
+  /// [quality] 是平台的 qualityValue（见 [DouyinLiveClient] 的档位序）。
+  /// 传入时在返回的主档与 `availableQualities` 里挑那一档。
   @override
   Future<LiveStream> resolveLiveStreamByKey(
     String roomKey, {
     int? quality,
   }) async {
-    final room = await _ensureLiveClient.findRoomInFeed(roomKey);
-    if (room == null) {
-      throw FusionException(
-        code: FusionErrorCode.videoNotFound,
-        userMessage: '这个直播间当前不在推荐流中，暂时无法观看。',
-        technicalMessage:
-            'room $roomKey not found in webcast/feed; cannot resolve stream',
-        platformId: id,
-        retryable: true,
-      );
-    }
+    final client = _ensureLiveClient;
+
+    // 房间标识一律保持字符串：19 位整数经 number 中转会丢末位，
+    // 丢一位就变成 status_code=30001「该直播室不存在」。
+    final room = await _roomWithFallback(roomKey, context: 'stream resolve');
 
     final status = _toInt(room['status']) ?? 0;
     if (status != 2) {
+      // 注意：读的是**房间对象**的 status。feed 信封层另有一个
+      // `live_status=0`，用它判在播会把 6/6 房间全判成未开播。
       throw FusionException(
         code: FusionErrorCode.capabilityUnavailable,
         userMessage: '主播当前没有开播。',
@@ -384,36 +522,107 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       );
     }
 
-    final stream = _ensureLiveClient.parseStream(room);
+    var stream = client.parseStream(room);
+
+    // 第一次解析不出地址：地址类失败最常见的原因是**签名过期**，
+    // 而不是"这个房间没有流"。因此重新取一次房间（新签名的地址），
+    // 再失败才如实报错。
     if (stream == null) {
+      _logger.warn('douyin live: no stream parsed, re-fetching for fresh url', {
+        'roomKey': roomKey,
+      });
+      final fresh = await client.fetchRoomInfo(roomKey);
+      stream = client.parseStream(fresh);
+    }
+
+    if (stream == null) {
+      // 明确区分两种"看不到画面"的原因，UI 上必须是不同文案。
       throw FusionException(
-        code: FusionErrorCode.capabilityUnavailable,
-        userMessage: '该直播间当前没有可播放的流。',
+        code: FusionErrorCode.networkError,
+        userMessage: '这个直播间暂时没有可播放的视频流。',
         technicalMessage:
-            'room $roomKey: stream_url present but no playable url parsed',
+            'room $roomKey: playlist/url unavailable — stream_url present but '
+            'no playable url parsed after re-fetching room/info for a fresh '
+            'signed url (status=$status, NOT 30001 "room doesn\'t exist"; '
+            'note: HTTP 403 here would mean an expired signature or a strict '
+            'CDN node, not that the streamer went offline)',
         platformId: id,
         retryable: true,
       );
     }
+
+    if (quality != null) {
+      final candidates = [stream, ...stream.availableQualities];
+      for (final c in candidates) {
+        if (c.qualityValue == quality) return c;
+      }
+      // 指定档位不存在（平台本批没下发这档）：如实说明，
+      // 不要静默换成别的档位让用户以为是画质坏了。
+      _logger.warn('douyin live: requested quality not among available', {
+        'roomKey': roomKey,
+        'requested': quality,
+        'available': candidates.map((c) => c.qualityValue).toList(),
+      });
+    }
+
     return stream;
   }
 
-  /// 抖音直播弹幕：**未实现**。
+  /// 抖音直播弹幕：**不可用**（实测，非"没做"）。
   ///
-  /// 实测结论：抖音直播弹幕走 WebSocket + protobuf（`wss://webcast*.douyin.com/webcast/im/ws/`），
-  /// 需要 `signature` 参数，该签名由设备侧生成。项目当前没有可用的
-  /// 弹幕端点，因此如实声明不支持，UI 不渲染弹幕开关。
+  /// # 具体失败链（每一条都是本地实测，逐条对应一个候选方案）
   ///
-  /// 不做假弹幕、不接入未验证的第三方弹幕服务。
+  /// ```
+  /// 1. WebSocket 收流：wss://webcast*-ws-web-*.douyin.com/...
+  ///    → HTTP Upgrade 握手返回 **HTTP/1.1 200 OK 而不是 101 Switching Protocols**，
+  ///      响应里没有 Sec-WebSocket-Accept，550 字节后服务端直接关闭连接；
+  ///      带伪造 signature 同样不升级。
+  ///    → webcast100-ws-web-al.douyin.com 已 ENOTFOUND（域名不存在）。
+  ///
+  /// 2. 历史/兜底 HTTP 端点 im/fetch：穷举 11 种参数组合 + 2 种 POST
+  ///    → web 参数一律 HTTP 200 len=27，body = {"data":[],"status_code":0}
+  ///      （data 恒为空数组，**没有 general_msg_list**；加伪 signature 不改变响应）
+  ///    → App 参数一律 len=0
+  ///
+  /// 3. room/chat/ → status_code=20003 "User doesn't login"
+  /// 4. 历史弹幕端点全部 url doesn't match 或 404；sign 类端点全部 404
+  /// 5. 本机无 webmssdk / sign.js，无法产出 signature
+  /// ```
+  ///
+  /// 根因：抖音直播弹幕需要 `webmssdk` 在设备侧生成的 signature，
+  /// 且没有任何匿名可用的 HTTP 换取端点。本项目**不内置、不执行**
+  /// 平台的风控脚本，因此这条能力如实为不可用。
+  ///
+  /// 因此 UI 不渲染抖音的弹幕开关。**绝不返回模拟/占位弹幕** ——
+  /// 假弹幕比没有弹幕更糟：用户会以为平台是通的。
   @override
   Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) =>
       throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '抖音直播弹幕暂不支持。',
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '抖音直播弹幕需要设备侧签名，本项目不实现，'
+            '因此无法接收真实弹幕。',
         technicalMessage:
-            'douyin live danmaku uses wss + protobuf with a device-side '
-            'signature; no verified public endpoint available',
+            'douyin live danmaku unavailable, per-endpoint evidence: '
+            '(1) wss handshake returns "HTTP/1.1 200 OK" instead of 101, '
+            'no Sec-WebSocket-Accept header, server closes after 550 bytes — '
+            'forged signature does not change that; '
+            'webcast100-ws-web-al.douyin.com is ENOTFOUND; '
+            '(2) im/fetch: 11 param combos x 2 POST methods all give '
+            'HTTP 200 len=27 {"data":[],"status_code":0} (empty data array, '
+            'no general_msg_list; App-style params give len=0); '
+            '(3) webcast/room/chat/ -> status_code=20003 "User doesn\'t login"; '
+            '(4) history danmaku endpoints -> "url doesn\'t match" / 404; '
+            '(5) no HTTP endpoint issues the required signature and this '
+            'project does not ship or execute the platform risk-control JS',
         platformId: id,
+        retryable: false,
+        diagnostics: const {
+          'handshake': 'HTTP 200 (not 101)',
+          'imFetch': 'HTTP 200 len=27 data=[]',
+          'roomChat': 'status_code=20003 User doesn\'t login',
+          'signature': 'requires webmssdk; no public minting endpoint',
+          'syntheticMessages': 'not implemented by design',
+        },
       );
 
 
@@ -659,6 +868,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     required bool like,
     required PlatformSession session,
     int? aid,
+    List<int>? folderIds,
   }) async {
     throw FusionException(
       code: FusionErrorCode.capabilityUnavailable,
@@ -685,12 +895,162 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     );
   }
 
+  /// 收藏夹列表：该平台不支持。
+  ///
+  /// 抖音的收藏夹接口在 `/aweme/` 系，需要 X-Argus 签名，未实现。
+  /// 如实抛错，UI 依据 [supportsFavoriteFolders] 不展示选择面板。
+  @override
+  Future<List<FavoriteFolder>> fetchFavoriteFolders({
+    required PlatformSession session,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持收藏夹。',
+        technicalMessage: 'favorite folders unsupported for this platform',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsFavoriteFolders => false;
+
+  /// 逐夹归属扫描：依赖 [fetchFavoriteFolders]，同样不支持。
+  @override
+  bool get supportsFolderOwnershipScan => false;
+
+  /// 硬币余额：抖音没有"硬币"这一概念，如实不支持（不是"接口没做"）。
+  @override
+  bool get supportsCoinBalance => false;
+
+  /// 稍后再看：抖音的对应功能（"想看"/收藏）走 `/aweme/` 系签名接口，未实现。
+  @override
+  bool get supportsWatchLater => false;
+
+  /// 关注：抖音的取关接口需要 msToken + a_bogus 风控参数，未实现。
+  ///
+  /// 注意：**读**关注状态在作者页里是有的，但按契约"要么如实支持要么不支持"，
+  /// 半实现会让 UI 显示一个点了必然失败的按钮，所以这里声明不支持。
+  @override
+  bool get supportsFollowAuthor => false;
+
+  /// 已保存内容浏览：同样受签名风控限制，未实现。
+  @override
+  bool get supportsSavedContent => false;
+
+  // 以下成员用 `implements` 声明时必须逐个重写：Dart 的 `implements`
+  // 只继承**签名**、不继承接口里的默认实现，少写一个就是编译错误。
+  // 抖音一律"如实不支持"，抛 unsupportedPlatform 而不是返回空数据
+  // ——返回空会把"能力不存在"伪装成"这个账号没有内容"。
+
+  @override
+  Future<int?> fetchCoinBalance({required PlatformSession session}) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持硬币余额。',
+        technicalMessage: 'douyin has no coin system',
+        platformId: id,
+      );
+
+  @override
+  Future<bool> fetchWatchLater({
+    required String platformVideoId,
+    required PlatformSession session,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持稍后再看。',
+        technicalMessage: 'douyin watch-later requires Argus signature',
+        platformId: id,
+      );
+
+  @override
+  Future<InteractionResult> setWatchLater({
+    required String platformVideoId,
+    required bool add,
+    required PlatformSession session,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持稍后再看。',
+        technicalMessage: 'douyin watch-later requires Argus signature',
+        platformId: id,
+      );
+
+  @override
+  Future<InteractionResult> setFollowAuthor({
+    required String targetMid,
+    required bool follow,
+    required PlatformSession session,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持关注。',
+        technicalMessage: 'douyin follow requires a_bogus + msToken',
+        platformId: id,
+      );
+
+  @override
+  Future<SavedVideoPage> fetchFavoriteFolderVideos(
+    int mediaId, {
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持查看收藏夹内容。',
+        technicalMessage: 'douyin saved content requires Argus signature',
+        platformId: id,
+      );
+
+  @override
+  Future<SavedVideoPage> fetchWatchLaterVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持稍后再看列表。',
+        technicalMessage: 'douyin watch-later requires Argus signature',
+        platformId: id,
+      );
+
+  @override
+  Future<FolderOwnershipScan> scanFoldersContainingVideo({
+    required String platformVideoId,
+    required PlatformSession session,
+    int maxRequests = 12,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持收藏夹归属查询。',
+        technicalMessage: 'douyin fav folders unsupported',
+        platformId: id,
+      );
+
+  /// 收藏结果复查：该平台不支持收藏夹，如实抛错（不是返回空列表）。
+  @override
+  Future<List<int>> verifyRecentFavorite({
+    required String platformVideoId,
+    required List<int> folderIds,
+    required PlatformSession session,
+    int maxPages = 2,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持收藏夹。',
+        technicalMessage: 'douyin fav folders unsupported',
+        platformId: id,
+      );
+
   @override
   Future<InteractionResult> setFavorite(
     String platformVideoId, {
     required bool favorite,
     required PlatformSession session,
     int? aid,
+    List<int>? folderIds,
+    List<int>? removeFolderIds,
   }) async {
     throw FusionException(
       code: FusionErrorCode.capabilityUnavailable,
@@ -972,9 +1332,16 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     final list = rawList is List ? rawList : const [];
 
     final items = <UnifiedVideo>[];
+    var skippedImageText = 0;
     for (final raw in list) {
       if (raw is! Map) continue;
-      final video = _awemeToVideo(Map<String, Object?>.from(raw));
+      final aweme = Map<String, Object?>.from(raw);
+      // 图文帖不进竖滑流（见 _isImageTextPost 的实测依据）。
+      if (_isImageTextPost(aweme)) {
+        skippedImageText++;
+        continue;
+      }
+      final video = _awemeToVideo(aweme);
       if (video != null) items.add(video);
     }
 
@@ -989,6 +1356,9 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       nextOffset: maxCursor,
       notes: [
         '来自抖音 APP 端公开推荐接口，非本系统算法生成。',
+        if (skippedImageText > 0)
+          '本批 $skippedImageText 条图文帖已过滤：平台对图文帖只下发音频轨，'
+              '放进竖滑流点开会有声无画。',
       ],
     );
   }
@@ -1070,6 +1440,60 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     );
   }
 
+  /// 抖音 aweme 的媒体类型（实测值，见 [_isImageTextPost]）。
+  static const int mediaTypeVideo = 4;
+
+  /// 图文帖（images post）：平台只下发**音频轨**。
+  static const int mediaTypeImageText = 42;
+
+  /// 这条 aweme 是不是"点开只会有声音、没有画面"的图文帖。
+  ///
+  /// # 实测依据（`tool/vf_dy_aweme_mediatype.mjs`，穷举 28 个地址字段）
+  ///
+  /// ```
+  /// 真视频  media_type=4 ：duration>0、images=0
+  ///         play_addr → HTTP 206 / video/mp4，首字节 00 00 00 20 66 74 79 70 69 73 6f 6d
+  ///         （ftypisom）**确实是视频**
+  /// 图文帖  media_type=42：duration=0、images>=1
+  ///         play_addr → audio/mpeg，首字节 49 44 33（ID3），即指向 **.mp3**
+  /// ```
+  ///
+  /// 关键是这两类**混在同一次 feed 响应里**下发。旧实现取
+  /// `video.play_addr.url_list[0]` 时不看类型，于是图文帖也带着
+  /// `availability: available` 进竖滑流：点开 → 播放器拿到一条 mp3 →
+  /// **有音频轨、无视频轨 → 画面必黑，但播放进度正常前进**。
+  ///
+  /// 这条现象同时修正一个旧的错误归因：模拟器上的"直播/推荐流黑屏"
+  /// 曾被整体记成 EGL/软渲染问题，实际相当一部分就是图文帖混发。
+  /// （直播黑屏另有原因，见 `douyin/live_client.dart` 的
+  /// `_streamHeaders` —— 那一条是 CDN 对默认 UA 返回空 body。）
+  ///
+  /// # 为什么不单靠 media_type
+  ///
+  /// `media_type` 是**主判据**，但平台改类型码是很常见的事，
+  /// 所以再加一层内容自证的双保险：**既没有正时长、又带了 images**
+  /// 才判成图文帖。反过来，只要 `duration > 0` 或 `images` 为空，
+  /// 即使类型码不认识也**不**过滤 —— 宁可放过一条音频帖，
+  /// 也不能把真视频滤掉（少一条内容 vs 一整批黑屏，取轻的那个）。
+  ///
+  /// 也不写成 `media_type != 4 就过滤`：那样一旦平台新增一种**可播放**
+  /// 的类型码（实测混合流里除 4 外还可能出现的值），整批真视频会被
+  /// 静默清空，症状比"混进一条有声无画"更难查。
+  static bool _isImageTextPost(Map<String, Object?> raw) {
+    final mediaType = _toInt(raw['media_type']);
+    if (mediaType == mediaTypeImageText) return true;
+
+    final video = raw['video'] is Map
+        ? Map<String, Object?>.from(raw['video'] as Map)
+        : const <String, Object?>{};
+    final images = raw['images'];
+    final hasImages = images is List && images.isNotEmpty;
+    final durationMs = _toInt(video['duration']) ?? 0;
+
+    // 双条件都不满足才算图文帖：无时长 **且** 有图片。
+    return durationMs <= 0 && hasImages;
+  }
+
   /// 把抖音 aweme 结构转换为统一视频模型。
   ///
   /// 字段映射依据实测响应（2026-10，feed 接口）：
@@ -1084,7 +1508,13 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   ///  - `video.bit_rate[]`    → 清晰度档位
   ///  - `statistics.digg_count` → likeCount
   ///  - `statistics.comment_count` → commentCount（映射到 danmakuCount）
+  ///
+  /// 图文帖（[_isImageTextPost]）在这里**也**会被挡下：调用方除了
+  /// 推荐流还有别的入口，这层守卫保证任何路径都不会把"只有音频的条目"
+  /// 标成可播放。
   UnifiedVideo? _awemeToVideo(Map<String, Object?> raw) {
+    if (_isImageTextPost(raw)) return null;
+
     final awemeId = _nullableString(raw['aweme_id']);
     if (awemeId == null) return null;
     if (!RegExp(r'^\d{15,25}$').hasMatch(awemeId)) return null;

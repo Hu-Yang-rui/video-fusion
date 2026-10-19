@@ -1,0 +1,56 @@
+[
+  {
+    "room": "7698007617718995727",
+    "tier": "FULL_HD1",
+    "segStatus": 200,
+    "segLen": 2062548,
+    "firstByte": "0x47",
+    "segCt": "video/mp2t",
+    "tsSyncPackets": 10971,
+    "tsMisaligned": 0,
+    "programs": [
+      "prog1/pmt4097"
+    ],
+    "streams": [
+      "pid=256 stream_type=0x24 H.265/HEVC",
+      "pid=257 stream_type=0x0f AAC ADTS"
+    ],
+    "declaredCodec": "uhd=bytevc1@1440x1080/60fps/19977kbps"
+  },
+  {
+    "room": "7697991344501115711",
+    "tier": "FULL_HD1",
+    "segStatus": 200,
+    "segLen": 2014044,
+    "firstByte": "0x47",
+    "segCt": "video/mp2t",
+    "tsSyncPackets": 10713,
+    "tsMisaligned": 0,
+    "programs": [
+      "prog1/pmt4097"
+    ],
+    "streams": [
+      "pid=256 stream_type=0x24 H.265/HEVC",
+      "pid=257 stream_type=0x0f AAC ADTS"
+    ],
+    "declaredCodec": "uhd=bytevc1@1080x1920/30fps/8935kbps"
+  },
+  {
+    "room": "7698015023414725403",
+    "tier": "FULL_HD1",
+    "segStatus": 200,
+    "segLen": 1933580,
+    "firstByte": "0x47",
+    "segCt": "video/mp2t",
+    "tsSyncPackets": 10285,
+    "tsMisaligned": 0,
+    "programs": [
+      "prog1/pmt4097"
+    ],
+    "streams": [
+      "pid=256 stream_type=0x24 H.265/HEVC",
+      "pid=257 stream_type=0x0f AAC ADTS"
+    ],
+    "declaredCodec": "uhd=bytevc1@1920x1080/60fps/20065kbps"
+  }
+]

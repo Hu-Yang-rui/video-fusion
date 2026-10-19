@@ -1,0 +1,521 @@
+{
+  "at": "2026-10-18T16:30:47.810Z",
+  "rooms": 12,
+  "batches": 12,
+  "emptyBatches": 9,
+  "batchSizes": [
+    6,
+    0,
+    0,
+    0,
+    0,
+    0,
+    6,
+    0,
+    0,
+    0,
+    0,
+    6
+  ],
+  "orientation": [
+    {
+      "room": "7697991152271723273",
+      "stream_orientation": 2,
+      "top_orientation": 0,
+      "wh": "1920x1080",
+      "dir": "landscape",
+      "game": "燕云十六声",
+      "hls_map_keys": [
+        "FULL_HD1",
+        "HD1",
+        "SD1",
+        "SD2"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "ao",
+        "md",
+        "ld",
+        "hd",
+        "sd",
+        "origin"
+      ],
+      "sdk_options_vcodec": [
+        "ld:bytevc1",
+        "sd:bytevc1",
+        "hd:bytevc1",
+        "origin:bytevc1"
+      ],
+      "default_resolution": "HD1"
+    },
+    {
+      "room": "7697883913116568335",
+      "stream_orientation": 1,
+      "top_orientation": 0,
+      "wh": "1080x1920",
+      "dir": "portrait",
+      "game": "",
+      "hls_map_keys": [
+        "FULL_HD1",
+        "HD1",
+        "SD1",
+        "SD2"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "md",
+        "origin",
+        "ld",
+        "uhd",
+        "sd",
+        "ao",
+        "hd"
+      ],
+      "sdk_options_vcodec": [
+        "ld:bytevc1",
+        "sd:bytevc1",
+        "hd:bytevc1",
+        "uhd:bytevc1"
+      ],
+      "default_resolution": "HD1"
+    },
+    {
+      "room": "7698026888077331215",
+      "stream_orientation": 2,
+      "top_orientation": 0,
+      "wh": "1024x768",
+      "dir": "landscape",
+      "game": "穿越火线",
+      "hls_map_keys": [
+        "FULL_HD1",
+        "HD1",
+        "SD1",
+        "SD2"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "hd",
+        "ld",
+        "origin",
+        "ao",
+        "md",
+        "sd"
+      ],
+      "sdk_options_vcodec": [
+        "ld:bytevc1",
+        "sd:bytevc1",
+        "hd:bytevc1",
+        "origin:bytevc1"
+      ],
+      "default_resolution": "HD1"
+    },
+    {
+      "room": "7698028394847439643",
+      "stream_orientation": 2,
+      "top_orientation": 0,
+      "wh": "1920x1080",
+      "dir": "landscape",
+      "game": "王者荣耀",
+      "hls_map_keys": [
+        "FULL_HD1",
+        "HD1",
+        "SD1",
+        "SD2"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "ld",
+        "xuhd",
+        "ao",
+        "hd",
+        "sd",
+        "md",
+        "uhd",
+        "origin"
+      ],
+      "sdk_options_vcodec": [
+        "ld:bytevc1",
+        "sd:bytevc1",
+        "hd:bytevc1",
+        "uhd:bytevc1",
+        "xuhd:bytevc1"
+      ],
+      "default_resolution": "HD1"
+    },
+    {
+      "room": "7697928046317243172",
+      "stream_orientation": 1,
+      "top_orientation": 0,
+      "wh": "1080x1920",
+      "dir": "portrait",
+      "game": "",
+      "hls_map_keys": [
+        "FULL_HD1",
+        "HD1",
+        "SD1",
+        "SD2"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "ao",
+        "ld",
+        "hd",
+        "md",
+        "uhd",
+        "sd",
+        "origin"
+      ],
+      "sdk_options_vcodec": [
+        "ld:bytevc1",
+        "sd:bytevc1",
+        "hd:bytevc1",
+        "uhd:bytevc1"
+      ],
+      "default_resolution": "HD1"
+    },
+    {
+      "room": "7697959724830018331",
+      "stream_orientation": 2,
+      "top_orientation": 0,
+      "wh": "1920x1440",
+      "dir": "landscape",
+      "game": "王者荣耀",
+      "hls_map_keys": [
+        "FULL_HD1",
+        "HD1",
+        "SD1",
+        "SD2"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "xuhd",
+        "ld",
+        "sd",
+        "ao",
+        "md",
+        "origin",
+        "uhd",
+        "hd"
+      ],
+      "sdk_options_vcodec": [
+        "ld:bytevc1",
+        "sd:bytevc1",
+        "hd:bytevc1",
+        "uhd:bytevc1",
+        "xuhd:bytevc1"
+      ],
+      "default_resolution": "HD1"
+    },
+    {
+      "room": "7697987924211747599",
+      "stream_orientation": 1,
+      "top_orientation": 0,
+      "wh": "1080x1920",
+      "dir": "portrait",
+      "game": "",
+      "hls_map_keys": [
+        "FULL_HD1",
+        "HD1",
+        "SD1",
+        "SD2"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "md",
+        "ao",
+        "hd",
+        "origin",
+        "sd",
+        "ld",
+        "uhd"
+      ],
+      "sdk_options_vcodec": [
+        "ld:bytevc1",
+        "sd:bytevc1",
+        "hd:bytevc1",
+        "uhd:bytevc1"
+      ],
+      "default_resolution": "HD1"
+    },
+    {
+      "room": "7698006824892812086",
+      "stream_orientation": 2,
+      "top_orientation": 0,
+      "wh": "1920x1080",
+      "dir": "landscape",
+      "game": "英雄联盟",
+      "hls_map_keys": [
+        "FULL_HD1",
+        "HD1",
+        "SD1",
+        "SD2"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "ld",
+        "uhd",
+        "origin",
+        "ao",
+        "sd",
+        "hd",
+        "md",
+        "xuhd"
+      ],
+      "sdk_options_vcodec": [
+        "ld:bytevc1",
+        "sd:bytevc1",
+        "hd:bytevc1",
+        "uhd:bytevc1",
+        "xuhd:bytevc1"
+      ],
+      "default_resolution": "HD1"
+    },
+    {
+      "room": "7698012437185891107",
+      "stream_orientation": 1,
+      "top_orientation": 0,
+      "wh": "1080x1920",
+      "dir": "portrait",
+      "game": "",
+      "hls_map_keys": [
+        "FULL_HD1",
+        "HD1",
+        "SD1",
+        "SD2"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "hd",
+        "ld",
+        "ao",
+        "md",
+        "sd",
+        "origin"
+      ],
+      "sdk_options_vcodec": [
+        "ld:bytevc1",
+        "sd:bytevc1",
+        "hd:bytevc1",
+        "origin:bytevc1"
+      ],
+      "default_resolution": "HD1"
+    },
+    {
+      "room": "7698012687837711158",
+      "stream_orientation": 2,
+      "top_orientation": 0,
+      "wh": "1920x1440",
+      "dir": "landscape",
+      "game": "穿越火线",
+      "hls_map_keys": [
+        "FULL_HD1",
+        "HD1",
+        "SD1",
+        "SD2"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "hd",
+        "xuhd",
+        "uhd",
+        "md",
+        "ao",
+        "origin",
+        "ld",
+        "sd"
+      ],
+      "sdk_options_vcodec": [
+        "ld:bytevc1",
+        "sd:bytevc1",
+        "hd:bytevc1",
+        "uhd:bytevc1",
+        "xuhd:bytevc1"
+      ],
+      "default_resolution": "HD1"
+    },
+    {
+      "room": "7698017448704232232",
+      "stream_orientation": 1,
+      "top_orientation": 0,
+      "wh": "1088x1920",
+      "dir": "portrait",
+      "game": "",
+      "hls_map_keys": [
+        "FULL_HD1"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "md",
+        "origin",
+        "ao"
+      ],
+      "sdk_options_vcodec": [
+        "origin:bytevc1"
+      ],
+      "default_resolution": "FULL_HD1"
+    },
+    {
+      "room": "7698004923061029682",
+      "stream_orientation": 2,
+      "top_orientation": 0,
+      "wh": "1920x1440",
+      "dir": "landscape",
+      "game": "金铲铲之战",
+      "hls_map_keys": [
+        "FULL_HD1",
+        "HD1",
+        "SD1",
+        "SD2"
+      ],
+      "res_name": {
+        "FULL_HD1": "蓝光",
+        "HD1": "超清",
+        "ORIGION": "原画",
+        "SD1": "标清",
+        "SD2": "高清"
+      },
+      "hls_top_len": 0,
+      "flv_map_keys": 0,
+      "stream_data_type": "string",
+      "sdk_data_keys": [
+        "ao",
+        "uhd",
+        "xuhd",
+        "ld",
+        "hd",
+        "sd",
+        "origin",
+        "md"
+      ],
+      "sdk_options_vcodec": [
+        "ld:bytevc1",
+        "sd:bytevc1",
+        "hd:bytevc1",
+        "uhd:bytevc1",
+        "xuhd:bytevc1"
+      ],
+      "default_resolution": "HD1"
+    }
+  ],
+  "summary": {
+    "orientStat": {
+      "stream_orientation=2 → landscape": 7,
+      "stream_orientation=1 → portrait": 5
+    },
+    "hlsKeyDist": {
+      "FULL_HD1": 12,
+      "HD1": 11,
+      "SD1": 11,
+      "SD2": 11
+    },
+    "resNameDist": {
+      "FULL_HD1=蓝光": 12,
+      "HD1=超清": 12,
+      "ORIGION=原画": 12,
+      "SD1=标清": 12,
+      "SD2=高清": 12
+    },
+    "topHlsNonEmpty": 0,
+    "flvMapNonEmpty": 0,
+    "stringifiedHits": 12
+  }
+}

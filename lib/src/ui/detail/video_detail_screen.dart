@@ -11,7 +11,8 @@
 /// │  标题（大字号，视觉主体）    │
 /// │  平台 · 播放数 · 日期        │
 /// │                          │
-/// │  ●头像  作者名              │
+/// │  ●头像  作者名      [+关注] │
+/// │  ♡ 点赞 · ★ 收藏 · ◉ 投币 · ↗ 分享 · 🕐 稍后再看 │
 /// │                          │
 /// │  简介正文（可展开）          │
 /// │                          │
@@ -26,6 +27,9 @@
 /// 设计要点：
 ///  - 标题、元信息、作者、简介用**留白与排版**分区，不靠卡片边框
 ///  - 评论入口是一行可点的内容行，不是按钮
+///  - 互动条紧贴作者行：点赞/收藏/投币围绕**当前视频**组织，
+///    状态与推荐流共享同一个会话（见 [InteractionRegistry]），
+///    因此在一个入口收藏后，另一个入口立刻是高亮的
 ///  - 播放方式 / 分辨率 / 是否支持倍速这类**技术细节默认收起**，
 ///    普通用户不需要看到；需要排查时展开即可
 ///  - 与竖滑流的差异：这里支持完整播放、进度恢复、清晰度、全屏
@@ -47,6 +51,7 @@ import '../../models/playback.dart';
 import '../../models/unified_video.dart';
 import '../../player/player_controller.dart';
 import '../interaction/interaction_controller.dart';
+import '../interaction/interaction_registry.dart';
 import '../interaction/interaction_widgets.dart';
 
 /// 长视频详情页。
@@ -56,7 +61,9 @@ class VideoDetailScreen extends StatefulWidget {
     required this.video,
     required this.service,
     this.vault,
+    this.interactions,
     this.onOpenOriginal,
+    this.onOpenLogin,
     this.initialPosition,
     this.onProgressChanged,
   });
@@ -68,8 +75,18 @@ class VideoDetailScreen extends StatefulWidget {
   /// （评论需要登录态判断，没有 vault 就无法确定能力）。
   final CredentialVault? vault;
 
+  /// 全局互动状态登记表。
+  ///
+  /// 传入时详情页**复用**与推荐流同一个会话，因此在一个入口点赞/收藏后
+  /// 另一个入口立刻一致。为 null 时退回页面自建会话（旧行为，
+  /// 状态不跨页共享）——保持公共 API 兼容，不破坏现有调用方与测试。
+  final InteractionRegistry? interactions;
+
   final void Function(UnifiedVideo)? onOpenOriginal;
 
+  /// 未登录时点击互动按钮的跳转动作（通常去「我的」页登录）。
+  /// 为 null 时互动条自己提示"请先登录"，不做跳转。
+  final VoidCallback? onOpenLogin;
   /// 续播位置（来自观看历史）。
   final Duration? initialPosition;
 
@@ -95,14 +112,26 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
   bool _techExpanded = false;
   Timer? _controlsTimer;
 
-  /// 互动控制器（评论、点赞等）。仅在有 vault 时创建。
+  /// 互动控制器（评论、点赞等）。仅在有 vault 或登记表时创建。
   InteractionController? _interaction;
+
+  /// 本页是否持有登记表的引用（决定 dispose 时是否 release）。
+  bool _holdsRef = false;
 
   @override
   void initState() {
     super.initState();
     _resolveAndLoad();
+    _bindInteraction();
+  }
 
+  void _bindInteraction() {
+    final registry = widget.interactions;
+    if (registry != null) {
+      _interaction = registry.acquire(widget.video);
+      _holdsRef = true;
+      return;
+    }
     final vault = widget.vault;
     if (vault != null) {
       final ctrl = InteractionController(
@@ -217,7 +246,15 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
   void dispose() {
     _controlsTimer?.cancel();
     _sub?.cancel();
-    _interaction?.dispose();
+    if (_holdsRef) {
+      // 交还给登记表：引用归零时由登记表统一 dispose，
+      // 这里直接 dispose 会破坏推荐流仍在使用的同一会话。
+      widget.interactions?.release(widget.video.id);
+      _holdsRef = false;
+    } else {
+      _interaction?.dispose();
+    }
+    _interaction = null;
     _player?.dispose();
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -501,7 +538,7 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
             ),
           ),
 
-          // ── 作者行（无卡片）──────────────────────────
+          // ── 作者行 + 互动条 ───────────────────────────
           Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: AppleSpace.pageInset,
@@ -542,9 +579,33 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
                     style: AppleType.bodyEmphasized.copyWith(color: c.label),
                   ),
                 ),
+                // 关注按钮（平台接口实测支持时才出现）
+                if (_interaction != null) _FollowButton(ctrl: _interaction!),
               ],
             ),
           ),
+
+          // ── 互动条：点赞 / 评论 / 收藏 / 投币 / 稍后再看 / 分享 ──
+          //
+          // 围绕**当前视频**组织，状态与推荐流共享同一个会话。
+          if (_interaction != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                AppleSpace.pageInset,
+                0,
+                AppleSpace.pageInset,
+                AppleSpace.sm,
+              ),
+              child: ListenableBuilder(
+                listenable: _interaction!,
+                builder: (context, _) => _InteractionBar(
+                  video: v,
+                  ctrl: _interaction!,
+                  // 未登录时走外部给的登录入口（「我的」页），没有就原地提示
+                  onOpenLogin: widget.onOpenLogin ?? () {},
+                ),
+              ),
+            ),
 
           // ── 简介（无卡片）────────────────────────────
           if (v.description != null && v.description!.trim().isNotEmpty)
@@ -818,9 +879,312 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
   }
 }
 
+/// 详情页互动条。
+///
+/// 与推荐流右侧栏使用**同一个会话对象**（由 [InteractionRegistry] 按
+/// 视频 ID 复用），所以：
+///  - 在推荐流里点了收藏，进详情页立刻是高亮的（不再各自一份状态）
+///  - 这里发起的写操作成功后，推荐流的按钮也会同步更新
+///
+/// 只渲染平台真实支持的动作；不支持的动作**不出现**，
+/// 而不是渲染一个点了报错的按钮。
+class _InteractionBar extends StatelessWidget {
+  const _InteractionBar({
+    required this.video,
+    required this.ctrl,
+    required this.onOpenLogin,
+  });
+
+  final UnifiedVideo video;
+  final InteractionController ctrl;
+  final VoidCallback onOpenLogin;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    final caps = ctrl.capabilities;
+    final state = ctrl.state;
+    final avail = ctrl.coinAvailability();
+
+    // 未登录时状态未知：文案显示"登录后可操作"，不显示"未点赞"
+    final unknownHint = !state.known && !ctrl.isLoggedIn;
+
+    return Wrap(
+      spacing: AppleSpace.sm,
+      runSpacing: AppleSpace.sm,
+      children: [
+        if (caps.like)
+          _PillAction(
+            icon: state.liked
+                ? Icons.favorite_rounded
+                : Icons.favorite_border_rounded,
+            label: unknownHint
+                ? '点赞'
+                : _fmtMaybe(state.likeCount ?? video.stats.likeCount),
+            active: state.liked,
+            activeColor: c.pink,
+            busy: ctrl.likePending,
+            onTap: () => ctrl.isLoggedIn
+                ? ctrl.toggleLike()
+                : onOpenLogin(),
+          ),
+        if (caps.favorite)
+          _PillAction(
+            icon: state.favorited
+                ? Icons.star_rounded
+                : Icons.star_border_rounded,
+            label: _favoriteLabel(),
+            active: state.favorited,
+            activeColor: c.orange,
+            busy: ctrl.favoritePending,
+            onTap: () {
+              if (!ctrl.isLoggedIn) return onOpenLogin();
+              if (ctrl.supportsFavoriteFolders) {
+                _openFavorites(context);
+              } else {
+                ctrl.toggleFavorite();
+              }
+            },
+          ),
+        if (caps.coin)
+          _PillAction(
+            icon: state.coined > 0
+                ? Icons.monetization_on_rounded
+                : Icons.monetization_on_outlined,
+            label: state.coined > 0 ? '已投 ${state.coined}' : '投币',
+            active: state.coined > 0,
+            activeColor: c.yellow,
+            busy: ctrl.coinPending,
+            // 余额不足 / 已达上限 → 不可点并说明原因
+            enabled: avail.allowed,
+            disabledReason: avail.reason.isEmpty ? null : avail.reason,
+            onTap: () => ctrl.isLoggedIn ? _openCoin(context) : onOpenLogin(),
+          ),
+        if (caps.watchLater)
+          _PillAction(
+            icon: state.watchLater
+                ? Icons.schedule_rounded
+                : Icons.schedule_outlined,
+            label: state.watchLater ? '已稍看' : '稍后再看',
+            active: state.watchLater,
+            activeColor: c.green,
+            busy: ctrl.watchLaterPending,
+            onTap: () => ctrl.isLoggedIn
+                ? ctrl.toggleWatchLater()
+                : onOpenLogin(),
+          ),
+        _PillAction(
+          icon: Icons.share_outlined,
+          label: '分享',
+          onTap: () => _share(context),
+        ),
+      ],
+    );
+  }
+
+  String _favoriteLabel() {
+    final n = ctrl.favoritedFolderIds.length;
+    if (!ctrl.state.favorited) return '收藏';
+    if (ctrl.supportsFavoriteFolders && n > 1) return '$n 个夹';
+    return '已收藏';
+  }
+
+  Future<void> _openFavorites(BuildContext context) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      // 弹层是覆盖物，**不暂停播放**；关闭后播放器状态原样保留
+      builder: (_) => FavoriteSheet(controller: ctrl),
+    );
+  }
+
+  Future<void> _openCoin(BuildContext context) async {
+    await ctrl.loadCoinBalance();
+    if (!context.mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => CoinSheet(
+        controller: ctrl,
+        coinBalance: ctrl.coinBalance,
+      ),
+    );
+  }
+
+  /// 分享：真实复制到剪贴板并回读校验，失败给明确反馈。
+  Future<void> _share(BuildContext context) async {
+    final url = video.canonicalUrl;
+    if (url.isEmpty) {
+      _toast(context, '该视频没有可分享的链接。');
+      return;
+    }
+    try {
+      await Clipboard.setData(ClipboardData(text: url));
+      final read = await Clipboard.getData(Clipboard.kTextPlain);
+      _toast(
+        context,
+        read?.text == url ? '链接已复制：$url' : '已尝试复制链接，请确认粘贴内容。',
+      );
+    } catch (_) {
+      _toast(context, '复制失败，可在「在原平台打开」后手动复制。');
+    }
+  }
+
+  static void _toast(BuildContext context, String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+    );
+  }
+
+  static String _fmtMaybe(int? n) {
+    if (n == null) return '点赞';
+    if (n >= 100000000) return '${(n / 100000000).toStringAsFixed(1)}亿';
+    if (n >= 10000) return '${(n / 10000).toStringAsFixed(1)}万';
+    return '$n';
+  }
+}
+
+/// 互动条的胶囊按钮。
+class _PillAction extends StatelessWidget {
+  const _PillAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.active = false,
+    this.activeColor,
+    this.busy = false,
+    this.enabled = true,
+    this.disabledReason,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool active;
+  final Color? activeColor;
+  final bool busy;
+  final bool enabled;
+  final String? disabledReason;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    final color = active ? (activeColor ?? c.blue) : c.secondaryLabel;
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        if (busy) return;
+        if (!enabled) {
+          if (disabledReason != null) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(disabledReason!),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
+          return;
+        }
+        onTap();
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppleSpace.md,
+          vertical: 7,
+        ),
+        decoration: BoxDecoration(
+          color: active ? (activeColor ?? c.blue).withValues(alpha: 0.10) : c.fill,
+          borderRadius: BorderRadius.circular(AppleRadius.pill),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (busy)
+              SizedBox(
+                width: 15,
+                height: 15,
+                child: CircularProgressIndicator(strokeWidth: 1.8, color: color),
+              )
+            else
+              Icon(icon, size: 16, color: color),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: AppleType.footnote.copyWith(
+                color: active ? color : c.label,
+                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 关注按钮（平台接口实测支持写入时才渲染）。
+class _FollowButton extends StatelessWidget {
+  const _FollowButton({required this.ctrl});
+
+  final InteractionController ctrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    return ListenableBuilder(
+      listenable: ctrl,
+      builder: (context, _) {
+        if (!ctrl.canFollowAuthor) return const SizedBox.shrink();
+        final following = ctrl.state.following;
+        return GestureDetector(
+          onTap: ctrl.followPending ? null : ctrl.toggleFollowAuthor,
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppleSpace.lg,
+              vertical: 6,
+            ),
+            decoration: BoxDecoration(
+              color: following ? c.fill : c.pink,
+              borderRadius: BorderRadius.circular(AppleRadius.pill),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (ctrl.followPending)
+                  const SizedBox(
+                    width: 13,
+                    height: 13,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.8,
+                      color: Colors.white,
+                    ),
+                  )
+                else if (following)
+                  const Icon(Icons.check_rounded, size: 13, color: Colors.white)
+                else
+                  const Icon(Icons.add_rounded, size: 13, color: Colors.white),
+                const SizedBox(width: 4),
+                Text(
+                  following ? '已关注' : '关注',
+                  style: AppleType.footnote.copyWith(
+                    color: following ? c.secondaryLabel : Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// 毛玻璃返回按钮。
-class _GlassBackButton extends StatelessWidget {
-  const _GlassBackButton({required this.onTap});
+class _GlassBackButton extends StatelessWidget {  const _GlassBackButton({required this.onTap});
 
   final VoidCallback onTap;
 

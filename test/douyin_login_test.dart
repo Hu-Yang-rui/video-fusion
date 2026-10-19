@@ -160,14 +160,23 @@ void main() {
 
     test('导航项数正确（无直播 3 项 / 有直播 4 项）', () {
       final src = File('lib/src/ui/shell/app_shell.dart').readAsStringSync();
-      // 统计 AppleTabItem 出现次数：推荐/发现/设置 必在，
+      // 统计 AppleTabItem 出现次数：推荐/发现/我的 必在，
       // 直播条件加入
       final count = RegExp(r'AppleTabItem\(').allMatches(src).length;
-      expect(count, 4, reason: '推荐/发现/直播(条件)/设置 = 4 个定义');
+      expect(count, 4, reason: '推荐/发现/直播(条件)/我的 = 4 个定义');
       expect(src.contains("label: '推荐'"), isTrue);
       expect(src.contains("label: '发现'"), isTrue);
       expect(src.contains("label: '直播'"), isTrue);
-      expect(src.contains("label: '设置'"), isTrue);
+      // 第 4 项原来叫「设置」，收藏夹/稍后再看等内容入口进来后
+      // 改名成了「我的」（设置作为子页仍存在）。
+      // 本用例真正守护的是**第 4 个导航项没被删掉**（媒体库移除后
+      // 一度只剩 3 项），标签文案属于可演进的 UI 决定，
+      // 所以两个名字任一存在都算通过；两个都没有 = 导航项丢了。
+      expect(
+        src.contains("label: '我的'") || src.contains("label: '设置'"),
+        isTrue,
+        reason: '第 4 个导航项（我的/设置）必须存在',
+      );
     });
 
     test('观看进度存储仍保留（详情页续播依赖）', () {

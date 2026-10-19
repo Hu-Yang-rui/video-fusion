@@ -547,9 +547,17 @@ class FeedController extends ChangeNotifier {
 
   /// 短视频页是否处于前台。
   ///
-  /// 切到「发现」「设置」时视频必须停下来——否则声音会在后台继续播。
+  /// 切到「发现」「我的」时视频必须停下来——否则声音会在后台继续播。
   /// 切回时若用户没有主动暂停过，则自动恢复。
+  ///
+  /// 这个值同时被 [FeedScreen] 的生命周期回调读取：应用退到系统后台时
+  /// 按"非前台"处理，回到前台时**只在该页确实可见**才恢复播放
+  /// ——否则用户在「发现」页时回到前台，视频声音会从背后冒出来。
+  bool _pageActive = true;
+  bool get pageActive => _pageActive;
+
   Future<void> setPageActive(bool active) async {
+    _pageActive = active;
     final p = _player;
     if (p == null) return;
     if (active) {

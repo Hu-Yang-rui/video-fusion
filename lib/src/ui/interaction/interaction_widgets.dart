@@ -1,14 +1,23 @@
-/// 互动 UI 组件：点赞按钮、投币弹层、评论面板。
+/// 互动 UI 组件：点赞按钮、投币弹层、收藏夹选择面板、评论面板。
 ///
 /// 设计要点（短视频场景）：
 ///  - 按钮无底色，靠投影保证在任何画面上可读
 ///  - 状态变化有明确视觉反馈（实心/空心、颜色、缩放）
 ///  - 进行中显示进度，防止重复点击
 ///  - 未登录时点击给出登录引导，不静默失败
+///
+/// # 收藏夹面板为什么不是"确认一下就完事"
+///
+/// 面板只做**选择**，写入与校验全部在 [InteractionController.applyFavoriteFolders]：
+///  - 勾选态来自服务端 `fav_state`，不是本地记忆
+///  - 应用按钮 → 控制器发一次 add/del → **重新拉服务端归属** → 成功才 pop
+///  - 失败/假成功（平台 code=0 但归属没变）时面板**不关闭**，
+///    用户看得见错误并能原地重试，而不是"提示已收藏、按钮没高亮"
 library;
 
 import 'package:flutter/material.dart';
 
+import '../../adapters/platform_adapter.dart';
 import '../../design/apple_tokens.dart';
 import '../../design/components/apple_layout.dart';
 import '../../models/interaction.dart';
@@ -26,6 +35,7 @@ class InteractionRailButton extends StatelessWidget {
     this.pending = false,
     this.activeColor = const Color(0xFFFF2D55),
     this.enabled = true,
+    this.disabledReason,
   });
 
   final IconData icon;
@@ -40,10 +50,27 @@ class InteractionRailButton extends StatelessWidget {
   final Color activeColor;
   final bool enabled;
 
+  /// [enabled] 为 false 时的说明文案（长按/点击提示，不让按钮看起来坏了）。
+  final String? disabledReason;
+
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: enabled && !pending ? onTap : null,
+      onTap: () {
+        if (pending) return;
+        if (!enabled) {
+          if (disabledReason != null) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(disabledReason!),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
+          return;
+        }
+        onTap();
+      },
       behavior: HitTestBehavior.opaque,
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -69,14 +96,18 @@ class InteractionRailButton extends StatelessWidget {
                       ),
                     ),
                   )
-                : Icon(
-                    active ? activeIcon : icon,
-                    size: 34,
-                    color: active ? activeColor : Colors.white,
-                    shadows: const [
-                      Shadow(color: Color(0xB3000000), blurRadius: 8),
-                      Shadow(color: Color(0x80000000), blurRadius: 3),
-                    ],
+                : Opacity(
+                    // 不可用时降透明度但仍可读，不是"消失"或"灰死"
+                    opacity: enabled ? 1 : 0.55,
+                    child: Icon(
+                      active ? activeIcon : icon,
+                      size: 34,
+                      color: active ? activeColor : Colors.white,
+                      shadows: const [
+                        Shadow(color: Color(0xB3000000), blurRadius: 8),
+                        Shadow(color: Color(0x80000000), blurRadius: 3),
+                      ],
+                    ),
                   ),
           ),
           const SizedBox(height: 3),
@@ -100,6 +131,11 @@ class InteractionRailButton extends StatelessWidget {
 }
 
 /// 投币选择弹层（B 站特有：1 枚或 2 枚）。
+///
+/// 余额来自 [InteractionController.loadCoinBalance]（平台真实接口），
+/// 拿不到时显示"余额未知"而**不是**假装无限：
+/// 实测本测试账号余额为 0，若不前置检查，用户点"投 1 枚"只会收到
+/// 一条平台失败码，观感是"按钮坏了"。
 class CoinSheet extends StatefulWidget {
   const CoinSheet({
     super.key,
@@ -119,12 +155,31 @@ class CoinSheet extends StatefulWidget {
 class _CoinSheetState extends State<CoinSheet> {
   int _count = 1;
   bool _alsoLike = false;
+  bool _loadingBalance = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // 余额未知时进面板就查一次，用户看到的是真实数字
+    if (widget.coinBalance == null) {
+      _refreshBalance();
+    }
+  }
+
+  Future<void> _refreshBalance() async {
+    setState(() => _loadingBalance = true);
+    await widget.controller.loadCoinBalance();
+    if (mounted) setState(() => _loadingBalance = false);
+  }
 
   @override
   Widget build(BuildContext context) {
     final c = AppleColors.of(context);
-    final alreadyCoined = widget.controller.state.coined;
+    final ctrl = widget.controller;
+    final alreadyCoined = ctrl.state.coined;
     final remaining = 2 - alreadyCoined;
+    final balance = ctrl.coinBalance;
+    final insufficient = balance != null && balance <= 0;
 
     return Container(
       decoration: BoxDecoration(
@@ -154,18 +209,35 @@ class _CoinSheetState extends State<CoinSheet> {
               style: AppleType.title3.copyWith(color: c.label),
             ),
             const SizedBox(height: AppleSpace.xs),
-            Text(
-              remaining <= 0
-                  ? '每个视频最多投 2 枚硬币'
-                  : (widget.coinBalance != null
-                      ? '当前硬币余额：${widget.coinBalance}'
-                      : '每个视频最多投 2 枚硬币'),
-              style: AppleType.footnote.copyWith(color: c.secondaryLabel),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  remaining <= 0
+                      ? '每个视频最多投 2 枚硬币'
+                      : (balance != null
+                          ? '当前硬币余额：$balance'
+                          : '硬币余额：${_loadingBalance ? '查询中' : '未知'}'),
+                  style: AppleType.footnote.copyWith(color: c.secondaryLabel),
+                ),
+                if (balance == null && !_loadingBalance)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: InkWell(
+                      onTap: _refreshBalance,
+                      child: Icon(
+                        Icons.refresh_rounded,
+                        size: 14,
+                        color: c.secondaryLabel,
+                      ),
+                    ),
+                  ),
+              ],
             ),
             const SizedBox(height: AppleSpace.xl),
 
-            if (remaining > 0) ...[
-              // 数量选择
+            if (remaining > 0 && !insufficient) ...[
+              // 数量选择：不超过剩余额度，也不超过余额
               Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: AppleSpace.xxxl,
@@ -186,7 +258,8 @@ class _CoinSheetState extends State<CoinSheet> {
                               borderRadius:
                                   BorderRadius.circular(AppleRadius.sm),
                               border: Border.all(
-                                color: _count == i ? c.blue : Colors.transparent,
+                                color:
+                                    _count == i ? c.blue : Colors.transparent,
                                 width: 1.5,
                               ),
                             ),
@@ -235,15 +308,27 @@ class _CoinSheetState extends State<CoinSheet> {
                   width: double.infinity,
                   height: AppleSize.minTapTarget,
                   child: FilledButton(
-                    onPressed: () async {
+                    onPressed: () {
                       Navigator.pop(context);
-                      await widget.controller.giveCoin(
+                      // 写操作与状态刷新由控制器完成（含余额作废与复查）
+                      widget.controller.giveCoin(
                         count: _count,
                         alsoLike: _alsoLike,
                       );
                     },
                     child: Text('投 $_count 枚'),
                   ),
+                ),
+              ),
+            ] else if (remaining > 0 && insufficient) ...[
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AppleSpace.xxl,
+                ),
+                child: Text(
+                  '硬币余额为 0，无法投币。\n硬币通过每日观看、点赞等行为获取。',
+                  textAlign: TextAlign.center,
+                  style: AppleType.footnote.copyWith(color: c.secondaryLabel),
                 ),
               ),
             ],
@@ -263,11 +348,19 @@ class AppleCheckRow extends StatelessWidget {
     required this.label,
     required this.value,
     required this.onChanged,
+    this.subtitle,
+    this.trailing,
   });
 
   final String label;
   final bool value;
   final ValueChanged<bool> onChanged;
+
+  /// 次级说明（如"32 个内容"）。
+  final String? subtitle;
+
+  /// 右侧附加控件（如「公开/私密」标记）。
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -276,7 +369,10 @@ class AppleCheckRow extends StatelessWidget {
       onTap: () => onChanged(!value),
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: AppleSpace.xxl),
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppleSpace.xxl,
+          vertical: 4,
+        ),
         child: Row(
           children: [
             Icon(
@@ -287,16 +383,457 @@ class AppleCheckRow extends StatelessWidget {
               color: value ? c.blue : c.tertiaryLabel,
             ),
             const SizedBox(width: AppleSpace.sm),
-            Text(
-              label,
-              style: AppleType.body.copyWith(color: c.label),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppleType.body.copyWith(color: c.label),
+                  ),
+                  if (subtitle != null)
+                    Text(
+                      subtitle!,
+                      style: AppleType.caption2.copyWith(
+                        color: c.tertiaryLabel,
+                      ),
+                    ),
+                ],
+              ),
             ),
+            if (trailing != null) trailing!,
           ],
         ),
       ),
     );
   }
 }
+
+/// 收藏夹选择面板。
+///
+/// # 行为契约（对应用户报的"无法选择收藏夹、收藏后不高亮"）
+///
+///  - 打开即调 [InteractionController.loadFavoriteFolders] 拿**真实夹列表**，
+///    并通过逐夹扫描得到该视频的真实归属作为初始勾选态。
+///    （B站的 `fav_state` 经实测与"该视频是否在此夹"无关，
+///     所以归属必须扫描 `resource/list` —— 见控制器的说明。）
+///  - 加载中 / 空列表 / 请求失败 / 登录失效 四种状态分别呈现，
+///    不出现"点了没反应"。
+///  - 「应用」是一次写请求（平台支持同时 add + del），
+///    控制器写完会**重新扫描服务端归属**校验，确认生效才关闭面板。
+///  - 取消（下拉关闭/关闭按钮）**不改任何数据**：选择只是本地草稿，
+///    没点应用就丢弃 → 原状态完整保留。
+class FavoriteSheet extends StatefulWidget {
+  const FavoriteSheet({
+    super.key,
+    required this.controller,
+  });
+
+  final InteractionController controller;
+
+  @override
+  State<FavoriteSheet> createState() => _FavoriteSheetState();
+}
+
+class _FavoriteSheetState extends State<FavoriteSheet> {
+  /// 用户的选择草稿（未点"应用"前不写服务端）。
+  Set<int>? _draft;
+
+  bool _applying = false;
+  String? _applyError;
+
+  @override
+  void initState() {
+    super.initState();
+    // 每次打开都重新拉：收藏夹可被改名/新建，归属也可能在别的设备上变过
+    widget.controller.loadFavoriteFolders();
+  }
+
+  /// 服务端真实归属（逐夹扫描结果），不是本地记忆。
+  Set<int> get _serverIds => widget.controller.favoritedFolderIds;
+
+  Set<int> get _selected => _draft ?? _serverIds;
+
+  bool get _changed {
+    final d = _selected;
+    final s = _serverIds;
+    return d.length != s.length || !d.containsAll(s);
+  }
+
+  /// 归属扫描是否只核对了一部分夹。
+  ///
+  /// 逐夹扫描有请求预算（实测 B站 连发 6 个请求就返回 HTTP 412
+  /// 触发验证码），所以"某个夹既不在已收藏、也没被核对过"时
+  /// 状态是**不知道**，必须显示出来，不能渲染成未勾选 ——
+  /// 那是假的否定，用户会因此重复收藏。
+  bool get _partialScan {
+    final ctrl = widget.controller;
+    // 平台根本不提供归属查询时不打"未核对"：那是"平台没这个信息"，
+    // 不是"我没查完"，两者对用户是完全不同的事。
+    if (!ctrl.supportsFolderOwnershipScan) return false;
+    final folders = ctrl.favoriteFolders;
+    if (folders.isEmpty) return false;
+    return folders.any((f) => !ctrl.folderChecked(f.id));
+  }
+
+  Future<void> _apply() async {
+    if (_applying) return;
+    setState(() {
+      _applying = true;
+      _applyError = null;
+    });
+    final ok = await widget.controller.applyFavoriteFolders(_selected);
+    if (!mounted) return;
+    setState(() => _applying = false);
+    if (ok) {
+      Navigator.pop(context);
+    } else {
+      // 失败不关面板：让用户看到具体原因并能原地重试
+      setState(() => _applyError = widget.controller.lastMessage);
+      widget.controller.clearMessage();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    final ctrl = widget.controller;
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.6,
+      minChildSize: 0.4,
+      maxChildSize: 0.9,
+      expand: false,
+      builder: (context, sheetScroll) {
+        return Container(
+          decoration: BoxDecoration(
+            color: c.secondaryGroupedBackground,
+            borderRadius: const BorderRadius.vertical(
+              top: Radius.circular(AppleRadius.sheet),
+            ),
+          ),
+          child: ListenableBuilder(
+            listenable: ctrl,
+            builder: (context, _) {
+              final folders = ctrl.favoriteFolders;
+              return Column(
+                children: [
+                  const SizedBox(height: AppleSpace.sm),
+                  Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: c.separator,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      AppleSpace.lg,
+                      AppleSpace.md,
+                      AppleSpace.sm,
+                      AppleSpace.xs,
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '收藏到',
+                            style: AppleType.title3.copyWith(color: c.label),
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.pop(context),
+                          icon: Icon(
+                            Icons.close_rounded,
+                            color: c.secondaryLabel,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // ── 状态区：加载 / 错误 / 空 / 列表 ──────────
+                  Expanded(
+                    child: _buildBody(c, ctrl, folders, sheetScroll),
+                  ),
+
+                  // ── 底部操作条 ─────────────────────────────
+                  if (folders.isNotEmpty) _buildFooter(c),
+                  const SizedBox(height: AppleSpace.sm),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildBody(
+    AppleColors c,
+    InteractionController ctrl,
+    List<FavoriteFolder> folders,
+    ScrollController sheetScroll,
+  ) {
+    if (ctrl.favoriteFoldersLoading && folders.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(height: AppleSpace.md),
+            // 归属要逐夹扫描，145 条大夹可能要几秒，说清楚在做什么
+            Text(
+              ctrl.favoriteFoldersLoadedOnce
+                  ? '正在核对已收藏的收藏夹…'
+                  : '正在读取收藏夹…',
+              style: AppleType.footnote.copyWith(color: c.secondaryLabel),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (ctrl.favoriteFoldersError != null && folders.isEmpty) {
+      final e = ctrl.favoriteFoldersError!;
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(AppleSpace.xxxl),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.error_outline_rounded, size: 34, color: c.red),
+              const SizedBox(height: AppleSpace.md),
+              Text(
+                e.presentation.title,
+                style: AppleType.bodyEmphasized.copyWith(color: c.label),
+              ),
+              const SizedBox(height: AppleSpace.xs),
+              Text(
+                e.userMessage,
+                textAlign: TextAlign.center,
+                style: AppleType.footnote.copyWith(color: c.secondaryLabel),
+              ),
+              const SizedBox(height: AppleSpace.lg),
+              FilledButton(
+                onPressed: () => ctrl.loadFavoriteFolders(),
+                child: const Text('重试'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (folders.isEmpty && ctrl.favoriteFoldersLoadedOnce) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(AppleSpace.xxxl),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.bookmark_add_outlined,
+                size: 34,
+                color: c.tertiaryLabel,
+              ),
+              const SizedBox(height: AppleSpace.md),
+              Text(
+                '还没有收藏夹',
+                style: AppleType.bodyEmphasized.copyWith(color: c.label),
+              ),
+              const SizedBox(height: AppleSpace.xs),
+              Text(
+                '当前账号在该平台上没有可用的收藏夹，'
+                '请先在平台内创建一个再回来。',
+                textAlign: TextAlign.center,
+                style: AppleType.footnote.copyWith(color: c.secondaryLabel),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (folders.isEmpty) return const SizedBox.shrink();
+
+    return ListView(
+      controller: sheetScroll,
+      padding: const EdgeInsets.only(bottom: AppleSpace.md),
+      children: [
+        // 部分核对提示：逐夹扫描有请求预算（B站 连发 6 个请求即 412
+        // 触发验证码），所以可能有些夹没核对完。
+        //
+        // 这里必须如实说"有些收藏夹还没核对完"，并把**未核对的行**
+        // 标出来。不能把它们渲染成未勾选 —— 那是假的否定，
+        // 用户会以为自己没收藏进去，进而重复收藏。
+        if (_partialScan)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppleSpace.pageInset,
+              AppleSpace.sm,
+              AppleSpace.pageInset,
+              0,
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.info_outline_rounded, size: 13, color: c.orange),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '为避让人机验证限制，部分收藏夹尚未核对完；'
+                    '标注「未核对」的收藏夹状态未知（不代表未收藏）。'
+                    '勾选新收藏夹仍可正常收藏。',
+                    style: AppleType.caption2.copyWith(
+                      color: c.secondaryLabel,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        for (final f in folders)
+          AppleCheckRow(
+            label: f.title,
+            subtitle: [
+              if (f.isDefault) '默认',
+              if (f.mediaCount != null) '${f.mediaCount} 个内容',
+            ].join(' · '),
+            value: _selected.contains(f.id),
+            onChanged: (v) => setState(() {
+              final next = _selected.toSet();
+              if (v) {
+                next.add(f.id);
+              } else {
+                next.remove(f.id);
+              }
+              _draft = next;
+            }),
+            trailing: _deltaBadge(c, f.id),
+          ),
+        if (_applyError != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppleSpace.xxl,
+              AppleSpace.md,
+              AppleSpace.xxl,
+              0,
+            ),
+            child: Text(
+              _applyError!,
+              style: AppleType.footnote.copyWith(color: c.red),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// 相对服务端归属的状态标记。
+  ///
+  /// 四种状态必须区分开：
+  ///  - 服务端已确认包含 → 无标记（已勾选即可）
+  ///  - 已核对但不包含 + 用户勾上 → 「将收藏」
+  ///  - 服务端包含 + 用户取消 → 「将移出」
+  ///  - **未核对** → 「未核对」：既不能说"将收藏"也不能显示成未收藏，
+  ///    因为平台侧状态未知（扫描预算用尽或被限流中断）。
+  Widget? _deltaBadge(AppleColors c, int id) {
+    final ctrl = widget.controller;
+    final inServer = _serverIds.contains(id);
+    final inDraft = _selected.contains(id);
+
+    if (!ctrl.supportsFolderOwnershipScan) {
+      // 平台不提供归属：不显示"未核对"，只显示用户将要做的动作
+      if (inDraft && !inServer) {
+        return Text('将收藏', style: AppleType.caption2.copyWith(color: c.blue));
+      }
+      return null;
+    }
+    if (!ctrl.folderChecked(id) && !inServer) {
+      // 未核对：只有用户勾了才提示会发生什么
+      if (inDraft) {
+        return Text(
+          '将收藏（状态未核对）',
+          style: AppleType.caption2.copyWith(color: c.orange),
+        );
+      }
+      return Text(
+        '未核对',
+        style: AppleType.caption2.copyWith(color: c.tertiaryLabel),
+      );
+    }
+    if (!inServer && inDraft) {
+      return Text('将收藏', style: AppleType.caption2.copyWith(color: c.blue));
+    }
+    if (inServer && !inDraft) {
+      return Text('将移出', style: AppleType.caption2.copyWith(color: c.orange));
+    }
+    return null;
+  }
+
+  Widget _buildFooter(AppleColors c) {
+    return Container(
+      decoration: BoxDecoration(
+        color: c.secondaryGroupedBackground,
+        border: Border(top: BorderSide(color: c.separator, width: 0.5)),
+      ),
+      padding: const EdgeInsets.fromLTRB(
+        AppleSpace.pageInset,
+        AppleSpace.md,
+        AppleSpace.pageInset,
+        0,
+      ),
+      child: Row(
+        children: [
+          // 从所有收藏夹移除：明确区别于"取消勾选某一个"
+          TextButton(
+            onPressed: (_applying || _serverIds.isEmpty)
+                ? null
+                : () => setState(() => _draft = const {}),
+            child: Text(
+              '取消收藏',
+              style: TextStyle(
+                color: _serverIds.isEmpty ? c.tertiaryLabel : c.red,
+              ),
+            ),
+          ),
+          const Spacer(),
+          FilledButton(
+            onPressed: (_applying || !_changed) ? null : _apply,
+            child: _applying
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : Text(_confirmLabel),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String get _confirmLabel {
+    final added = _selected.difference(_serverIds).length;
+    final removed = _serverIds.difference(_selected).length;
+    if (added > 0 && removed > 0) return '更新收藏';
+    if (added > 0) return '收藏到 $added 个';
+    if (removed > 0) return '移出 $removed 个';
+    return '无需更改';
+  }
+}
+
 
 /// 评论面板（底部弹层，可滚动分页）。
 class CommentSheet extends StatefulWidget {
@@ -508,19 +1045,15 @@ class _CommentSheetState extends State<CommentSheet> {
       );
     }
 
-    // 用 sheet 提供的 controller，保证拖拽与滚动是同一套坐标。
-    final comments = ctrl.comments;
-
     return NotificationListener<ScrollNotification>(
       onNotification: _onScrollNotification,
       child: ListView.separated(
         controller: sheetScroll,
         padding: const EdgeInsets.only(bottom: AppleSpace.xxxl),
-        itemCount: comments.length + (ctrl.commentsHasMore ? 1 : 0),
+        itemCount: ctrl.comments.length + (ctrl.commentsHasMore ? 1 : 0),
         separatorBuilder: (_, _) => const AppleDivider(indent: 60),
         itemBuilder: (context, index) {
-          if (index >= comments.length) {
-            // 加载更多指示
+          if (index >= ctrl.comments.length) {
             return Padding(
               padding: const EdgeInsets.all(AppleSpace.lg),
               child: Center(
@@ -537,7 +1070,7 @@ class _CommentSheetState extends State<CommentSheet> {
               ),
             );
           }
-          final comment = comments[index];
+          final comment = ctrl.comments[index];
           // 稳定的 Key：翻页追加时 Flutter 能复用已构建的 element，
           // 而不是按位置错配导致整屏重建。
           return _CommentTile(

@@ -123,7 +123,28 @@ class LiveRoomInfo {
   final int uid;
   final String title;
 
-  /// 直播状态：0 未开播，1 直播中，2 轮播。
+  /// 直播状态（**平台无关的统一口径**）：0 未开播，1 直播中，2 轮播。
+  ///
+  /// # 这是归一化后的值，不是任何平台的原始值
+  ///
+  /// 各平台原始字段的取值完全不同，**由适配器负责归一化**，
+  /// 模型这一层只保留 0/1/2 这一套语义：
+  ///
+  ///  - **B 站**：`room/v1/Room/get` 的 `live_status` 原生就是
+  ///    0 未开播 / 1 直播中 / 2 轮播，适配器**原样透传**。
+  ///  - **抖音**：`status` 实测**恒为 2 且含义是"直播中"**
+  ///    （同批数据里 `video_feed_tag` = "直播中"）。
+  ///    如果按 B 站的表直接读，2 会被当成"轮播"，直播中的房间
+  ///    于是显示成"轮播中"。所以抖音适配器必须做映射：
+  ///    `liveStatus: status == 2 ? 1 : 0`。
+  ///
+  /// # 改动这一层之前请先看这条
+  ///
+  /// 看到"抖音给 2、模型里 2 是轮播"很容易顺手去改适配器的映射，
+  /// 那是错的方向：适配器现在是对的，模型的 0/1/2 才是需要保持稳定的
+  /// 跨平台契约（[isLive]、[statusLabel] 以及所有消费方都按它写）。
+  /// 若将来接入第三个平台，同样在它自己的适配器里归一化，
+  /// **不要往模型里加平台分支**。
   final int liveStatus;
 
   final int? online;
@@ -152,6 +173,10 @@ class LiveRoomInfo {
   bool get isLive => liveStatus == 1;
 
   /// 面向用户的直播状态文案。
+  ///
+  /// 按 [liveStatus] 的**归一化口径**取值（0 未开播 / 1 直播中 / 2 轮播）。
+  /// 抖音原始 `status` 恒为 2 但含义是"直播中"，其适配器已映射成 1，
+  /// 所以这里不需要、也**不应该**加任何平台分支。
   String get statusLabel => switch (liveStatus) {
         1 => '直播中',
         2 => '轮播中',
@@ -169,6 +194,7 @@ class LiveStream {
     required this.qualityLabel,
     required this.qualityValue,
     this.availableQualities = const [],
+    this.requestHeaders = const {},
   });
 
   /// 完整播放地址（含时效签名）。
@@ -188,6 +214,25 @@ class LiveStream {
 
   /// 清晰度值（qn），越大越清晰。
   final int qualityValue;
+
+  /// 拉这条流时必须带的 HTTP 请求头。
+  ///
+  /// # 为什么这个字段归模型，而不是让 UI 自己拼
+  ///
+  /// 实测（2026-10-19）抖音直播的 HLS 分片：用 App UA 请求是
+  /// `HTTP 206` + 完整 TS；用 `libmpv` 默认 UA 请求，部分
+  /// douyincdn 节点返回 `HTTP 200 + 空 body`。地址是有效的、
+  /// 播放器也初始化成功了，但取不到分片 —— 用户看到的是
+  /// **画面全黑且没有任何报错**，极难归因。
+  ///
+  /// 所以"这条流要带什么头"是**平台知识**，必须由知道该平台的
+  /// 适配器随流一起给出。UI 层的约束是零平台分支：如果让页面自己
+  /// 按 `adapter.id` 拼 Referer/UA，就多了一处平台判断，且每接入
+  /// 一个平台都要改一次页面。
+  ///
+  /// 为空时消费方（直播间页面）会退化成"只带 Referer"的最小集合，
+  /// 不假装什么都对。
+  final Map<String, String> requestHeaders;
 
   /// 其它可选清晰度（同协议同格式）。
   final List<LiveStream> availableQualities;

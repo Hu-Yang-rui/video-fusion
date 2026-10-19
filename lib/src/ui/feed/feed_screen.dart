@@ -29,6 +29,7 @@ import '../../design/components/video_widgets.dart';
 import '../../models/unified_video.dart';
 import '../../player/player_controller.dart';
 import '../interaction/interaction_controller.dart';
+import '../interaction/interaction_registry.dart';
 import '../interaction/interaction_widgets.dart';
 import '../mobile/feed_controller.dart';
 
@@ -63,6 +64,7 @@ class FeedScreen extends StatefulWidget {
     required this.controller,
     required this.service,
     required this.vault,
+    required this.interactions,
     required this.onOpenSourcePicker,
     required this.onOpenLogin,
     required this.onOpenOriginal,
@@ -77,6 +79,14 @@ class FeedScreen extends StatefulWidget {
   final VideoService service;
   final CredentialVault vault;
 
+  /// **全局共享**的互动状态登记表。
+  ///
+  /// 之前这里用页面私有的 `Map<videoId, InteractionController>`，
+  /// 与详情页各建一份 → 同一视频在两个入口的点赞/收藏状态不一致
+  /// （在推荐流收藏后，进详情页仍显示未收藏）。现在由 App 顶层持有
+  /// 登记表，按视频 ID 复用同一个控制器。
+  final InteractionRegistry interactions;
+
   final VoidCallback onOpenSourcePicker;
   final VoidCallback onOpenLogin;
   final void Function(UnifiedVideo) onOpenOriginal;
@@ -90,59 +100,78 @@ class FeedScreen extends StatefulWidget {
   State<FeedScreen> createState() => _FeedScreenState();
 }
 
-class _FeedScreenState extends State<FeedScreen> {
+class _FeedScreenState extends State<FeedScreen>
+    with WidgetsBindingObserver {
   late final PageController _pageController;
   VideoController? _videoController;
   bool _showUi = true;
   Timer? _hideTimer;
 
-  /// 按视频 ID 缓存互动控制器，避免滑动回来时状态丢失。
-  final Map<String, InteractionController> _interactions = {};
+  /// 本页当前持有引用的视频 id。
+  ///
+  /// `itemBuilder` 在同一次滑动里会被多次调用，若每次都 `acquire`
+  /// 会让引用计数无上限增长（等于内存泄漏）。因此本页对**同一个视频
+  /// 只 acquire 一次**，后续构建走 [InteractionRegistry.peek]。
+  final Set<String> _held = {};
+  final List<String> _holdOrder = [];
 
-  /// 取（或创建）某个视频的互动控制器。
+  /// 最多同时持有多少个视频的会话（超出释放最旧的、非当前屏的）。
+  static const int _maxHeld = 16;
+
+  /// 取（或从登记表复用）某个视频的互动会话。
   InteractionController _interactionFor(UnifiedVideo video) {
-    final existing = _interactions[video.id];
+    if (!_held.contains(video.id)) {
+      _held.add(video.id);
+      _holdOrder.add(video.id);
+      final created = widget.interactions.acquire(video);
+      created.addListener(_onInteractionChanged);
+      _pruneHeld();
+      return created;
+    }
+    final existing = widget.interactions.peek(video.id);
     if (existing != null) return existing;
+    // 理论上不会走到（持有引用就不会被回收）；兜底重建避免空指针
+    final rebuilt = widget.interactions.acquire(video);
+    rebuilt.addListener(_onInteractionChanged);
+    return rebuilt;
+  }
 
-    final ctrl = InteractionController(
-      video: video,
-      service: widget.service,
-      vault: widget.vault,
-    );
-    _interactions[video.id] = ctrl;
-    // 异步初始化登录态与互动状态，不阻塞渲染
-    ctrl.init();
-    ctrl.addListener(_onInteractionChanged);
-    return ctrl;
+  /// 释放不再需要的会话：保留当前屏，其余从最旧开始丢弃。
+  void _pruneHeld() {
+    while (_holdOrder.length > _maxHeld) {
+      final oldest = _holdOrder.first;
+      final keep = widget.controller.currentVideo?.id;
+      if (oldest == keep) {
+        // 最旧的恰好是当前屏：挪到队尾，从下一个开始丢
+        _holdOrder.removeAt(0);
+        _holdOrder.add(oldest);
+        if (_holdOrder.length <= _maxHeld) break;
+        continue;
+      }
+      _holdOrder.removeAt(0);
+      _held.remove(oldest);
+      widget.interactions.peek(oldest)?.removeListener(_onInteractionChanged);
+      widget.interactions.release(oldest);
+    }
   }
 
   void _onInteractionChanged() {
     if (!mounted) return;
     setState(() {});
-    // 一次性提示（登录引导 / 操作结果）
-    final msg = _interactions.values
-        .map((c) => c.lastMessage)
-        .whereType<String>()
-        .firstOrNull;
+    // 一次性提示（登录引导 / 操作结果）：只取当前屏的会话。
+    //
+    // 提示展示后立即 clearMessage()，因此同一条消息只会走到这里一次；
+    // 再次触发时 lastMessage 已是 null。
+    final current = widget.controller.currentVideo;
+    if (current == null) return;
+    final ctrl = widget.interactions.peek(current.id);
+    final msg = ctrl?.lastMessage;
     if (msg != null) {
-      final source =
-          _interactions.values.firstWhere((c) => c.lastMessage == msg);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(msg), duration: const Duration(seconds: 2)),
       );
-      source.clearMessage();
+      ctrl!.clearMessage();
     }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _pageController = PageController();
-    widget.controller.initPlayer();
-    _attachVideoController();
-    _subscribeSnapshot();
-    widget.controller.addListener(_onControllerChanged);
-    _scheduleHide();
   }
 
   void _attachVideoController() {
@@ -174,13 +203,61 @@ class _FeedScreenState extends State<FeedScreen> {
   }
 
   @override
-  void dispose() {
-    widget.controller.removeListener(_onControllerChanged);
-    for (final c in _interactions.values) {
-      c.removeListener(_onInteractionChanged);
-      c.dispose();
+  void initState() {
+    super.initState();
+    _pageController = PageController();
+    // 生命周期监听：退到后台必须停播。
+    //
+    // 不监听的话，用户切到系统其它应用后短视频仍在放（声音继续、
+    // 流量继续消耗），回到前台时还会看到"画面卡住但进度在走"。
+    // 复用 setPageActive()：它内部区分"系统挂起"与"用户主动暂停"
+    // （见 FusionPlayerController.suspend/restoreFromSuspend），
+    // 所以回到前台不会把用户手动暂停的视频擅自恢复。
+    WidgetsBinding.instance.addObserver(this);
+    widget.controller.initPlayer();
+    _attachVideoController();
+    _subscribeSnapshot();
+    widget.controller.addListener(_onControllerChanged);
+    _scheduleHide();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        unawaited(widget.controller.setPageActive(false));
+      case AppLifecycleState.resumed:
+        // 只有推荐页真的在前台时才恢复，否则切到「发现」页时
+        // 回到前台会把视频又放起来（声音从背后冒出来）。
+        unawaited(widget.controller.setPageActive(_feedIsForeground));
+      case AppLifecycleState.inactive:
+        // 来电/下拉通知栏等短暂失焦：不暂停，避免用户一碰就停。
+        break;
     }
-    _interactions.clear();
+  }
+
+  /// 推荐页是否处于前台。
+  ///
+  /// 由 AppShell 的 `onFeedVisibilityChanged` 维护（切页时写入
+  /// [FeedController.pageActive]）。生命周期回调读它而不是直接假设
+  /// "回到前台就该播"：用户停在「发现」页时回到前台，
+  /// 竖滑流必须保持停止，否则声音从背后冒出来。
+  bool get _feedIsForeground => widget.controller.pageActive;
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    widget.controller.removeListener(_onControllerChanged);
+    // 只释放**本页持有**的引用；控制器本身由登记表在引用归零时销毁，
+    // 这里 dispose 会破坏详情页仍在使用的同一会话。
+    for (final id in _holdOrder) {
+      widget.interactions.peek(id)?.removeListener(_onInteractionChanged);
+      widget.interactions.release(id);
+    }
+    _held.clear();
+    _holdOrder.clear();
     _snapSub?.cancel();
     _hideTimer?.cancel();
     _pageController.dispose();
@@ -806,8 +883,8 @@ class _ActionRail extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // 作者头像（带关注加号）—— 短视频右侧栏的第一要素
-        _AuthorAvatar(video: video),
+        // 作者头像（带真实关注按钮）—— 短视频右侧栏的第一要素
+        _AuthorAvatar(video: video, interaction: interaction),
         const SizedBox(height: AppleSpace.xl),
 
         // 点赞（真实写入）
@@ -840,6 +917,9 @@ class _ActionRail extends StatelessWidget {
         const SizedBox(height: AppleSpace.lg),
 
         // 投币（B 站特有）
+        //
+        // 可用性由**真实余额 + 平台上限**决定：余额为 0 时按钮不可点，
+        // 并说明原因，而不是让用户点了之后收到一条平台错误码。
         if (caps.coin)
           InteractionRailButton(
             icon: Icons.monetization_on_outlined,
@@ -848,6 +928,10 @@ class _ActionRail extends StatelessWidget {
             active: state.coined > 0,
             activeColor: const Color(0xFFFFB300),
             pending: interaction.coinPending,
+            enabled: interaction.coinAvailability().allowed,
+            disabledReason: interaction.coinAvailability().reason.isEmpty
+                ? null
+                : interaction.coinAvailability().reason,
             onTap: () {
               if (!interaction.isLoggedIn) {
                 onOpenLogin();
@@ -863,8 +947,9 @@ class _ActionRail extends StatelessWidget {
           InteractionRailButton(
             icon: Icons.star_border_rounded,
             activeIcon: Icons.star_rounded,
-            label: state.favorited ? '已收藏' : '收藏',
-            active: state.favorited,
+            // 有收藏夹归属数据时显示更具体的状态
+            label: _favoriteLabel(interaction),
+            active: interaction.state.favorited,
             activeColor: const Color(0xFFFFC107),
             pending: interaction.favoritePending,
             onTap: () {
@@ -872,10 +957,36 @@ class _ActionRail extends StatelessWidget {
                 onOpenLogin();
                 return;
               }
-              interaction.toggleFavorite();
+              // 平台支持收藏夹 → 打开真实的选择面板（可多选、回显归属）
+              // 不支持 → 退化为单次收藏到默认夹
+              if (interaction.supportsFavoriteFolders) {
+                _openFavorites(context);
+              } else {
+                interaction.toggleFavorite();
+              }
             },
           ),
         if (caps.favorite) const SizedBox(height: AppleSpace.lg),
+
+        // 稍后再看（仅平台接口实测可用时渲染）
+        if (caps.watchLater) ...[
+          InteractionRailButton(
+            icon: Icons.schedule_outlined,
+            activeIcon: Icons.schedule_rounded,
+            label: interaction.state.watchLater ? '已稍看' : '稍后再看',
+            active: interaction.state.watchLater,
+            activeColor: const Color(0xFF30D158),
+            pending: interaction.watchLaterPending,
+            onTap: () {
+              if (!interaction.isLoggedIn) {
+                onOpenLogin();
+                return;
+              }
+              interaction.toggleWatchLater();
+            },
+          ),
+          const SizedBox(height: AppleSpace.lg),
+        ],
 
         // 分享
         InteractionRailButton(
@@ -883,10 +994,7 @@ class _ActionRail extends StatelessWidget {
           activeIcon: Icons.share_rounded,
           label: '分享',
           active: false,
-          onTap: () {
-            Clipboard.setData(ClipboardData(text: video.canonicalUrl));
-            _toast(context, '链接已复制');
-          },
+          onTap: () => _share(context),
         ),
         const SizedBox(height: AppleSpace.lg),
 
@@ -910,14 +1018,74 @@ class _ActionRail extends StatelessWidget {
     );
   }
 
+  /// 打开收藏夹选择面板。
+  ///
+  /// 面板内部自己负责"拉真实夹列表 → 逐夹扫描归属 → 写 → 复查"，
+  /// 这里只负责弹出。**不暂停播放**：底部弹层是同一层路由上的覆盖物，
+  /// 视频继续播放是短视频应用的预期行为。
+  Future<void> _openFavorites(BuildContext context) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => FavoriteSheet(controller: interaction),
+    );
+  }
+
+  /// 收藏按钮文案。
+  ///
+  /// 拿到归属数据时显示"已收藏 N 个夹"，比单个"已收藏"更能解释
+  /// 为什么再次点击会打开面板而不是直接取消。
+  static String _favoriteLabel(InteractionController interaction) {
+    final s = interaction.state;
+    if (!s.known) return '收藏';
+    if (!s.favorited) return '收藏';
+    final n = interaction.favoritedFolderIds.length;
+    if (interaction.supportsFavoriteFolders && n > 0) return '已藏 $n';
+    return '已收藏';
+  }
+
+  /// 分享：执行真实动作（复制链接），失败给反馈。
+  ///
+  /// 之前这里只在"更多"面板里复制，主按钮点了也复制但不反馈失败。
+  /// 剪贴板写入本身可能失败（权限/系统限制），所以写完读回校验一次，
+  /// 校验不了就明确说"未确认"，不谎报成功。
+  Future<void> _share(BuildContext context) async {
+    final url = video.canonicalUrl;
+    if (url.isEmpty) {
+      _toast(context, '该视频没有可分享的链接。');
+      return;
+    }
+    String message;
+    try {
+      await Clipboard.setData(ClipboardData(text: url));
+      final read = await Clipboard.getData(Clipboard.kTextPlain);
+      message = read?.text == url
+          ? '链接已复制：$url'
+          // 系统剪贴板读不回来（部分平台限制）：不谎报成功，
+          // 也不当成失败——让用户自己去粘贴处确认。
+          : '已尝试复制链接，请在粘贴处确认。';
+    } catch (_) {
+      message = '复制失败，可在「更多 → 在浏览器中打开」后手动复制。';
+    }
+    // await 之后必须重新确认 context 仍然有效：
+    // 弹层可能在复制期间被关掉，此时拿旧 context 找 ScaffoldMessenger
+    // 会在 debug 构建里抛异常。
+    if (!context.mounted) return;
+    _toast(context, message);
+  }
+
   Future<void> _openCoin(BuildContext context) async {
+    // 打开面板前先拉真实余额：投币上限与按钮可用性都依赖它
+    await interaction.loadCoinBalance();
+    if (!context.mounted) return;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => CoinSheet(
         controller: interaction,
-        coinBalance: null,
+        coinBalance: interaction.coinBalance,
       ),
     );
   }
@@ -1027,15 +1195,22 @@ class _SheetAction extends StatelessWidget {
 }
 
 
-/// 作者头像 + 关注加号（短视频右侧栏第一要素）。
+/// 作者头像 + 关注按钮（短视频右侧栏第一要素）。
+///
+/// 加号**不是装饰**：平台接口实测支持关注写入时点击即真实关注，
+/// 已关注则变成对勾（状态来自 `archive/relation.attention`，实测实时）。
+/// 平台不支持关注写入时不渲染这个按钮 —— 避免"点了没反应的可用外观"。
 class _AuthorAvatar extends StatelessWidget {
-  const _AuthorAvatar({required this.video});
+  const _AuthorAvatar({required this.video, required this.interaction});
 
   final UnifiedVideo video;
+  final InteractionController interaction;
 
   @override
   Widget build(BuildContext context) {
     final avatar = video.author.avatarUrl;
+    final canFollow = interaction.canFollowAuthor;
+    final following = interaction.state.following;
 
     return SizedBox(
       width: 52,
@@ -1069,23 +1244,45 @@ class _AuthorAvatar extends StatelessWidget {
                   : _AvatarFallback(name: video.author.name),
             ),
           ),
-          // 关注加号（短视频标配；本版本未接入关注写入，仅作视觉锚点）
-          Positioned(
-            bottom: 2,
-            child: Container(
-              width: 20,
-              height: 20,
-              decoration: const BoxDecoration(
-                color: Color(0xFFFF2D55),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.add_rounded,
-                size: 15,
-                color: Colors.white,
+          // 关注 / 已关注
+          if (canFollow)
+            Positioned(
+              bottom: 2,
+              child: GestureDetector(
+                onTap: () {
+                  if (!interaction.isLoggedIn) {
+                    interaction.toggleFollowAuthor();
+                    return;
+                  }
+                  interaction.toggleFollowAuthor();
+                },
+                child: Container(
+                  width: 20,
+                  height: 20,
+                  decoration: BoxDecoration(
+                    color: following
+                        ? const Color(0xFF98989F)
+                        : const Color(0xFFFF2D55),
+                    shape: BoxShape.circle,
+                  ),
+                  child: interaction.followPending
+                      ? const Padding(
+                          padding: EdgeInsets.all(4),
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.6,
+                            color: Colors.white,
+                          ),
+                        )
+                      : Icon(
+                          following
+                              ? Icons.check_rounded
+                              : Icons.add_rounded,
+                          size: 15,
+                          color: Colors.white,
+                        ),
+                ),
               ),
             ),
-          ),
         ],
       ),
     );

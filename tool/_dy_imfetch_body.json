@@ -1,0 +1,94 @@
+{
+  "at": "2026-10-18T16:21:31.625Z",
+  "rid": "7698028394847439643",
+  "out": [
+    {
+      "label": "裸路径（无参数）",
+      "status": 200,
+      "len": 0,
+      "sc": null,
+      "dataLen": "no-data",
+      "shape": ""
+    },
+    {
+      "label": "web 基础参数",
+      "status": 200,
+      "len": 27,
+      "sc": 0,
+      "dataLen": 0,
+      "shape": "{data:Array(0), status_code:number(0)}"
+    },
+    {
+      "label": "web + room_id",
+      "status": 200,
+      "len": 27,
+      "sc": 0,
+      "dataLen": 0,
+      "shape": "{data:Array(0), status_code:number(0)}"
+    },
+    {
+      "label": "web + room_id + user_unique_id",
+      "status": 200,
+      "len": 27,
+      "sc": 0,
+      "dataLen": 0,
+      "shape": "{data:Array(0), status_code:number(0)}"
+    },
+    {
+      "label": "web + need_persist_msg_count",
+      "status": 200,
+      "len": 27,
+      "sc": 0,
+      "dataLen": 0,
+      "shape": "{data:Array(0), status_code:number(0)}"
+    },
+    {
+      "label": "web + cursor + internal_ext",
+      "status": 200,
+      "len": 27,
+      "sc": 0,
+      "dataLen": 0,
+      "shape": "{data:Array(0), status_code:number(0)}"
+    },
+    {
+      "label": "完整 wss 同款参数",
+      "status": 200,
+      "len": 27,
+      "sc": 0,
+      "dataLen": 0,
+      "shape": "{data:Array(0), status_code:number(0)}"
+    },
+    {
+      "label": "同上 + 伪 signature",
+      "status": 200,
+      "len": 27,
+      "sc": 0,
+      "dataLen": 0,
+      "shape": "{data:Array(0), status_code:number(0)}"
+    },
+    {
+      "label": "同上 + signature=空串",
+      "status": 200,
+      "len": 27,
+      "sc": 0,
+      "dataLen": 0,
+      "shape": "{data:Array(0), status_code:number(0)}"
+    },
+    {
+      "label": "App 参数集",
+      "status": 200,
+      "len": 0,
+      "sc": null,
+      "dataLen": "no-data",
+      "shape": ""
+    },
+    {
+      "label": "App 参数 + 完整字段",
+      "status": 200,
+      "len": 0,
+      "sc": null,
+      "dataLen": "no-data",
+      "shape": ""
+    }
+  ]
+}

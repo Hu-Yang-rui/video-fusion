@@ -177,12 +177,143 @@ class MockAdapter implements PlatformAdapter {
     );
   }
 
+  /// 收藏夹列表：模拟平台不提供。
+  ///
+  /// 这个适配器只用于验证"平台注册与数据标准化"机制（见 capabilities
+  /// 的说明），不接任何真实平台接口，因此收藏夹能力如实声明为不支持并
+  /// 抛错——返回空列表会把"能力不存在"伪装成"这个账号没有收藏夹"。
+  @override
+  Future<List<FavoriteFolder>> fetchFavoriteFolders({
+    required PlatformSession session,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持收藏夹。',
+        technicalMessage: 'favorite folders unsupported for this platform',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsFavoriteFolders => false;
+
+  // ── 其余互动能力：模拟平台一律不支持 ────────────────────────
+  //
+  // 必须逐个显式声明：本类用 `implements PlatformAdapter`，而 Dart 的
+  // `implements` 只继承**签名**、**不继承**接口里带 body 的默认实现，
+  // 少写一个成员就是 non_abstract_class_inherits_abstract_member 编译错误
+  // （这些测试桩/适配器之前报错的确切原因）。
+
+  @override
+  bool get supportsFolderOwnershipScan => false;
+
+  @override
+  bool get supportsCoinBalance => false;
+
+  @override
+  bool get supportsWatchLater => false;
+
+  @override
+  bool get supportsFollowAuthor => false;
+
+  @override
+  bool get supportsSavedContent => false;
+
+  @override
+  Future<FolderOwnershipScan> scanFoldersContainingVideo({
+    required String platformVideoId,
+    required PlatformSession session,
+    int maxRequests = 12,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持收藏夹归属查询。',
+        technicalMessage: 'MockAdapter does not implement folder scan',
+        platformId: id,
+      );
+
+  @override
+  Future<int?> fetchCoinBalance({required PlatformSession session}) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持硬币余额。',
+        technicalMessage: 'MockAdapter does not implement fetchCoinBalance',
+        platformId: id,
+      );
+
+  @override
+  Future<bool> fetchWatchLater({
+    required String platformVideoId,
+    required PlatformSession session,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持稍后再看。',
+        technicalMessage: 'MockAdapter does not implement fetchWatchLater',
+        platformId: id,
+      );
+
+  @override
+  Future<InteractionResult> setWatchLater({
+    required String platformVideoId,
+    required bool add,
+    required PlatformSession session,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持稍后再看。',
+        technicalMessage: 'MockAdapter does not implement setWatchLater',
+        platformId: id,
+      );
+
+  @override
+  Future<InteractionResult> setFollowAuthor({
+    required String targetMid,
+    required bool follow,
+    required PlatformSession session,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持关注。',
+        technicalMessage: 'MockAdapter does not implement setFollowAuthor',
+        platformId: id,
+      );
+
+  @override
+  Future<SavedVideoPage> fetchFavoriteFolderVideos(
+    int mediaId, {
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持查看收藏夹内容。',
+        technicalMessage:
+            'MockAdapter does not implement fetchFavoriteFolderVideos',
+        platformId: id,
+      );
+
+  @override
+  Future<SavedVideoPage> fetchWatchLaterVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持稍后再看列表。',
+        technicalMessage: 'MockAdapter does not implement fetchWatchLaterVideos',
+        platformId: id,
+      );
+
   @override
   Future<InteractionResult> setFavorite(
     String platformVideoId, {
     required bool favorite,
     required PlatformSession session,
     int? aid,
+    List<int>? folderIds,
+    List<int>? removeFolderIds,
   }) async {
     throw FusionException(
       code: FusionErrorCode.unsupportedPlatform,
@@ -191,6 +322,21 @@ class MockAdapter implements PlatformAdapter {
       platformId: id,
     );
   }
+
+  /// 收藏结果复查：该平台不支持收藏夹，如实抛错。
+  @override
+  Future<List<int>> verifyRecentFavorite({
+    required String platformVideoId,
+    required List<int> folderIds,
+    required PlatformSession session,
+    int maxPages = 2,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持收藏夹。',
+        technicalMessage: 'MockAdapter has no favorite folders',
+        platformId: id,
+      );
 
   @override
   List<String> get supportedHosts => const ['mock.video-fusion.test'];

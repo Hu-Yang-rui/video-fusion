@@ -260,16 +260,279 @@ abstract class PlatformAdapter {
   }
 
   /// 收藏 / 取消收藏。
+  ///
+  /// 未登录时必须抛 `loginRequired`，不得静默失败。
+  ///
+  /// # 参数语义
+  ///
+  ///  - [folderIds]：要把视频**加入**的收藏夹 ID；
+  ///  - [removeFolderIds]：要把视频**移出**的收藏夹 ID；
+  ///  - 两者都为 null 时按 [favorite] 布尔走旧语义：
+  ///    true → 加入默认收藏夹（由适配器自行确定，不得硬编码 ID），
+  ///    false → 从该视频当前归属的所有收藏夹移出。
+  ///
+  /// # [favorite] 为什么还留着
+  ///
+  /// 既有调用方（`VideoService.setFavorite`、单测）只传布尔。
+  /// 保留它保证向后兼容；一旦给出任一个夹列表参数，它就不再参与决策。
+  ///
+  /// # 关于 accepted
+  ///
+  /// `accepted` 只表示**平台接受了请求**（`code == 0`），
+  /// **不表示归属真的变了**。实测（2026-10-19）两个坑：
+  ///  - 向一个**不存在**的收藏夹收藏，平台返回 `code=0 message=OK`（假成功）；
+  ///  - `data.success_num` **恒为 0**，即使写入真的生效，所以它也不能用来判成败。
+  ///
+  /// 因此需要如实回显的调用方必须在写入后调 [scanFoldersContainingVideo]
+  /// 复查归属；适配器**不做**这次复查（一次扫描要 N 个请求，
+  /// 时机该由 UI 决定，而不是写死在写操作里）。
   Future<InteractionResult> setFavorite(
     String platformVideoId, {
     required bool favorite,
     required PlatformSession session,
     int? aid,
+    List<int>? folderIds,
+    List<int>? removeFolderIds,
   }) {
     throw FusionException(
       code: FusionErrorCode.unsupportedPlatform,
       userMessage: '该平台暂不支持收藏。',
       technicalMessage: 'Adapter $id does not implement setFavorite',
+      platformId: id,
+    );
+  }
+
+  /// 是否支持"选择收藏夹"。
+  ///
+  /// 只有真正实现并验证过收藏夹列表接口的适配器才返回 true，
+  /// 避免 UI 展示一个点了必然失败的收藏夹选择面板。
+  bool get supportsFavoriteFolders => false;
+
+  /// 拉取当前账号的收藏夹列表。
+  ///
+  /// 未登录时抛 `loginRequired`。不支持时抛 `unsupportedPlatform`。
+  ///
+  /// **只负责"有哪些夹"**：id / 标题 / 条数 / 是否默认 / 是否公开。
+  /// 平台列表接口上没有任何字段能说明"某个视频在不在这个夹里"
+  /// （`fav_state` 是收藏夹自身的状态，见 [FavoriteFolder] 的说明），
+  /// 所以归属必须走 [scanFoldersContainingVideo]。
+  Future<List<FavoriteFolder>> fetchFavoriteFolders({
+    required PlatformSession session,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持收藏夹。',
+      technicalMessage: 'Adapter $id does not implement fetchFavoriteFolders',
+      platformId: id,
+    );
+  }
+
+  /// 是否支持"逐夹归属扫描"（回答"这个视频在哪些收藏夹里"）。
+  ///
+  /// 收藏夹选择面板要回显勾选状态，必须有这个能力；
+  /// 不支持时 UI 退化为"只知道收藏过，不知道在哪个夹"。
+  bool get supportsFolderOwnershipScan => false;
+
+  /// 扫描"该视频在哪些收藏夹里"。
+  ///
+  /// [platformVideoId] 是平台的视频标识（B 站为 BV 号）。
+  /// [maxRequests] 是**请求预算**：累计发出的请求数达到它就停止，
+  /// 返回已经完成的部分，而不是继续打到平台限流。
+  ///
+  /// # 为什么必须带预算（成本核算，实测 2026-10-19）
+  ///
+  ///  1. 平台**没有**任何反查端点：`resource/list` 的 `keyword` 不参与
+  ///     归属判定；`fav_state` 是收藏夹自身状态（理由见 [FavoriteFolder]）。
+  ///     所以只能逐夹把内容翻页比 bvid。
+  ///  2. `ps` 的服务端硬上限是 20（实测 ps=100/200/500/1000 仍只回 20 条）。
+  ///  3. 一个 6 夹、内容合计 192 条的账号，全量核对需要
+  ///     `⌈32/20⌉+1+1+1+1+⌈145/20⌉ = 14` 个请求。
+  ///  4. B 站在**连续第 6 个请求**起返回 HTTP 412 /
+  ///     `status_msg="triggered captcha"`（业务码 `-70103112`），
+  ///     实测要等约 6 秒才恢复。
+  ///
+  /// 无界扫描因此**必然**被打死，用户看到的是"收藏面板转圈后失败"。
+  /// 本方法的目标是"在预算内尽量多确认，并如实交代没确认的部分"，
+  /// 而不是假装给出一个完整答案。
+  ///
+  /// 结果里的 [FolderOwnershipScan.exhaustive] 与
+  /// [FolderOwnershipScan.checkedFolderIds] 必须被调用方如实对待：
+  /// **既不在 containedFolderIds、也没被 checked 的夹，状态是"不知道"，
+  /// 不是"不包含"**。UI 不得把它们渲染成未勾选。
+  ///
+  /// 不支持时抛 `unsupportedPlatform`；未登录抛 `loginRequired`。
+  Future<FolderOwnershipScan> scanFoldersContainingVideo({
+    required String platformVideoId,
+    required PlatformSession session,
+    int maxRequests = 6,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持收藏夹归属查询。',
+      technicalMessage:
+          'Adapter $id does not implement scanFoldersContainingVideo',
+      platformId: id,
+    );
+  }
+
+  /// 复查"刚收藏的项是否真的进了**指定那几个夹**"。
+  ///
+  /// # 为什么单独有这条便宜路径
+  ///
+  /// 全量归属扫描的成本实测不可接受（6 夹账号去重后 144 个请求），
+  /// 但写入后的复查**不需要**知道"还在哪些别的夹里"，只需要知道
+  /// "我刚点的那几个夹到底收下了没有"。
+  ///
+  /// 依据实测（2026-10-19）：`resource/list` 默认按 `mtime` 倒序，
+  /// **新加入的项出现在第 1 页**。所以每个目标夹只需 1 个请求
+  /// （保守最多翻 [maxPages]=2 页），而不是把整个夹翻完。
+  ///
+  /// # 与 [scanFoldersContainingVideo] 的分工（必须分清）
+  ///
+  ///  - 本方法只回答"**这几个目标夹**里有没有" → 用于写后确认；
+  ///  - 后者回答"这个视频一共在哪些夹里" → 需要逐夹扫描，
+  ///    成本高且受预算限制，只在选择面板按需调用。
+  ///
+  /// 返回值是**已确认包含**的目标夹子集：不在返回列表里的目标夹
+  /// 表示"未确认"，可能是真没进去，也可能是这一页没翻到或请求失败
+  /// ——调用方不得据此断言"没收藏成功"，应提示"未确认，请刷新查看"。
+  ///
+  /// 不支持时抛 `unsupportedPlatform`；未登录抛 `loginRequired`。
+  Future<List<int>> verifyRecentFavorite({
+    required String platformVideoId,
+    required List<int> folderIds,
+    required PlatformSession session,
+    int maxPages = 2,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持收藏结果复查。',
+      technicalMessage: 'Adapter $id does not implement verifyRecentFavorite',
+      platformId: id,
+    );
+  }
+
+  // ── 硬币余额 / 稍后再看 / 关注 ──────────────────────────────
+  //
+  // 这三项与"点赞/投币/收藏"不同：它们的操作对象不完全是单个视频
+  // （余额属于账号，关注属于 UP 主），因此单独成组，
+  // 不塞进 InteractionState 的写方法里。
+  // 全部按"能力开关 + 默认抛 unsupportedPlatform"的模式给出，
+  // UI 依据 supports* 决定是否渲染按钮，不得自行猜平台。
+
+  /// 是否支持读取硬币余额。
+  bool get supportsCoinBalance => false;
+
+  /// 读取当前账号的可用硬币余额。
+  ///
+  /// 不支持时抛 `unsupportedPlatform`；未登录抛 `loginRequired`。
+  /// 返回 null 表示平台未下发该字段（调用方**不得**当成 0——
+  /// 0 是"确实没有币"，null 是"不知道"）。
+  Future<int?> fetchCoinBalance({required PlatformSession session}) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持硬币余额。',
+      technicalMessage: 'Adapter $id does not implement fetchCoinBalance',
+      platformId: id,
+    );
+  }
+
+  /// 是否支持"稍后再看"。
+  bool get supportsWatchLater => false;
+
+  /// 查询该视频是否已在"稍后再看"列表里。
+  ///
+  /// 不支持时抛 `unsupportedPlatform`；未登录抛 `loginRequired`。
+  Future<bool> fetchWatchLater({
+    required String platformVideoId,
+    required PlatformSession session,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持稍后再看。',
+      technicalMessage: 'Adapter $id does not implement fetchWatchLater',
+      platformId: id,
+    );
+  }
+
+  /// 加入 / 移出"稍后再看"。
+  ///
+  /// 不支持时抛 `unsupportedPlatform`；未登录抛 `loginRequired`。
+  Future<InteractionResult> setWatchLater({
+    required String platformVideoId,
+    required bool add,
+    required PlatformSession session,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持稍后再看。',
+      technicalMessage: 'Adapter $id does not implement setWatchLater',
+      platformId: id,
+    );
+  }
+
+  /// 是否支持关注 / 取关 UP 主。
+  bool get supportsFollowAuthor => false;
+
+  /// 是否支持"收藏内容浏览"（收藏夹里的条目列表、稍后再看列表）。
+  ///
+  /// 与 [supportsFavoriteFolders] 的区别：后者只回答"能不能列出夹"，
+  /// 前者回答"能不能列出夹**里面的视频**"。UI 据此决定是否渲染
+  /// "我的收藏夹 → 点开看内容"这条路径，不能放死按钮。
+  bool get supportsSavedContent => false;
+
+  /// 拉取某个收藏夹里的内容（分页）。
+  ///
+  /// [mediaId] 来自 [fetchFavoriteFolders] 的 [FavoriteFolder.id]。
+  /// 不支持时抛 `unsupportedPlatform`；未登录抛 `loginRequired`。
+  Future<SavedVideoPage> fetchFavoriteFolderVideos(
+    int mediaId, {
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持查看收藏夹内容。',
+      technicalMessage:
+          'Adapter $id does not implement fetchFavoriteFolderVideos',
+      platformId: id,
+    );
+  }
+
+  /// 拉取"稍后再看"列表（分页）。
+  ///
+  /// 不支持时抛 `unsupportedPlatform`；未登录抛 `loginRequired`。
+  Future<SavedVideoPage> fetchWatchLaterVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持稍后再看列表。',
+      technicalMessage: 'Adapter $id does not implement fetchWatchLaterVideos',
+      platformId: id,
+    );
+  }
+
+  /// 关注 / 取关 UP 主。
+  ///
+  /// [targetMid] 为 UP 主的数字用户 ID 字符串。不支持时抛
+  /// `unsupportedPlatform`；未登录抛 `loginRequired`。
+  ///
+  /// 关注**状态**的读取不需要单独方法：B 站在
+  /// `archive/relation` 的 `data.attention` 里一并返回，
+  /// 已由 [fetchInteractionState] 映射到 [InteractionState.following]。
+  Future<InteractionResult> setFollowAuthor({
+    required String targetMid,
+    required bool follow,
+    required PlatformSession session,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持关注。',
+      technicalMessage: 'Adapter $id does not implement setFollowAuthor',
       platformId: id,
     );
   }
@@ -471,4 +734,159 @@ class AdapterContext {
 
   final FusionHttpClient http;
   final Object logger;
+}
+
+/// 一个收藏夹。
+///
+/// 来自平台真实接口，不做本地构造。`id` 是收藏操作的目标标识。
+///
+/// # 这里**不**带"某视频是否在此夹里"的字段
+///
+/// 结构上很想加一个 `favState`/`isFavorited`——B 站
+/// `created/list-all` 的每个夹确实带 `fav_state`，看着就是归属。
+/// 判别实验（实测 2026-10-19）证明**不是**：
+///  - 取确定在夹内的样本：夹「gay」(id=4020481152) `media_count=1`，
+///    `resource/list` 首屏就命中 `BV1ySJx6YETj`；
+///  - 此时 `created/list-all?up_mid=&bvid=BV1ySJx6YETj` 里该夹
+///    的 `fav_state` **仍为 0**；6 个夹全部为 0；
+///  - 真实写入回环（add → media_count 32→33 → relation.favorite=true）
+///    期间 `fav_state` **恒为 0**。
+///
+/// 语义：`fav_state` 描述的是**收藏夹自身**的状态（与 `like_state` 并列，
+/// "我是否收藏/点赞了这个夹子"），对自己创建的夹永远是 0。
+///
+/// 因此归属判断必须走 [PlatformAdapter.scanFoldersContainingVideo]
+/// （逐夹 `resource/list` 翻页比对 bvid），不能靠夹列表上的任何字段。
+class FavoriteFolder {
+  const FavoriteFolder({
+    required this.id,
+    required this.title,
+    this.mediaCount,
+    this.isDefault = false,
+    this.isPublic = true,
+  });
+
+  /// 收藏夹 ID（收藏操作的 `media_id`）。
+  ///
+  /// **不要假定默认收藏夹的 ID 固定**——不同账号、不同时间都可能不同，
+  /// 必须每次都从接口取。
+  final int id;
+
+  /// 收藏夹名称。
+  final String title;
+
+  /// 内含内容数。
+  ///
+  /// # 平台缓存值，可能滞后于实际内容数
+  ///
+  /// 实测（2026-10-19）：往 32 条的夹里新增一条后，
+  /// `created/list-all` 的 `media_count` **仍显示 32**；
+  /// 另一个夹 list-all 给 145、`folder/info` 给 248。
+  /// 唯一准确的内容数来自 `resource/mode/get`，但该接口有配额
+  /// （实测每请求 +15s、约 4 次/分钟），**不能**用于批量或实时计数。
+  ///
+  /// 因此本字段只适合做**排序与粗略展示**（"约 32 个内容"），
+  /// **不得**用于：
+  ///  - "该视频是否已收藏"的判断（与内容数无关，且归属只能靠扫描）；
+  ///  - 精确计数或"翻完没有"的边界判断（一律靠空页与 `has_more`）。
+  final int? mediaCount;
+
+  /// 是否为账号的默认收藏夹。
+  final bool isDefault;
+
+  /// 是否公开。
+  ///
+  /// 按 B 站前端惯例用 `attr` 的 **bit0** 判定（`isPublic = (attr & 1) == 0`）。
+  /// 但本地实测未能证实这条规则：同一账号 5 个非默认夹 `attr=22`，
+  /// 而 `22 & 1 = 0`（22 = `0b10110`，最低位是 0），按此规则它们全部
+  /// 判为"公开"；`folder/info` 也没给出 `priv_reason` 键。
+  /// 也就是说：bit0 目前**没有阳性样本**可验证。
+  ///
+  /// 因此 UI 不要把 [isPublic] 当成强约束去隐藏收藏夹；
+  /// 若出现"某个夹被平台标记为私密"的真实样本，再回来收紧。
+  final bool isPublic;
+}
+
+/// 一次"收藏夹归属扫描"的结果。
+///
+/// # 为什么不是一个简单的 `List<int>`
+///
+/// 归属只能靠**逐夹把内容翻页比对 bvid**得到（平台没有反查端点），
+/// 而这条路径有硬成本：`ps` 服务端上限 20、B 站连续第 6 个请求起
+/// 返回 HTTP 412（实测）。所以扫描必然可能出现"没扫完"。
+///
+/// 如果接口只返回"包含该视频的夹 ID 列表"，调用方**无法区分**：
+///  - 这个夹里确实没有该视频（已核对，结论可靠）；
+///  - 这个夹还没轮到核对（预算用尽 / 被限流，结论未知）。
+/// 把后者当成前者，UI 会把用户**已经收藏进的夹显示成未勾选**——
+/// 那是假的否定，比"不显示勾选状态"更糟。
+///
+/// 所以这里把三层分开：
+///  - [containedFolderIds]：已确认**包含**该视频；
+///  - [checkedFolderIds]：已**完整核对过**（翻到底）的夹；
+///  - 两者都不在 = **不知道**，UI 必须如实表现为"未核对"，
+///    不得渲染为未勾选。
+class FolderOwnershipScan {
+  const FolderOwnershipScan({
+    required this.containedFolderIds,
+    required this.checkedFolderIds,
+    required this.exhaustive,
+    this.rateLimited = false,
+    this.requestsUsed = 0,
+    this.notes = const [],
+  });
+
+  /// 一次什么都没核对到的空结果（未登录、无夹、或首个请求就被限流）。
+  const FolderOwnershipScan.empty()
+      : containedFolderIds = const [],
+        checkedFolderIds = const [],
+        exhaustive = false,
+        rateLimited = false,
+        requestsUsed = 0,
+        notes = const [];
+
+  /// 已确认**包含**该视频的收藏夹 ID。
+  final List<int> containedFolderIds;
+
+  /// 已**完整核对**（翻到列表末尾）的收藏夹 ID。
+  ///
+  /// 命中的夹也在这里——它当然被核对过了。
+  /// "已核对且不包含" = `checkedFolderIds - containedFolderIds`。
+  final List<int> checkedFolderIds;
+
+  /// 是否把所有夹都核对完了。
+  ///
+  /// false 表示**仍有夹没核对**（预算用尽或被限流中断）。
+  /// 调用方此时不得声称"该视频只在这些夹里"。
+  final bool exhaustive;
+
+  /// 是否因平台限流（HTTP 412 / 业务码 `-70103112`）提前停止。
+  ///
+  /// 与"预算用尽"区分开：限流意味着**再等一会儿**可能扫得动，
+  /// UI 可以给"重新核对"的入口；预算用尽则是设计上的上限。
+  final bool rateLimited;
+
+  /// 本次实际发出的请求数（含重试），用于成本可观测与调参。
+  final int requestsUsed;
+
+  /// 诊断说明（已脱敏，不含 Cookie）。
+  final List<String> notes;
+
+  /// 该夹是否已被完整核对过。
+  bool isChecked(int folderId) => checkedFolderIds.contains(folderId);
+
+  /// 该夹是否已确认包含该视频。
+  bool contains(int folderId) => containedFolderIds.contains(folderId);
+
+  /// 该夹的归属是否**未知**（没命中、也没核对完）。
+  bool isUnknown(int folderId) => !isChecked(folderId);
+
+  Map<String, Object?> toJson() => {
+        'containedFolderIds': containedFolderIds,
+        'checkedFolderIds': checkedFolderIds,
+        'exhaustive': exhaustive,
+        'rateLimited': rateLimited,
+        'requestsUsed': requestsUsed,
+        'notes': notes,
+      };
 }

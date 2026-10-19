@@ -269,7 +269,14 @@ void main() {
       expect(stream, isNotNull);
       expect(stream!.protocolName, 'http_hls');
       expect(stream.url, contains('.m3u8'));
-      expect(stream.qualityLabel, '原画');
+      // 档位展示名以**平台自报的 `stream_url.resolution_name`** 为准。
+      // 实测 6/6 房间：FULL_HD1=蓝光、HD1=超清、ORIGION=原画、
+      // SD1=标清、SD2=高清。
+      //
+      // 这里没有给 resolution_name，走的是兜底表 —— 兜底表也已按平台
+      // 命名校正（旧实现写 FULL_HD1→原画，与官方客户端不一致，
+      // 会让用户在清晰度菜单里看到错的档位名）。
+      expect(stream.qualityLabel, '蓝光');
     });
 
     test('http:// 升级为 https://（应用禁用明文流量）', () {

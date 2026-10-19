@@ -14,6 +14,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
@@ -83,8 +84,14 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
   Timer? _flushTimer;
   bool _pendingFlush = false;
 
+  /// 是否横屏全屏观看。
+  bool _fullscreen = false;
+
   bool _showDanmakuOverlay = true;
   bool _showChat = true;
+
+  /// 播放器状态的文字快照（用于"卡住 vs 停播"的可读提示）。
+  String _playerState = 'unknown';
 
   // ── 互动 ────────────────────────────────────────────────────
   //
@@ -136,8 +143,11 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
   void dispose() {
     _flushTimer?.cancel();
     _danmakuCtrl.dispose();
+    _playbackSubs.clear();
     _danmaku?.dispose();
-    _player?.dispose();
+    // State.dispose 是同步的，播放器释放 fire-and-forget。
+    // [_releasePlayer] 第一步就把 _player 置 null，因此不会二次释放。
+    unawaited(_releasePlayer());
     super.dispose();
   }
 
@@ -197,17 +207,36 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
   }
 
   Future<void> _startPlayback(LiveStream stream) async {
+    // 先释放上一个播放器：从直播列表进 A 房间、返回、再进 B 房间时，
+    // 若不释放，A 的拉流仍在后台运行 → 音频残留 + 两个播放器同时出声。
+    await _releasePlayer();
+
     final player = Player();
     final controller = VideoController(player);
     _player = player;
     _videoController = controller;
+    _watchPlayback(player);
 
     try {
-      // 直播流需要 Referer，否则 CDN 可能 403
+      // 直播流需要 Referer，否则 CDN 403。
+      //
+      // **必须按平台取**：B站 CDN 认 live.bilibili.com，
+      // 抖音 CDN 认 live.douyin.com。之前这里硬编码 B站 referer，
+      // 等于所有平台的流都带同一个来源头 —— 抖音房间能出画面是
+      // 侥幸（部分 CDN 节点不校验），不是实现正确。
+      // 为什么还要带 User-Agent：
+      //
+      // 实测（2026-10-19）抖音直播 HLS 分片用 App UA 打是 HTTP 206
+      // 且能拿到完整 TS；而 media_kit/libmpv 的默认 UA 在部分
+      // douyincdn 节点上会拿到 `HTTP 200 + 空 body`。播放器初始化
+      // 成功、地址也确实有效，但取不到分片 —— 表现就是"画面全黑
+      // 且没有任何报错"。这是直播黑屏目前最可能的成因
+      // （HEVC 解码已被排除：同源解码器 ffmpeg 能完整解出非黑帧，
+      // 模拟器也有 c2.goldfish.hevc.decoder / OMX.google.hevc.decoder）。
       await player.open(
         Media(
           stream.url,
-          httpHeaders: const {'Referer': 'https://live.bilibili.com/'},
+          httpHeaders: _streamHeaders(stream),
         ),
         play: true,
       );
@@ -218,11 +247,53 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
           code: FusionErrorCode.networkError,
           userMessage: '直播流打开失败，可能是地址已过期。',
           technicalMessage: 'open failed: $e',
-          platformId: 'bilibili',
+          platformId: widget.adapter.id,
           retryable: true,
         );
       });
     }
+  }
+
+  /// 拉流请求头。
+  ///
+  /// 优先用适配器随流给出的 [LiveStream.requestHeaders] —— 该带什么头
+  /// 是平台知识，应由平台适配器决定，UI 不做平台判断。
+  ///
+  /// 未给出时（适配器还没填这个字段）退化为"只带 Referer"。
+  /// 这条兜底是**临时**的：适配器补齐 requestHeaders 后就不会走到，
+  /// 不要把它当长期设计。
+  Map<String, String> _streamHeaders(LiveStream stream) {
+    if (stream.requestHeaders.isNotEmpty) {
+      return Map<String, String>.from(stream.requestHeaders);
+    }
+    return {'Referer': _refererFallback()};
+  }
+
+  /// 兜底 Referer（按平台）。
+  ///
+  /// 只在适配器没给 [LiveStream.requestHeaders] 时用到。
+  /// B站 CDN 认 live.bilibili.com，抖音 CDN 认 live.douyin.com；
+  /// 原来这里对所有平台硬编码 B站来源，抖音房间能出画面只是
+  /// 部分节点不校验的侥幸。
+  String _refererFallback() => switch (widget.adapter.id) {
+        'douyin' => 'https://live.douyin.com/',
+        _ => 'https://live.bilibili.com/',
+      };
+
+  /// 释放播放器（幂等）。
+  Future<void> _releasePlayer() async {
+    final p = _player;
+    _player = null;
+    _videoController = null;
+    if (p == null) return;
+    try {
+      await p.stop();
+    } catch (_) {
+      // stop 失败也要 dispose，否则句柄泄漏
+    }
+    try {
+      await p.dispose();
+    } catch (_) {}
   }
 
   Future<void> _startDanmaku() async {
@@ -279,26 +350,133 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
   }
 
   Future<void> _reconnect() async {
-    await _player?.dispose();
-    _player = null;
-    _videoController = null;
+    // 完整释放再重建：只 dispose 播放器不够，
+    // 弹幕连接与消息列表也要清空，否则重连后旧房间的弹幕仍在屏上。
+    for (final s in _playbackSubs) {
+      await s.cancel();
+    }
+    _playbackSubs.clear();
+    await _releasePlayer();
     await _danmaku?.dispose();
     _danmaku = null;
     _messages.clear();
+    if (mounted) {
+      setState(() {
+        _error = null;
+        _stream = null;
+      });
+    }
     await _load();
+  }
+
+  // ── 播放状态监听：下播 / 断流 / 失败 ─────────────────────────
+  //
+  // 直播是持续拉流，"打开成功"不等于"能一直看"。主播下播、CDN
+  // 地址过期（抖音的播放地址带 expire/sign）、网络中断都会表现为
+  // 播放器事件，而不是 HTTP 错误。不监听这些事件的话，用户看到的是
+  // 一帧静止画面 —— 他无法判断是卡了还是下播了。
+
+  final List<StreamSubscription<Object?>> _playbackSubs = [];
+
+  void _watchPlayback(Player player) {
+    for (final s in _playbackSubs) {
+      s.cancel();
+    }
+    _playbackSubs.clear();
+
+    // 播放结束：直播正常不会 completed=true；出现即流被关闭（下播/地址过期）
+    _playbackSubs.add(
+      player.stream.completed.listen((done) {
+        if (!mounted || !done) return;
+        setState(() {
+          _error = FusionException(
+            code: FusionErrorCode.capabilityUnavailable,
+            userMessage: '直播已结束或流地址已过期，可尝试重新进入。',
+            technicalMessage: 'player completed (stream closed)',
+            platformId: widget.adapter.id,
+            retryable: true,
+          );
+        });
+      }),
+    );
+
+    // 播放态变化：用户在直播里没暂停键，playing=false 且不是 completed
+    // 时，通常是断流或缓冲耗尽 —— 必须可见，否则用户盯着一帧静止画面。
+    _playbackSubs.add(
+      player.stream.playing.listen((playing) {
+        if (!mounted) return;
+        setState(() => _playerState = playing ? 'playing' : 'stopped');
+      }),
+    );
+
+    // 缓冲态：单独提示"正在缓冲"，与"已结束"区分开
+    _playbackSubs.add(
+      player.stream.buffering.listen((buffering) {
+        if (!mounted) return;
+        setState(() => _playerState = buffering ? 'buffering' : 'ready');
+      }),
+    );
+
+    // 错误事件：直接呈现，不静默
+    _playbackSubs.add(
+      player.stream.error.listen((message) {
+        if (!mounted) return;
+        setState(() {
+          _error = FusionException(
+            code: FusionErrorCode.networkError,
+            userMessage: '直播流中断，可能是网络或主播侧问题。',
+            technicalMessage: 'player error: $message',
+            platformId: widget.adapter.id,
+            retryable: true,
+          );
+        });
+      }),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    // 横竖屏由**房间真实数据**决定，不是猜：
+    //  - 抖音直播大量是竖屏（feed 的 `orientation` 字段），B站以横屏为主
+    //  - 竖屏房间用 9:16，横屏用 16:9，否则竖屏画面被压成小条
+    //  - 用户手动全屏时固定 16:9（沉浸观看）
+    final portrait = (_info?.isPortrait ?? false) && !_fullscreen;
+
+    if (_fullscreen) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            _buildPlayerArea(),
+            // 全屏时保留返回与状态：直播没有"进度条"可拖，
+            // 但必须能退出全屏，否则用户被困在画面里。
+            SafeArea(
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: Padding(
+                  padding: const EdgeInsets.all(AppleSpace.sm),
+                  child: GestureDetector(
+                    onTap: _toggleFullscreen,
+                    child: const _LiveExitFullscreenButton(),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(
           children: [
             _buildHeader(),
-            // 播放区
+            // 播放区（按房间真实朝向选比例）
             AspectRatio(
-              aspectRatio: 16 / 9,
+              aspectRatio: portrait ? 9 / 16 : 16 / 9,
               child: _buildPlayerArea(),
             ),
             // 信息条
@@ -309,6 +487,27 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
         ),
       ),
     );
+  }
+
+  /// 全屏切换。
+  ///
+  /// 进入全屏时同时隐藏系统 UI，退出时恢复 —— 直播是"看画面"的场景，
+  /// 状态栏占的那一条在横屏时尤其碍事。
+  Future<void> _toggleFullscreen() async {
+    final next = !_fullscreen;
+    setState(() => _fullscreen = next);
+    if (next) {
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } else {
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
   }
 
   Widget _buildHeader() {
@@ -331,6 +530,16 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
               overflow: TextOverflow.ellipsis,
               style: AppleType.headline.copyWith(color: Colors.white),
             ),
+          ),
+          // 全屏（横屏观看）
+          IconButton(
+            onPressed: _toggleFullscreen,
+            icon: const Icon(
+              Icons.fullscreen_rounded,
+              color: Colors.white,
+              size: 20,
+            ),
+            tooltip: '全屏',
           ),
           // 弹幕开关
           IconButton(
@@ -419,7 +628,9 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
         Video(
           controller: controller,
           controls: NoVideoControls,
-          fit: BoxFit.contain,
+          // 竖屏房间（抖音直播大量是竖屏）用 cover 填满，
+          // 横屏内容在竖屏布局里用 contain 保持比例不裁切。
+          fit: (_info?.isPortrait ?? false) ? BoxFit.cover : BoxFit.contain,
         ),
         // 弹幕覆盖层（从消息流里取 chat 类型，横向滚动）
         if (_showDanmakuOverlay)
@@ -481,6 +692,20 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
             const SizedBox(width: AppleSpace.sm),
             Text(
               _stream!.qualityLabel,
+              style: AppleType.caption2.copyWith(color: Colors.white38),
+            ),
+          ],
+          // 播放推进状态：直播没有进度条，用户无法区分"卡住在缓冲"
+          // 与"已经停播"。这里把他看得见的东西说出来。
+          if (_error == null && _playerState != 'ready') ...[
+            const SizedBox(width: AppleSpace.sm),
+            Text(
+              switch (_playerState) {
+                'buffering' => '缓冲中',
+                'playing' => '直播中',
+                'stopped' => '已停止',
+                _ => '',
+              },
               style: AppleType.caption2.copyWith(color: Colors.white38),
             ),
           ],
@@ -1007,6 +1232,28 @@ class _DanmakuOverlay extends StatelessWidget {
               ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 全屏时的退出按钮（悬浮在画面左上角）。
+class _LiveExitFullscreenButton extends StatelessWidget {
+  const _LiveExitFullscreenButton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 34,
+      height: 34,
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.45),
+        shape: BoxShape.circle,
+      ),
+      child: const Icon(
+        Icons.fullscreen_exit_rounded,
+        size: 18,
+        color: Colors.white,
       ),
     );
   }

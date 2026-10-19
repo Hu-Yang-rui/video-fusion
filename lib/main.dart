@@ -38,10 +38,12 @@ import 'src/models/unified_video.dart';
 import 'src/ui/detail/video_detail_screen.dart';
 import 'src/ui/discover/discover_screen.dart';
 import 'src/ui/feed/feed_screen.dart';
+import 'src/ui/interaction/interaction_registry.dart';
 import 'src/ui/live/live_screen.dart';
 import 'src/ui/mobile/feed_controller.dart';
 import 'src/ui/mobile/link_intake_sheet.dart';
 import 'src/core/external_link.dart' show openInBrowser;
+import 'src/ui/profile/profile_screen.dart';
 import 'src/ui/settings/settings_screen.dart';
 import 'src/ui/shell/app_shell.dart';
 
@@ -72,6 +74,12 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
   late final PlatformRegistry _registry;
   late final VideoProgressStore _progressStore;
 
+  /// 全局互动状态登记表。
+  ///
+  /// 推荐流、详情页、以及后续任何展示互动状态的位置**共用它**，
+  /// 同一视频只有一份控制器，避免两个入口显示不同的点赞/收藏状态。
+  late final InteractionRegistry _interactions;
+
   final GlobalKey<AppShellState> _shellKey = GlobalKey<AppShellState>();
 
   /// 应用内 Navigator 的 context。
@@ -83,6 +91,14 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
 
   feed_models.FeedSource? _activeSource;
   String? _loggedInLabel;
+
+  /// 登录态版本号。
+  ///
+  /// 每次凭证变化（导入 Cookie / 退出登录 / 扫码成功）就 +1。
+  /// 「我的」页据此在 `didUpdateWidget` 里重新拉取账号与收藏夹 ——
+  /// 没有这个信号的话，用户在设置页导入 Cookie 后返回，
+  /// 「我的」页仍会显示上一个登录态（"未登录"或旧账号）。
+  int _sessionRevision = 0;
 
   @override
   void initState() {
@@ -111,6 +127,7 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
 
     _vault = CredentialVault(storage: FlutterSecureStore(), logger: logger);
     _feedController = FeedController(service: _service, logger: logger);
+    _interactions = InteractionRegistry(service: _service, vault: _vault);
     _progressStore = VideoProgressStore(
       storage: SharedPreferencesStore(),
       logger: logger,
@@ -134,15 +151,20 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
   }
 
   /// 恢复已登录会话（仅用于顶栏状态显示，凭证不进入 UI）。
+  ///
+  /// 登录态一变就递增 [_sessionRevision] 并校准所有互动会话：
+  /// IndexedStack 会保住「我的」页的状态，不主动通知的话，
+  /// 用户在设置页导入 Cookie 后返回，账号卡片仍显示"未登录"。
   Future<void> _restoreSession() async {
+    String? label;
     for (final adapter in _registry.adapters) {
       try {
         final session = await _vault
             .load(adapter.id)
             .timeout(const Duration(seconds: 5));
-        if (session != null && mounted) {
-          setState(() => _loggedInLabel = session.displayName);
-          return;
+        if (session != null) {
+          label = session.displayName;
+          break;
         }
       } catch (e) {
         FusionLogger(minLevel: LogLevel.warn).warn(
@@ -151,11 +173,20 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
         );
       }
     }
+    if (!mounted) return;
+    setState(() {
+      _loggedInLabel = label;
+      _sessionRevision++;
+    });
+    // 已打开的推荐流/详情页要重新读登录态，否则导入 Cookie 后
+    // 按钮仍显示"登录后可操作"，必须切走再切回才更新。
+    await _interactions.recalibrateAll();
   }
 
   @override
   void dispose() {
     _feedController.dispose();
+    _interactions.dispose();
     super.dispose();
   }
 
@@ -236,7 +267,9 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
           video: video,
           service: _service,
           vault: _vault,
+          interactions: _interactions,
           onOpenOriginal: _openOriginal,
+          onOpenLogin: _openLogin,
           initialPosition: resumeAt,
           onProgressChanged: (pos, dur) {
             // 每 5 秒落一次盘，避免频繁写入
@@ -253,9 +286,32 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
     );
   }
 
+  /// 打开设置页。
+  ///
+  /// 设置是低频功能，不在一级导航里；从「我的」页进入独立路由，
+  /// 返回后回到「我的」页原来的滚动位置（IndexedStack 保住了页面状态）。
+  Future<void> _openSettings() async {
+    final navContext = _navigatorKey.currentContext;
+    if (navContext == null) return;
+    await Navigator.of(navContext).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SettingsScreen(
+          service: _service,
+          registry: _registry,
+          vault: _vault,
+          progressStore: _progressStore,
+          onSessionChanged: _restoreSession,
+        ),
+      ),
+    );
+    // Cookie 导入/退出登录会改变登录态：返回后校准所有互动状态，
+    // 否则已打开的推荐流会继续显示"登录后可操作"。
+    await _interactions.recalibrateAll();
+  }
+
   Future<void> _openLogin() async {
-    // 切到设置页的账号区域
-    _shellKey.currentState?.goTo(3);
+    // 登录入口现在在「我的」页里，按语义标签跳转而不是硬编码下标
+    _shellKey.currentState?.goToTab(AppTab.profile);
   }
 
   @override
@@ -273,6 +329,7 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
           controller: _feedController,
           service: _service,
           vault: _vault,
+          interactions: _interactions,
           onOpenSourcePicker: _openSourcePicker,
           onOpenLogin: _openLogin,
           onOpenOriginal: _openOriginal,
@@ -291,14 +348,18 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
           unawaited(_feedController.setPageActive(visible));
         },
         // 直播页：只在平台确实声明 supportsLive 时注入，
-        // 否则标签栏保持四项，不出现空页面。
+        // 否则不出现空页面。
         livePage: _livePage(),
-        settingsPage: SettingsScreen(
+        profilePage: ProfileScreen(
           service: _service,
           registry: _registry,
           vault: _vault,
           progressStore: _progressStore,
-          onSessionChanged: _restoreSession,
+          sessionRevision: _sessionRevision,
+          onOpenVideo: (v) => _openDetail(v),
+          onResumeVideo: (v, at) => _openDetail(v, resumeAt: at),
+          onOpenSettings: _openSettings,
+          onOpenLogin: _openSettings,
         ),
       ),
     );

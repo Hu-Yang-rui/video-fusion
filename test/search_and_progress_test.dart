@@ -208,10 +208,144 @@ class FakeSearchAdapter implements PlatformAdapter {
     required bool favorite,
     required PlatformSession session,
     int? aid,
+    List<int>? folderIds,
+    List<int>? removeFolderIds,
   }) async =>
       throw FusionException(
         code: FusionErrorCode.unsupportedPlatform,
         userMessage: '测试替身不支持收藏。',
+        platformId: id,
+      );
+
+  // ── 收藏夹与扩展互动能力：一律如实不支持 ────────────────────
+  //
+  // 必须逐个重写：本类是 `implements PlatformAdapter`，而 Dart 的
+  // `implements` 只继承**签名**、**不继承**接口里带 body 的默认实现
+  // （只有 extends / with 才继承实现）。所以新增的
+  // supportsFavoriteFolders、fetchFavoriteFolders 等即便在接口里
+  // 已有默认实现，这里不写就会报 non_abstract_class_inherits_abstract_member。
+  //
+  // 一律抛 unsupportedPlatform 而不是返回空列表：空列表会把
+  // "该平台没有这个能力"伪装成"有能力但没内容"，本文件测的
+  // 是搜索与进度，不该被替身的假数据影响。
+  @override
+  bool get supportsFavoriteFolders => false;
+
+  @override
+  Future<List<FavoriteFolder>> fetchFavoriteFolders({
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持收藏夹。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsFolderOwnershipScan => false;
+
+  @override
+  Future<FolderOwnershipScan> scanFoldersContainingVideo({
+    required String platformVideoId,
+    required PlatformSession session,
+    int maxRequests = 6,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持收藏夹归属查询。',
+        platformId: id,
+      );
+
+  @override
+  Future<List<int>> verifyRecentFavorite({
+    required String platformVideoId,
+    required List<int> folderIds,
+    required PlatformSession session,
+    int maxPages = 2,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持收藏复查。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsCoinBalance => false;
+
+  @override
+  Future<int?> fetchCoinBalance({required PlatformSession session}) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持硬币余额。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsWatchLater => false;
+
+  @override
+  Future<bool> fetchWatchLater({
+    required String platformVideoId,
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持稍后再看。',
+        platformId: id,
+      );
+
+  @override
+  Future<InteractionResult> setWatchLater({
+    required String platformVideoId,
+    required bool add,
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持稍后再看。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsFollowAuthor => false;
+
+  @override
+  Future<InteractionResult> setFollowAuthor({
+    required String targetMid,
+    required bool follow,
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持关注。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsSavedContent => false;
+
+  @override
+  Future<SavedVideoPage> fetchFavoriteFolderVideos(
+    int mediaId, {
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持查看收藏夹内容。',
+        platformId: id,
+      );
+
+  @override
+  Future<SavedVideoPage> fetchWatchLaterVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持稍后再看列表。',
         platformId: id,
       );
 

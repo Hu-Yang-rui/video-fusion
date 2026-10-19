@@ -205,6 +205,8 @@ class StubAdapter implements PlatformAdapter {
     required bool favorite,
     required PlatformSession session,
     int? aid,
+    List<int>? folderIds,
+    List<int>? removeFolderIds,
   }) async =>
       throw FusionException(
         code: FusionErrorCode.unsupportedPlatform,
@@ -212,6 +214,137 @@ class StubAdapter implements PlatformAdapter {
         platformId: id,
       );
 
+  // ── 收藏夹与扩展互动能力：一律如实不支持 ────────────────────
+  //
+  // 本类是 `implements PlatformAdapter`。Dart 的 `implements` 只继承
+  // **签名**、不继承接口里带 body 的默认实现（只有 extends/with 才继承），
+  // 因此 PlatformAdapter 上新增的每个成员——包括已有默认实现的
+  // supportsFavoriteFolders 与 fetchFavoriteFolders——都必须在此重写，
+  // 否则报 non_abstract_class_inherits_abstract_member。
+  //
+  // 抛 unsupportedPlatform 而不是返回空数据：本文件测的是播放策略降级，
+  // "能力不存在"与"有内容但为空"必须可区分，否则替身会替被测代码
+  // 掩盖一条本该失败的分支。
+  @override
+  bool get supportsFavoriteFolders => false;
+
+  @override
+  Future<List<FavoriteFolder>> fetchFavoriteFolders({
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持收藏夹。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsFolderOwnershipScan => false;
+
+  @override
+  Future<FolderOwnershipScan> scanFoldersContainingVideo({
+    required String platformVideoId,
+    required PlatformSession session,
+    int maxRequests = 6,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持收藏夹归属查询。',
+        platformId: id,
+      );
+
+  @override
+  Future<List<int>> verifyRecentFavorite({
+    required String platformVideoId,
+    required List<int> folderIds,
+    required PlatformSession session,
+    int maxPages = 2,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持收藏复查。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsCoinBalance => false;
+
+  @override
+  Future<int?> fetchCoinBalance({required PlatformSession session}) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持硬币余额。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsWatchLater => false;
+
+  @override
+  Future<bool> fetchWatchLater({
+    required String platformVideoId,
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持稍后再看。',
+        platformId: id,
+      );
+
+  @override
+  Future<InteractionResult> setWatchLater({
+    required String platformVideoId,
+    required bool add,
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持稍后再看。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsFollowAuthor => false;
+
+  @override
+  Future<InteractionResult> setFollowAuthor({
+    required String targetMid,
+    required bool follow,
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持关注。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsSavedContent => false;
+
+  @override
+  Future<SavedVideoPage> fetchFavoriteFolderVideos(
+    int mediaId, {
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持查看收藏夹内容。',
+        platformId: id,
+      );
+
+  @override
+  Future<SavedVideoPage> fetchWatchLaterVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持稍后再看列表。',
+        platformId: id,
+      );
 
   // ── 直播：测试桩不支持 ──────────────────────────────────────
   @override
@@ -771,6 +904,8 @@ class _FlakyAdapter implements PlatformAdapter {
     required bool favorite,
     required PlatformSession session,
     int? aid,
+    List<int>? folderIds,
+    List<int>? removeFolderIds,
   }) async =>
       throw FusionException(
         code: FusionErrorCode.unsupportedPlatform,
@@ -778,6 +913,137 @@ class _FlakyAdapter implements PlatformAdapter {
         platformId: id,
       );
 
+  // ── 收藏夹与扩展互动能力：一律如实不支持 ────────────────────
+  //
+  // 本类是 `implements PlatformAdapter`。Dart 的 `implements` 只继承
+  // **签名**、不继承接口里带 body 的默认实现（只有 extends/with 才继承），
+  // 因此 PlatformAdapter 上新增的每个成员——包括已有默认实现的
+  // supportsFavoriteFolders 与 fetchFavoriteFolders——都必须在此重写，
+  // 否则报 non_abstract_class_inherits_abstract_member。
+  //
+  // 抛 unsupportedPlatform 而不是返回空数据：本文件测的是播放策略降级，
+  // "能力不存在"与"有内容但为空"必须可区分，否则替身会替被测代码
+  // 掩盖一条本该失败的分支。
+  @override
+  bool get supportsFavoriteFolders => false;
+
+  @override
+  Future<List<FavoriteFolder>> fetchFavoriteFolders({
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持收藏夹。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsFolderOwnershipScan => false;
+
+  @override
+  Future<FolderOwnershipScan> scanFoldersContainingVideo({
+    required String platformVideoId,
+    required PlatformSession session,
+    int maxRequests = 6,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持收藏夹归属查询。',
+        platformId: id,
+      );
+
+  @override
+  Future<List<int>> verifyRecentFavorite({
+    required String platformVideoId,
+    required List<int> folderIds,
+    required PlatformSession session,
+    int maxPages = 2,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持收藏复查。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsCoinBalance => false;
+
+  @override
+  Future<int?> fetchCoinBalance({required PlatformSession session}) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持硬币余额。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsWatchLater => false;
+
+  @override
+  Future<bool> fetchWatchLater({
+    required String platformVideoId,
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持稍后再看。',
+        platformId: id,
+      );
+
+  @override
+  Future<InteractionResult> setWatchLater({
+    required String platformVideoId,
+    required bool add,
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持稍后再看。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsFollowAuthor => false;
+
+  @override
+  Future<InteractionResult> setFollowAuthor({
+    required String targetMid,
+    required bool follow,
+    required PlatformSession session,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持关注。',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsSavedContent => false;
+
+  @override
+  Future<SavedVideoPage> fetchFavoriteFolderVideos(
+    int mediaId, {
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持查看收藏夹内容。',
+        platformId: id,
+      );
+
+  @override
+  Future<SavedVideoPage> fetchWatchLaterVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) async =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '测试替身不支持稍后再看列表。',
+        platformId: id,
+      );
 
   // ── 直播：测试桩不支持 ──────────────────────────────────────
   @override

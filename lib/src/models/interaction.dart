@@ -129,9 +129,16 @@ class InteractionState {
     this.coinCount,
     this.favoriteCount,
     this.commentCount,
+    this.favoritedFolderIds = const [],
+    this.following = false,
+    this.watchLater = false,
   });
 
   /// 未登录 / 未查询时的初始状态。
+  ///
+  /// 注意：`unknown` 的 [known] 为 false，此时 [following]、[watchLater]、
+  /// [favoritedFolderIds] 等字段的默认值**只表示"不知道"**，
+  /// 调用方不得把它们当"未关注 / 不在稍后再看 / 未收藏"展示给用户。
   static const InteractionState unknown = InteractionState();
 
   /// 是否已从平台拿到真实状态。
@@ -145,10 +152,60 @@ class InteractionState {
   final bool favorited;
 
   /// 平台计数（用于展示，不本地累加）。
+  ///
+  /// # 来源约束
+  ///
+  /// 这些字段**不属于**互动关系接口。B 站 `archive/relation` 只返回
+  /// 当前用户的关系布尔值，**不返回任何计数**（实测 2026-10-19：
+  /// `like` / `favorite` 是 bool，`coin` 是 0–2 的次数）。
+  /// 计数的唯一权威来源是 `/x/web-interface/view` 的 `data.stat`，
+  /// 已由适配器映射到 `UnifiedVideo.stats`（VideoStats）。
+  ///
+  /// 因此 PlatformAdapter 的 `fetchInteractionState` 一律把这三个字段留空
+  /// （null），UI 侧按 `state.likeCount ?? video.stats.likeCount` 回退。
+  /// 保留字段而不删除，是为了让能一次性给出计数的平台有处可填；
+  /// **绝不允许由客户端本地累加**。
   final int? likeCount;
+
+  /// 该平台口径的投币总数（多数平台不返回，为 null）。
+  ///
+  /// 与 [coined]（当前用户在本视频投了几枚，0–2）是两回事。
   final int? coinCount;
   final int? favoriteCount;
   final int? commentCount;
+
+  /// 该视频当前所在的收藏夹 ID 列表。
+  ///
+  /// # 为什么需要它
+  ///
+  /// 一个视频可以同时存在于多个收藏夹。只用一个 `favorited` 布尔值
+  /// 无法表达"收藏在哪个夹"，也无法在收藏夹选择界面里正确回显勾选状态。
+  ///
+  /// 空列表表示**没有收藏到任何收藏夹**（此时 [favorited] 必为 false）。
+  /// 平台接口不提供该信息时为空列表，UI 据此退化为"只知道是否收藏过"。
+  final List<int> favoritedFolderIds;
+
+  /// 是否已关注该视频的 UP 主。
+  ///
+  /// 来源字段（实测 2026-10-19）：
+  ///  - B 站：`/x/web-interface/archive/relation` 的 `data.attention`（bool）。
+  ///    该键**实测存在**，与 `favorite`/`like` 同批返回，因此关注状态
+  ///    不需要额外请求。
+  ///
+  /// 仅在 [known] 为 true 时有意义；[InteractionState.unknown] 里它是
+  /// false，**表示"不知道"**，UI 不得据此渲染成"未关注"。
+  final bool following;
+
+  /// 该视频是否已在"稍后再看"列表里。
+  ///
+  /// 来源字段：B 站 `/x/v2/history/toview/web` 的 `data.list[].aid`
+  /// 比对结果（存在性判断，非计数）。
+  ///
+  /// 同样仅在 [known] 为 true 时有意义；false 在 unknown 态表示"不知道"。
+  final bool watchLater;
+
+  /// 是否收藏到了指定收藏夹。
+  bool inFolder(int folderId) => favoritedFolderIds.contains(folderId);
 
   InteractionState copyWith({
     bool? known,
@@ -159,6 +216,9 @@ class InteractionState {
     int? coinCount,
     int? favoriteCount,
     int? commentCount,
+    List<int>? favoritedFolderIds,
+    bool? following,
+    bool? watchLater,
   }) =>
       InteractionState(
         known: known ?? this.known,
@@ -169,6 +229,10 @@ class InteractionState {
         coinCount: coinCount ?? this.coinCount,
         favoriteCount: favoriteCount ?? this.favoriteCount,
         commentCount: commentCount ?? this.commentCount,
+        favoritedFolderIds:
+            favoritedFolderIds ?? this.favoritedFolderIds,
+        following: following ?? this.following,
+        watchLater: watchLater ?? this.watchLater,
       );
 }
 

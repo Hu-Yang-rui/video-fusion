@@ -57,6 +57,30 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
   /// 用于验证"登录后平台是否开始下发 location"——见 [_replyToComment]。
   static bool _loggedReplyControlKeys = false;
 
+  /// bvid → aid 的进程内缓存。
+  ///
+  /// # 为什么需要
+  ///
+  /// B 站的 `platformVideoId` 是 BV 号，但评论（`oid`）、收藏
+  /// （`fav/resource/deal` 的 `rid`）等接口要的是数字 aid，必须多请求一次
+  /// `/x/web-interface/view` 才能拿到。而**同一次打开视频页**里，
+  /// 评论列表与收藏写入都会各自需要 aid；不缓存的话一个视频要重复打
+  /// 2–3 次 view 接口，既慢又容易被限流。
+  ///
+  /// # 为什么可以缓存
+  ///
+  /// BV 号与 aid 是**一一对应且永不变更**的（B 站只是同一视频的两种
+  /// ID 表示法，不会重指派），所以按 bvid 缓存到适配器生命周期内是安全的。
+  /// 只缓存解析成功的结果：失败往往是网络或风控，缓存 null 会让
+  /// 该视频在整个会话里再也拿不到 aid。
+  final Map<String, int> _aidCache = {};
+
+  /// `av123`/纯数字 → BV 号的缓存（BV↔aid 一成不变，可安全缓存）。
+  ///
+  /// 见 [_resolveBvid]：互动链路里"必须用 bvid"的接口都先过它，
+  /// 否则从 av 号链接进来的视频会静默失去收藏/点赞能力。
+  final Map<String, String> _bvidCache = {};
+
   /// wbi 签名器（懒加载，key 缓存 11h50m）。
   ///
   /// 直播弹幕的 `getDanmuInfo` 需要它；不带签名会返回 -352。
@@ -1056,6 +1080,11 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     final height = (dimension['height'] as num?)?.toInt();
     final mid = (owner['mid'] as num?)?.toInt();
 
+    // 顺手把 aid 存进缓存：view 是公开接口且元数据阶段必然调用一次，
+    // 之后评论（oid）与收藏写入（rid）就能直接复用，省掉重复的
+    // bvid→aid 解析。见 [_aidCache]。
+    _rememberAid(match.platformVideoId, d['aid']);
+
     // 分P：仅取第一 P 作为主视频（本阶段不实现分P切换）
     final pages = d['pages'];
     var cid = d['cid'];
@@ -1311,6 +1340,8 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     final data = json['data'];
     if (data is! Map) return null;
     final d = Map<String, Object?>.from(data);
+    // 同样回填 aid 缓存：播放解析也会打一次 view。
+    _rememberAid(videoId, d['aid']);
     final cid = d['cid'];
     if (cid is num) return cid.toInt();
     final pages = d['pages'];
@@ -1932,6 +1963,79 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     return value.toString();
   }
 
+  /// 宽松取浮点：兼容 num、数字字符串与 "MM:SS"/"H:MM:SS" 时长文本。
+  ///
+  /// B 站不同接口对 duration 给的类型不一样：`view` 给秒数（num）、
+  /// 搜索/收藏列表给 "12:34" 字符串。直接 `as num?` 会在字符串上抛
+  /// TypeError（互动状态解析曾因此整块降级），所以统一走这里。
+  /// 无法识别时返回 null，**不返回 0**——0 会被 UI 渲染成"0 秒"。
+  static double? _toDouble(Object? value) {
+    if (value is num) return value.toDouble();
+    if (value is String) {
+      final s = value.trim();
+      if (s.isEmpty) return null;
+      if (s.contains(':')) return _parseDurationString(s);
+      return double.tryParse(s);
+    }
+    return null;
+  }
+
+  /// `archive/relation` 的 `like` → 当前用户是否已赞。
+  ///
+  /// 兼容两种实测形态（都出现过，见 [fetchInteractionState] 的说明）：
+  ///  - **bool**：`like: true/false` 就是已赞/未赞；
+  ///  - **数字**：B 站前端把"已赞"收敛成 1，未赞时该位等于总赞数，
+  ///    所以 `== 1` 判已赞。
+  ///
+  /// 数字形态有一个**平台自身**的歧义无法在客户端消除：
+  /// 某视频总赞数恰好是 1 且当前用户未赞时，会被读成"已赞"。
+  /// 这不是解析写法的问题，是平台把两种语义塞进同一个字段，
+  /// 因此不试图"修正"它，只保证**不抛异常**。
+  static bool _relationLikeFlag(Object? value) {
+    if (value is bool) return value;
+    if (value is num) return value.toInt() == 1;
+    if (value is String) {
+      final n = int.tryParse(value.trim());
+      if (n != null) return n == 1;
+    }
+    return false;
+  }
+
+  /// `archive/relation` 的 `like` → 可当作总赞数的值，拿不到就 null。
+  ///
+  /// 只在**数字形态且未赞**时才可能有意义（该位等于总赞数）。
+  /// 布尔形态、或已赞（收敛为 1）时一律返回 null，
+  /// 让调用方回退到 `UnifiedVideo.stats.likeCount`（来自 `view.stat`）。
+  ///
+  /// 已赞时若把 1 当总数返回，UI 会显示"1 人点赞"这种荒谬数字，
+  /// 所以**必须**返回 null 而不是 1。
+  static int? _relationLikeCount(Object? value) {
+    if (value is! num) return null;
+    final n = value.toInt();
+    if (n == 1) return null; // 已赞：这个 1 是标志位，不是总数
+    return n > 0 ? n : null;
+  }
+
+  /// 宽松取布尔：兼容 bool、0/1 数字与 'true'/'1' 字符串。
+  ///
+  /// B 站不同接口对同一语义用了不同表示：`archive/relation` 的
+  /// `like`/`favorite`/`attention` 是 **bool**，而评论的 `up_action.like`、
+  /// 分区的 `is_top` 等是 0/1 数字。直接 `as bool` 或 `as num` 都会在
+  /// 平台改口径时抛 TypeError，进而被上层 catch 吞掉——互动状态查询
+  /// 曾因此"永远返回 unknown"（收藏成功但按钮不高亮）。
+  ///
+  /// 因此所有布尔判定统一走这里，**永不抛异常**：无法识别的值按 false，
+  /// 且仅在"确实需要区分未知"的地方另用 `_toInt`/null 判断。
+  static bool _toBool(Object? value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    if (value is String) {
+      final s = value.trim().toLowerCase();
+      return s == 'true' || s == '1';
+    }
+    return false;
+  }
+
   // ── 互动：评论 / 点赞 / 投币 / 收藏 ─────────────────────────
   //
   // 接口来源（均为 B 站 Web 端公开接口）：
@@ -2187,6 +2291,37 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
   ///
   /// 未登录时返回 unknown —— 让 UI 显示"登录后可操作"，
   /// 而不是显示"未点赞"（那会让用户误以为操作被重置）。
+  ///
+  /// # 请求构成
+  ///
+  ///  1. `GET /x/web-interface/archive/relation?bvid=` —— 关系布尔值（1 个请求）
+  ///  2. 仅当 `favorite == true` 时，才用 [scanFoldersContainingVideo]
+  ///     查"在哪些夹里"（未收藏就不必扫描，省掉一整轮翻页请求）
+  ///
+  /// 这里**不需要 aid**：`archive/relation` 只认 bvid。
+  /// （收藏**写入**才需要 aid，见 [setFavorite]。）
+  ///
+  /// # 字段类型（实测 2026-10-19，务必按此解析）
+  ///
+  /// `archive/relation` 的 data 实测形如：
+  /// ```json
+  /// {"attention":false,"favorite":true,"season_fav":false,
+  ///  "like":false,"dislike":false,"coin":0}
+  /// ```
+  ///  - `attention` / `favorite` / `season_fav` / `like` / `dislike` 是 **bool**；
+  ///  - `coin` 是 **数字**（0/1/2，当前用户在本视频投了几币）；
+  ///  - **不返回任何计数字段**。旧实现写 `(d['favorite'] as num?)?.toInt()`
+  ///    把 bool 强转 num，抛 TypeError，被外层 catch 吞成 unknown，
+  ///    于是"服务端明明收藏成功（code=0）但按钮永不高亮"，只有 SnackBar
+  ///    提示生效——这正是那次故障的根因。
+  ///    计数一律留 null，由调用方回退到 `UnifiedVideo.stats`
+  ///    （UI 侧是 `state.likeCount ?? video.stats.likeCount`，别破坏它）。
+  ///    计数的唯一权威来源是 `/x/web-interface/view` 的 `data.stat`。
+  ///  - **没有** `fav_time` 键（那是 `/x/v3/fav/resource/list` 里才有的字段），
+  ///    旧代码 `d['fav_time'] != null` 恒为 false、不参与判断，已删。
+  ///  - `season_fav` 表示该视频所属**合集**是否被收藏，与 `favorite`
+  ///    （本单集是否被收藏）是两回事。我们只处理单集收藏，刻意不用它——
+  ///    并入 `favorited` 会让"收藏了合集"错误点亮单集的收藏按钮。
   @override
   Future<InteractionState> fetchInteractionState(
     String platformVideoId, {
@@ -2195,9 +2330,12 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
   }) async {
     if (session == null) return InteractionState.unknown;
 
+    const endpoint = '/x/web-interface/archive/relation';
     try {
-      final url = '$_apiBase/x/web-interface/archive/relation'
-          '?bvid=$platformVideoId';
+      // 用 `_videoIdQuery`：该接口同时接受 `bvid=` 与 `aid=`（实测
+      // 两者返回完全一致），因此 av 号形式的 id 不必额外解析，
+      // 少一次请求。
+      final url = '$_apiBase$endpoint?${_videoIdQuery(platformVideoId)}';
       final result = await _http.get(
         url,
         headers: {
@@ -2223,21 +2361,549 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
       if (data is! Map) return InteractionState.unknown;
       final d = Map<String, Object?>.from(data);
 
+      // 收藏与否**只**依据 favorite（bool）。不混用 season_fav（合集收藏）。
+      final favorited = d['favorite'] == true;
+
+      // 点赞：`like` 有两种实测形态，两种都要扛住。
+      //
+      //  - 本地实测（2026-10-19，两个视频各 5 次调用）一律是 **bool**：
+      //    `{"favorite":true,"like":false,...}`，
+      //    其中一个视频在 view 里总赞数 2,957,453，relation 仍给 `like:false`。
+      //  - 另一份实测样本给的是**数字**：
+      //    `{"attention":0,"like":1,"dislike":18335,"coin":0}`，
+      //    并按 B 站前端口径解释为"已赞时收敛为 1，未赞时等于总赞数"。
+      //
+      // 两种形态无法由本地账号复现出同一次响应，因此这里**同时兼容**：
+      // 是 bool 就按布尔用（拿不到总数，likeCount 留 null 让 UI 回退到
+      // video.stats）；是数字就按数字口径解析。
+      //
+      // 关键是**绝不做 `as num` / `as bool` 强转**：旧代码写
+      // `(d['like'] as num?)?.toInt()`，在布尔形态上抛 TypeError，
+      // 被外层 catch 吞成 unknown，于是"收藏成功但按钮永不高亮"。
+      // 数字口径本身还有个无法消除的歧义：总赞数恰好为 1 且未赞时，
+      // 会被读成"已赞"。这是平台设计缺陷，不是解析缺陷。
+      final liked = _relationLikeFlag(d['like']);
+      final likeCount = _relationLikeCount(d['like']);
+
+      // 查该视频具体在哪些收藏夹里 —— **这里故意不查**。
+      //
+      // 归属只能靠逐夹翻页比对 bvid（平台无反查端点、fav_state 也与归属
+      // 无关），一个 6 夹账号全量核对要 14 个请求，而 B 站在连续第 6 个
+      // 请求起就返回 412。把它放在"每次打开详情页都要跑的互动状态查询"
+      // 里，等于让每个视频都用光风控额度，收藏按钮反而更容易整体失败。
+      //
+      // 而按钮高亮**只需要** favorite 这个布尔值，1 个请求就够。
+      // 所以本方法固定返回空的 favoritedFolderIds，
+      // 需要归属的调用方（收藏夹选择面板）自己按预算调
+      // [scanFoldersContainingVideo]，并如实处理"没核对完"。
       return InteractionState(
         known: true,
-        liked: d['like'] == 1 || d['like'] == true,
-        coined: (d['coin'] as num?)?.toInt() ?? 0,
-        favorited: d['favorite'] == true || d['fav_time'] != null,
-        likeCount: (d['like'] as num?)?.toInt(),
-        coinCount: (d['coin'] as num?)?.toInt(),
-        favoriteCount: (d['favorite'] as num?)?.toInt(),
+        liked: liked,
+        // coin 是数字（0/1/2）：表示"当前用户在本视频投了几币"，
+        // 不是平台总投币数，故不填 coinCount。
+        coined: _toInt(d['coin']) ?? 0,
+        favorited: favorited,
+        // 计数：relation 不返计数的布尔形态下为 null，
+        // UI 按 `state.likeCount ?? video.stats.likeCount` 回退。
+        likeCount: likeCount,
+        coinCount: null,
+        favoriteCount: null,
+        favoritedFolderIds: const [],
+        // attention = 是否已关注 UP 主（同批返回，无需额外请求）
+        following: _toBool(d['attention']),
       );
     } on FusionException {
       rethrow;
-    } catch (_) {
-      // 状态查询失败不影响播放与评论，降级为 unknown
+    } catch (e) {
+      // 状态查询失败不影响播放与评论，降级为 unknown。
+      //
+      // 但**必须留下痕迹**：这个 catch 一旦静默，字段语义变化
+      // （比如平台把某键从 bool 改成数字）就会表现为"按钮永不高亮"
+      // 这种极难定位的症状。只记端点与异常类型，绝不记 Cookie。
+      _logger.warn('bilibili: $endpoint parse failed, state degraded', {
+        'endpoint': endpoint,
+        'errorType': e.runtimeType.toString(),
+      });
       return InteractionState.unknown;
     }
+  }
+
+  @override
+  bool get supportsFolderOwnershipScan => true;
+
+  // ── 限流与请求预算 ──────────────────────────────────────────
+  //
+  // 实测（2026-10-19）：B 站在**连续第 6 个请求**起返回
+  // HTTP 412 + `status_msg="triggered captcha"`（业务码 `-70103112`，
+  // 不在标准码表里），等约 6 秒后单发一次即恢复 code=0。
+  //
+  // 归属扫描天生是"一个视频 → N 个夹 × 翻页"的多请求路径，
+  // 不限流就必然打死，用户看到的是"收藏面板转圈后失败"。
+  // 因此下面这三条硬约束只在**多请求路径**上生效；
+  // 单请求路径（收藏、点赞、投币、稍后再看写入）一律不加延时，
+  // 否则把 400ms 的礼貌间隔压到用户每一次点击上，正常操作会被拖慢。
+
+  /// 扫描时两次请求之间的最小间隔。
+  static const Duration _scanGap = Duration(milliseconds: 400);
+
+  /// 命中限流后的退避时长（实测约 6 秒恢复）。
+  static const Duration _rateLimitBackoff = Duration(seconds: 6);
+
+  /// B 站限流业务码（配 HTTP 412 出现，非标准码表）。
+  static const int _captchaTriggeredCode = -70103112;
+
+  /// 扫描时每个夹的翻页上限。
+  ///
+  /// ps 固定 20 且**不能调大**：实测 ps=100/200 返回的是**空数组**，
+  /// 不是"截断到 20 条"（同一夹 ps=20 正常给 20 条）。
+  /// 也就是说超限的 ps 会让每个夹看起来都是空的，归属全部判成
+  /// "不包含"，而且不报错——见 [_scanOneFolder] 的说明。
+  ///
+  /// 5 页 = 一个夹最多核对 100 条。封顶的理由：实测有个夹要 10 页
+  /// 都还没命中，不设上限的话单个大夹就能吃光整个预算，
+  /// 其它夹一个都核对不了。
+  static const int _scanMaxPagesPerFolder = 5;
+
+  /// media_count 未知时用于排序的哨兵值（排在最后：不知道多大按贵的算）。
+  static const int _unknownSizeSortKey = 1 << 30;
+
+  /// 一次扫描的请求预算计数器。
+  ///
+  /// 做成**随扫描传递的对象**而不是实例字段：归属扫描可能同时进行
+  /// 两次（用户在列表里连开两个视频详情页），共享实例字段会让
+  /// 两次扫描互相扣预算，各自都只核对到一半。
+  ///
+  /// 预算是"整个扫描"共享的，不是每个夹各自一份——
+  /// 否则 6 个夹各翻 5 页就是 30 个请求，直接撞 412。
+  _ScanBudget _newScanBudget(int maxRequests) =>
+      _ScanBudget(maxRequests < 1 ? 1 : maxRequests);
+
+  /// 判断异常是不是平台限流。
+  ///
+  /// 两个入口都要认：HTTP 412（http_client 已归类为
+  /// [FusionErrorCode.rateLimited]）与业务码 `-70103112`。
+  static bool _isRateLimited(Object e) {
+    if (e is! FusionException) return false;
+    if (e.code == FusionErrorCode.rateLimited) return true;
+    return e.upstreamCode == _captchaTriggeredCode;
+  }
+
+  /// 扫描专用的 GET：间隔节流 + 真实请求数计数 + 限流退避重试一次。
+  ///
+  /// # 为什么用 acceptStatuses 而不是让 http_client 抛 412
+  ///
+  /// 412 在 http_client 的 [_retryableStatuses] 里，它会**自己**退避重试
+  /// 最多 maxRetries(2) 次——也就是说"一次调用"实际可能是 1~3 个请求。
+  /// 若预算按调用次数计，一次扫描的真实请求数会是预算的 3 倍，
+  /// 恰好把节流变成限流的帮凶。
+  ///
+  /// 这里显式 accept 412，把 412 当成**普通响应**读，预算改按
+  /// `HttpResult.attempts`（真实发出的请求数）计，节流才名副其实。
+  ///
+  /// 返回结果带**明确状态**而不是 `null`：null 会混淆
+  /// "预算用尽"与"被限流"，UI 于是把"该歇会儿再核对"提示成
+  /// "稍后再试"，或反过来。其它异常原样抛出，由调用方按"跳过该夹"处理。
+  Future<_ScanGetResult> _scanGet(
+    String pathWithQuery,
+    PlatformSession session,
+    _ScanBudget budget,
+  ) async {
+    if (!budget.hasRoom) return _ScanGetResult.budgetExhausted();
+
+    await Future<void>.delayed(_scanGap);
+
+    try {
+      final result = await _http.get(
+        '$_apiBase$pathWithQuery',
+        headers: {'Referer': _referer, 'Cookie': session.cookieHeader},
+        platformId: id,
+        acceptStatuses: const {200, 412, 429},
+      );
+      // 按**真实**请求数计，含 http_client 内部的自动重试
+      budget.consume(result.attempts);
+
+      if (result.statusCode == 412 || result.statusCode == 429) {
+        return _scanBackoffAndRetry(pathWithQuery, session, budget);
+      }
+
+      final json = result.jsonObject(platformId: id);
+      // 绕过 _getAuthed 就要自己接住登录失效：不能让它被当成"没找到"，
+      // 那会把"你没登录"显示成"你没收藏"。
+      if (json['code'] == -101) {
+        throw FusionException(
+          code: FusionErrorCode.loginRequired,
+          userMessage: '登录状态已失效，请重新登录后再试。',
+          technicalMessage: '$pathWithQuery returned -101',
+          upstreamCode: json['code'],
+          platformId: id,
+        );
+      }
+      // 业务码形式的限流（HTTP 200 + code=-70103112）也要接住：
+      // 两种形态都有实测样本。
+      if (json['code'] == _captchaTriggeredCode) {
+        return _scanBackoffAndRetry(pathWithQuery, session, budget);
+      }
+      return _ScanGetResult.ok(json);
+    } on FusionException catch (e) {
+      if (e.code == FusionErrorCode.loginRequired) rethrow;
+      if (!_isRateLimited(e)) rethrow;
+      budget.rateLimited = true;
+      return _ScanGetResult.rateLimited();
+    }
+  }
+
+  /// 限流后退避 [_rateLimitBackoff] 再试**一次**；仍限流则如实报告。
+  Future<_ScanGetResult> _scanBackoffAndRetry(
+    String pathWithQuery,
+    PlatformSession session,
+    _ScanBudget budget,
+  ) async {
+    budget.rateLimited = true;
+    if (!budget.hasRoom) return _ScanGetResult.budgetExhausted();
+
+    await Future<void>.delayed(_rateLimitBackoff);
+    try {
+      final result = await _http.get(
+        '$_apiBase$pathWithQuery',
+        headers: {'Referer': _referer, 'Cookie': session.cookieHeader},
+        platformId: id,
+        acceptStatuses: const {200, 412, 429},
+      );
+      budget.consume(result.attempts);
+
+      if (result.statusCode == 412 || result.statusCode == 429) {
+        return _ScanGetResult.rateLimited();
+      }
+      final json = result.jsonObject(platformId: id);
+      if (json['code'] == _captchaTriggeredCode) {
+        return _ScanGetResult.rateLimited();
+      }
+      return _ScanGetResult.ok(json);
+    } on FusionException catch (e) {
+      // 退避后仍限流 → 由调用方停止整个扫描
+      if (_isRateLimited(e)) return _ScanGetResult.rateLimited();
+      rethrow;
+    }
+  }
+
+  /// 复查"刚收藏/刚移出的项是否真的在目标夹里"。
+  ///
+  /// # 为什么不复用 [scanFoldersContainingVideo]
+  ///
+  /// 全量归属扫描要 144 个请求级别（实测），把它放在"写完一次收藏之后"
+  /// 等于让每次收藏都撞 412。而复查根本不需要知道"还在别的哪些夹里"，
+  /// 只需要知道"我刚操作的那几个夹收下了没有"。
+  ///
+  /// 依据实测（2026-10-19）：`resource/list` 默认按 `mtime` 倒序，
+  /// **新加入的项就在第 1 页**，所以每个目标夹 1 个请求就够，
+  /// 保守翻到 [maxPages]（默认 2）页。收藏一次总计 2~3 个请求，
+  /// 在实测第 6 个请求才触发风控的阈值之内。
+  ///
+  /// 返回**已确认包含**该视频的目标夹子集。
+  ///
+  /// # 返回值不能反着解释
+  ///
+  /// 不在返回列表里 = "没确认到"，**不等于** "一定没进去"：
+  /// 页序不稳定（实测同一夹两次调用首条会变）、请求可能被限流、
+  /// 也可能刚写入还没同步。调用方据此只能说"未确认，请刷新查看"，
+  /// 不得说"收藏失败"；同理，用它做移除复查时，
+  /// "还在列表里"可能只是缓存滞后。
+  ///
+  /// 判据只用 `bvid`（含 `bv_id` 写法兼容）：aid 在不同接口有短/长两种
+  /// 数值形态，跨接口比对不可靠。
+  ///
+  /// 单夹失败只跳过该夹（返回里少一个），不整体抛错；
+  /// 登录失效必须上抛——"你没登录"不能被说成"收藏没生效"。
+  @override
+  Future<List<int>> verifyRecentFavorite({
+    required String platformVideoId,
+    required List<int> folderIds,
+    required PlatformSession session,
+    int maxPages = 2,
+  }) async {
+    if (folderIds.isEmpty) return const [];
+    // 归属/内容比对一律用 BV 号：平台列表给的是 bvid，
+    // av 形式（`av123`）永远比不中 → 会误判"未生效"。
+    final bvid = await _resolveBvid(platformVideoId);
+
+    final pages = maxPages < 1 ? 1 : maxPages;
+    // 复查的目标夹数量就是请求数下界，预算按"每夹 pages 页"给，
+    // 但仍受同一套节流与退避约束。
+    final budget = _newScanBudget(folderIds.length * pages);
+    final confirmed = <int>[];
+
+    for (final folderId in folderIds) {
+      if (!budget.hasRoom) break;
+      try {
+        final found = await _folderContainsNearTop(
+          folderId,
+          bvid,
+          session,
+          budget,
+          pages,
+        );
+        if (found) confirmed.add(folderId);
+      } on FusionException catch (e) {
+        if (e.code == FusionErrorCode.loginRequired) rethrow;
+        // 其它错误：这个夹没确认到，继续下一个
+      }
+      if (budget.rateLimited) break;
+    }
+    return confirmed;
+  }
+
+  /// 在目标夹的**前几页**里找该视频（复查专用，不翻完整个夹）。
+  Future<bool> _folderContainsNearTop(
+    int folderId,
+    String platformVideoId,
+    PlatformSession session,
+    _ScanBudget budget,
+    int maxPages,
+  ) async {
+    for (var pn = 1; pn <= maxPages; pn++) {
+      if (!budget.hasRoom) return false;
+
+      final result = await _scanGet(
+        '/x/v3/fav/resource/list'
+        '?media_id=$folderId&pn=$pn&ps=20&platform=web',
+        session,
+        budget,
+      );
+      if (result.status != _ScanGetStatus.ok) return false;
+
+      final data = result.json!['data'];
+      if (data is! Map) return false;
+      final d = Map<String, Object?>.from(data);
+
+      final medias = d['medias'];
+      if (medias is! List) return false;
+      // 空页不能当"确认没有"：实测 ps 超限也返回空数组，
+      // 且刚写入时平台可能短暂返回不完整列表。这里只当"没确认到"。
+      if (medias.isEmpty) return false;
+
+      for (final raw in medias) {
+        if (raw is! Map) continue;
+        final m = Map<String, Object?>.from(raw);
+        final bv = _nullableString(m['bvid']) ?? _nullableString(m['bv_id']);
+        if (bv == platformVideoId) return true;
+      }
+
+      if (d['has_more'] != true) return false;
+    }
+    return false;
+  }
+
+  /// 该视频当前所在的收藏夹（逐夹扫描，带请求预算）。
+  ///
+  /// 设计理由与成本核算见接口文档
+  /// [PlatformAdapter.scanFoldersContainingVideo]。要点：
+  ///  - 判据**只用 bvid**。不能用 `item.id`/aid 比对：实测 B 站的 aid
+  ///    有**短版**（`resource/list` 里给 72996211 这种）与**长版**
+  ///    （`view` 里给 117427778098783 这种）两种数值形态，跨接口不相等，
+  ///    用 aid 比对会永远不命中 → 必然漏判。
+  ///  - 命中即停止该夹翻页；每夹最多翻 [_scanMaxPagesPerFolder] 页。
+  ///  - 顺序：默认夹优先（实测收藏大多进默认夹），再按 media_count
+  ///    **升序**（小夹便宜，先跑完能更快拿到确定的"已核对"集合）。
+  ///  - 单夹异常只跳过该夹，**不计入** checkedFolderIds（因为它没核对完）。
+  ///  - 预算用尽或被限流打断时返回**部分结果**并把状态如实标在
+  ///    [FolderOwnershipScan.exhaustive] / [FolderOwnershipScan.rateLimited]
+  ///    上，不抛错——归属是辅助信息。
+  ///
+  /// 调用方**必须**先看 [FolderOwnershipScan.exhaustive] 再下结论：
+  /// 未核对的夹是"不知道"，不是"不包含"。
+  @override
+  Future<FolderOwnershipScan> scanFoldersContainingVideo({
+    required String platformVideoId,
+    required PlatformSession session,
+    int maxRequests = 6,
+  }) async {
+    final budget = _newScanBudget(maxRequests);
+    // 同 verifyRecentFavorite：逐夹比对用的是 bvid，
+    // av 形式必须先归一，否则每个夹都判"不含"（假的否定）。
+    final bvid = await _resolveBvid(platformVideoId);
+
+    final List<FavoriteFolder> folders;
+    try {
+      folders = await fetchFavoriteFolders(session: session);
+    } on FusionException catch (e) {
+      if (_isRateLimited(e)) {
+        return const FolderOwnershipScan(
+          containedFolderIds: [],
+          checkedFolderIds: [],
+          exhaustive: false,
+          rateLimited: true,
+          notes: ['收藏夹列表请求即被限流，未做任何核对。'],
+        );
+      }
+      // 登录失效必须如实上抛：静默返回空会被 UI 显示成"未收藏到任何夹"，
+      // 那是假的否定。
+      if (e.code == FusionErrorCode.loginRequired) rethrow;
+      return const FolderOwnershipScan(
+        containedFolderIds: [],
+        checkedFolderIds: [],
+        exhaustive: false,
+        notes: ['收藏夹列表获取失败，未做任何核对。'],
+      );
+    }
+
+    if (folders.isEmpty) {
+      return const FolderOwnershipScan(
+        containedFolderIds: [],
+        checkedFolderIds: [],
+        exhaustive: true,
+        notes: ['该账号没有自己创建的收藏夹。'],
+      );
+    }
+
+    // 夹列表本身也是 1 个请求，计入用量：requestsUsed 要能对上
+    // 真实打到平台的请求数，否则成本观测会低估。
+    budget.consume(1);
+
+    // 顺序：**默认夹优先**，其余按 media_count 升序。
+    //
+    // 默认夹排最前不是审美选择，是实测结论：绝大多数收藏进默认夹，
+    // 所以第一个夹命中的概率最高 → 命中就立刻返回，只用 1~2 个请求
+    // 就能给出"已确认在默认夹"这个对用户有用的结论。
+    // 其余按体积升序：小夹便宜，先跑完能更快攒出确定的 checked 集合。
+    // media_count 为 null 的排最后（不知道多大，按贵的处理）。
+    final order = [...folders]..sort((a, b) {
+      if (a.isDefault != b.isDefault) return a.isDefault ? -1 : 1;
+      return (a.mediaCount ?? _unknownSizeSortKey)
+          .compareTo(b.mediaCount ?? _unknownSizeSortKey);
+    });
+
+    // 核对范围 = 自己创建的夹（见上面 fetchFavoriteFolders 的说明：
+    // created/list-all 不含他人/协作夹）。
+    final contained = <int>[];
+    final checked = <int>[];
+    var stoppedAtDefaultFolder = false;
+
+    for (final folder in order) {
+      if (!budget.hasRoom) break;
+
+      final outcome = await _scanOneFolder(
+        folder,
+        bvid,
+        session,
+        budget,
+      );
+
+      switch (outcome) {
+        case _FolderScanOutcome.hit:
+          contained.add(folder.id);
+          checked.add(folder.id);
+        case _FolderScanOutcome.notFound:
+          checked.add(folder.id);
+        case _FolderScanOutcome.skipped:
+        case _FolderScanOutcome.rateLimitedStop:
+          // 不计入 checked：这个夹的归属是"不知道"，不是"不包含"
+          break;
+      }
+
+      // 默认夹命中即返回：继续扫其余夹只为了回答"还在别的哪些夹里"，
+      // 而那件事的成本是 144 个请求级别，不值得为一次回显去付。
+      if (outcome == _FolderScanOutcome.hit && folder.isDefault) {
+        stoppedAtDefaultFolder = true;
+        break;
+      }
+
+      // 限流了就整体停：继续打只会加深风控（实测要等 6 秒才恢复）
+      if (outcome == _FolderScanOutcome.rateLimitedStop) break;
+      if (budget.rateLimited) break;
+    }
+
+    // 差额即"没核对完的夹数"：每个夹在 order 里只访问一次、
+    // checked 只可能来自 order，所以不需要额外的"提前停止"标志。
+    final unverified = order.length - checked.length;
+    return FolderOwnershipScan(
+      containedFolderIds: contained,
+      checkedFolderIds: checked,
+      // 只由"是否还有夹没核对完"决定——预算/限流/默认夹提前返回
+      // 都表现为差额，一律 false。
+      exhaustive: unverified == 0,
+      rateLimited: budget.rateLimited,
+      requestsUsed: budget.used,
+      notes: [
+        if (stoppedAtDefaultFolder)
+          '已确认在默认收藏夹；其它收藏夹未核对（可能有其它夹，也可能没有）。',
+        if (budget.rateLimited)
+          '被平台限流（HTTP 412 / 业务码 -70103112），扫描提前停止。',
+        if (!budget.rateLimited && unverified > 0 && !stoppedAtDefaultFolder)
+          '请求预算（${budget.limit}）内未能核对全部收藏夹。',
+        if (unverified > 0)
+          '有 $unverified 个收藏夹未完成核对，它们的归属未知（不等于未收藏）。',
+        '仅核对本人创建的收藏夹；收藏在他人/协作夹里的视频不在此结果中。',
+      ],
+    );
+  }
+
+  /// 核对单个收藏夹（翻页直到命中或到底）。
+  ///
+  /// # ps 必须保持 20，不能为了少翻页调大
+  ///
+  /// 实测（2026-10-19）`fav/resource/list`：**ps=100 / ps=200 返回空数组**
+  /// （同一夹、同一登录态，ps=20 正常给 20 条）。也就是说这个接口
+  /// 不是"把 ps 夹到上限"，而是**给了超限值就什么都不返回**。
+  /// 若有人为了省翻页把 ps 改成 100，这里第一个空页就会被当成
+  /// "该夹是空的 → 确认不包含"，于是**每个夹都判成不包含**，
+  /// 归属面板全部显示未勾选，且不报任何错。
+  /// 因此 ps=20 是**正确性约束**，不是性能取舍，改动前必须重新实测。
+  Future<_FolderScanOutcome> _scanOneFolder(
+    FavoriteFolder folder,
+    String platformVideoId,
+    PlatformSession session,
+    _ScanBudget budget,
+  ) async {
+    for (var pn = 1; pn <= _scanMaxPagesPerFolder; pn++) {
+      if (!budget.hasRoom) return _FolderScanOutcome.skipped;
+
+      final result = await _scanGet(
+        '/x/v3/fav/resource/list'
+        '?media_id=${folder.id}&pn=$pn&ps=20&platform=web',
+        session,
+        budget,
+      );
+
+      switch (result.status) {
+        case _ScanGetStatus.budgetExhausted:
+          return _FolderScanOutcome.skipped;
+        case _ScanGetStatus.rateLimited:
+          return _FolderScanOutcome.rateLimitedStop;
+        case _ScanGetStatus.ok:
+          break;
+      }
+
+      final data = result.json!['data'];
+      if (data is! Map) return _FolderScanOutcome.skipped;
+      final d = Map<String, Object?>.from(data);
+
+      final medias = d['medias'];
+      if (medias is! List) return _FolderScanOutcome.skipped;
+      if (medias.isEmpty) {
+        // 空页**通常**意味着到底（实测 pn 越界返回 200 + 空数组而不报错）。
+        // 但只有 has_more 也说"没有更多"时才敢断言"这个夹里没有"：
+        // 实测把 ps 写成 100 会让有 32 条的夹直接返回空数组，
+        // 若不看 has_more 就判 notFound，等于把"平台没给数据"
+        // 谎报成"确认不包含"——那是会误导用户去重复收藏的假结论。
+        return d['has_more'] == true
+            ? _FolderScanOutcome.skipped
+            : _FolderScanOutcome.notFound;
+      }
+
+      for (final raw in medias) {
+        if (raw is! Map) continue;
+        final m = Map<String, Object?>.from(raw);
+        // 判据**只用 bvid**：aid 有短/长两种形态，跨接口不相等（见上）。
+        final bv = _nullableString(m['bvid']) ?? _nullableString(m['bv_id']);
+        if (bv == platformVideoId) return _FolderScanOutcome.hit;
+      }
+
+      if (d['has_more'] != true) return _FolderScanOutcome.notFound;
+    }
+
+    // 翻到页上限仍未命中：**不能**断言"不在这个夹里"
+    // （实测有夹要 10 页才到底，这里只翻 5 页），如实算"没核对完"。
+    return _FolderScanOutcome.skipped;
   }
 
   /// 点赞 / 取消点赞。
@@ -2250,10 +2916,13 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     required PlatformSession session,
     int? aid,
   }) async {
+    // 该接口的 `bvid` 参数必须是 BV 号：从 av 号链接进来时
+    // platformVideoId 是 `av123`，直接传会被判参数错误。
+    final bvid = await _resolveBvid(platformVideoId);
     final json = await _postAuthed(
       '/x/web-interface/archive/like',
       body: {
-        'bvid': platformVideoId,
+        'bvid': bvid,
         // B 站语义：1 = 点赞，2 = 取消点赞
         'like': like ? '1' : '2',
         'csrf': _csrfFrom(session),
@@ -2270,6 +2939,24 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
   }
 
   /// 投币。[count] 为 1 或 2。
+  ///
+  /// # 平台有**两道**独立校验（实测 2026-10-19）
+  ///
+  ///  /x/web-interface/coin/add 会分别拒绝：
+  ///  - `code=116 消耗的硬币大于剩余数` —— 当
+  ///    `exp/reward` 的 `tags.enable_payment_qrcode == 0` 时触发；
+  ///  - `code=-104 操作余额不足` —— 即使上面那个标志是 1，
+  ///    余额为 0 时仍然触发。
+  ///
+  /// 也就是说"标志开着"不等于"能投币"，两个条件必须**都**满足。
+  /// 本方法因此做两件事：
+  ///  1. 若此前查过余额、且平台明确说过标志为 0，直接给出针对性文案
+  ///     （省一次注定失败的请求）。这个缓存只在已查余额时存在，
+  ///     **不会**为了投币去额外请求余额接口——正常投币仍是一个请求。
+  ///  2. 把 116 / -104 映射成可操作的用户文案，而不是把平台原样
+  ///     （"消耗的硬币大于剩余数"）丢给用户。
+  ///
+  /// 注意：这里**不实际消耗硬币**，只是把错误说清楚。
   @override
   Future<InteractionResult> setCoin(
     String platformVideoId, {
@@ -2278,11 +2965,21 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     bool alsoLike = false,
     int? aid,
   }) async {
+    // 前置检查（纯本地，不发请求）：已知的"平台关闭了用币能力"
+    if (_lastCoinsUsable == false) {
+      return const InteractionResult(
+        accepted: false,
+        message: '当前账号不可用币（平台已关闭该能力），投币未发起。',
+        upstreamCode: 116,
+      );
+    }
+
     final multiply = count.clamp(1, 2);
     final json = await _postAuthed(
       '/x/web-interface/coin/add',
       body: {
-        'bvid': platformVideoId,
+        // 同 like：这里必须是 BV 号，av 形式先归一
+        'bvid': await _resolveBvid(platformVideoId),
         'multiply': '$multiply',
         'select_like': alsoLike ? '1' : '0',
         'csrf': _csrfFrom(session),
@@ -2291,26 +2988,186 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
       endpoint: '/x/web-interface/coin/add',
     );
 
+    final code = json['code'];
     return InteractionResult(
-      accepted: json['code'] == 0,
-      message: _nullableString(json['message']),
-      upstreamCode: json['code'],
+      accepted: code == 0,
+      // 两道校验的失败各有其义，不能都揉成"投币失败"：
+      // 一个是账号能力问题（等也没用），一个是余额问题（攒够才行）。
+      message: switch (code) {
+        0 => _nullableString(json['message']),
+        116 => '当前账号不可用币（平台已关闭该能力）。',
+        -104 => '硬币余额不足，无法投币。',
+        _ => _nullableString(json['message']),
+      },
+      upstreamCode: code,
     );
+  }
+
+  /// 是否支持"选择收藏夹"。
+  ///
+  /// B站有 `/x/v3/fav/folder/created/list-all` 可拿真实收藏夹列表，
+  /// 实测（2026-10-18）返回 6 个收藏夹（含默认收藏夹与自建夹）。
+  @override
+  bool get supportsFavoriteFolders => true;
+
+  /// 拉取当前账号的真实收藏夹列表。
+  ///
+  /// # 只包含**本人创建**的收藏夹
+  ///
+  /// `created/list-all` 顾名思义只列自己建的夹。账号还可能把视频收藏进
+  /// **他人分享/协作**的夹，那些不在本结果里。
+  /// 实测：`folder/visited/list` 在本账号对 3 种 uid 参数变体都返回
+  /// `count=0`，说明这个账号确实没有协作夹——但**不能据此假定所有账号
+  /// 都没有**。
+  ///
+  /// 直接后果：**收藏夹面板只能管理本人创建的夹**。UI 文案不得写成
+  /// "管理全部收藏夹/所有收藏"；归属扫描也只对本人创建的夹成立
+  /// （见 [scanFoldersContainingVideo] 的 notes）。
+  ///
+  /// # media_count 不可作权威
+  ///
+  /// 实测同一个夹：`created/list-all` 给 145，`folder/info` 给 248。
+  /// 它只适合排序/展示，**不能**用来判断"翻完没有"——
+  /// 翻页边界一律靠空页与 `has_more`。
+  ///
+  /// 实测响应（2026-10-19）：
+  ///
+  /// ```json
+  /// {"code":0,"data":{"count":6,"list":[
+  ///   {"id":62851852,"title":"默认收藏夹","media_count":32,"attr":0,"fav_state":0},
+  ///   {"id":4020481152,"title":"gay","media_count":1,"attr":22,"fav_state":0},
+  ///   {"id":3683371952,"title":"神人视频","media_count":145,"attr":22},
+  ///   ...
+  /// ],"season":null}}
+  /// ```
+  ///
+  /// **注意**：`title` 为「默认收藏夹」的那个才是账号默认夹。
+  /// 不要按 ID 硬编码，也不要用数组下标 0 假定——下标 0 恰好是默认夹
+  /// 只是这个账号的巧合，别的账号不保证。
+  ///
+  /// # 这里给不出"某视频在哪些夹里"
+  ///
+  /// 每个夹带的 `fav_state` **与归属无关**（它是"我是否收藏了这个夹子"，
+  /// 对自建夹恒为 0；判别实验见 [FavoriteFolder] 的 dartdoc）。
+  /// 归属必须走 [scanFoldersContainingVideo]。因此本方法**不接受**
+  /// 视频 ID 参数——曾加过一个 `platformVideoId` 命名参数想走捷径，
+  /// 实测证明传与不传结果一样，留着只会误导后来的人。
+  ///
+  /// # 这里给不出"某视频在哪些夹里"
+  ///
+  /// 每个夹带的 `fav_state` **与归属无关**（它是"我是否收藏了这个夹子"，
+  /// 对自建夹恒为 0；判别实验见 [FavoriteFolder] 的 dartdoc）。
+  /// 归属必须走 [scanFoldersContainingVideo]。因此本方法**不接受**
+  /// 视频 ID 参数——曾加过一个 `platformVideoId` 命名参数想走捷径，
+  /// 实测证明传与不传结果一样，留着只会误导后来的人。
+  @override
+  Future<List<FavoriteFolder>> fetchFavoriteFolders({
+    required PlatformSession session,
+  }) async {
+    final uid = session.userId;
+    if (uid.isEmpty) {
+      throw FusionException(
+        code: FusionErrorCode.loginRequired,
+        userMessage: '登录信息不完整，请重新登录。',
+        technicalMessage: 'session.userId is empty',
+        platformId: id,
+      );
+    }
+
+    final result = await _http.get(
+      '$_apiBase/x/v3/fav/folder/created/list-all?up_mid=$uid&platform=web',
+      headers: {'Referer': _referer, 'Cookie': session.cookieHeader},
+      platformId: id,
+    );
+    final json = result.jsonObject(platformId: id);
+    _assertApiOk(
+      json,
+      endpoint: '/x/v3/fav/folder/created/list-all',
+      badRequestCode: FusionErrorCode.loginRequired,
+      badRequestMessage: '登录状态无效，请重新登录后再试。',
+    );
+
+    final data = json['data'];
+    final rawList = data is Map ? data['list'] : null;
+    if (rawList is! List) {
+      // 账号确实可能一个收藏夹都没有（新账号），如实返回空
+      return const [];
+    }
+
+    final folders = <FavoriteFolder>[];
+    for (final raw in rawList) {
+      if (raw is! Map) continue;
+      final m = Map<String, Object?>.from(raw);
+      final folderId = _toInt(m['id']);
+      final title = _nullableString(m['title']);
+      if (folderId == null || title == null) continue;
+
+      folders.add(
+        FavoriteFolder(
+          id: folderId,
+          title: title,
+          mediaCount: _toInt(m['media_count']),
+          // 平台不返回 is_default 布尔值，按名称判断。
+          // 这是 B站 Web 端的既有约定（默认夹固定叫「默认收藏夹」）。
+          isDefault: title == '默认收藏夹',
+          // attr 的 bit0 按 B 站前端惯例表示"私密"。
+          // 注意：本地实测**没有阳性样本**——本账号 5 个非默认夹
+          // attr=22，而 22 & 1 = 0，全部判为公开；folder/info 也没给
+          // priv_reason。所以这条规则的"私密"分支尚未被任何真实数据触发过，
+          // UI 不要把它当强约束去隐藏收藏夹（见 FavoriteFolder.isPublic）。
+          isPublic: (_toInt(m['attr']) ?? 0) & 1 == 0,
+        ),
+      );
+    }
+    return folders;
   }
 
   /// 收藏 / 取消收藏。
   ///
-  /// 需要先拿到用户的默认收藏夹 ID。这里采用：
-  ///  - 收藏：读取「创建的收藏夹列表」第一条作为默认收藏夹
-  ///  - 取消：读取该视频所在收藏夹并移除
+  /// 需要先拿到目标收藏夹 ID。这里采用：
+  ///  - 收藏：[folderIds] 指定则用指定夹；未指定时读取
+  ///    「创建的收藏夹列表」里**按名称识别**的默认收藏夹
+  ///  - 取消：同样按 [folderIds] 移除（未指定则从默认夹移除）
   ///
-  /// 若用户没有任何自建收藏夹，如实报错而不是静默失败。
+  /// 若用户没有任何收藏夹，如实报错而不是静默失败。
+  ///
+  /// # 关键约束（实测 2026-10-18 / 10-19）
+  ///
+  /// - 接口：`POST /x/v3/fav/resource/deal`
+  /// - `type=2`（视频）
+  /// - `add_media_ids` / `del_media_ids` 互斥
+  /// - 必须带 `csrf`（= `bili_jct`），否则返回 `-111 CSRF 校验失败`
+  /// - `rid` 要的是**数字 aid**，所以收藏写入是少数确实需要
+  ///   [_resolveAid] 的互动路径（BV 号本身不认）
+  /// - 不存在的 media_id：不同时点返回过 `code=0 message=OK`（假成功）与
+  ///   `code=11010 您访问的内容不存在`，**两者都要当失败处理**
+  /// - 成功后 `archive/relation` 的 `favorite` 立即变 `true`
+  ///
+  /// # 判成败：不能只看 code，也不能看 success_num
+  ///
+  /// 实测（2026-10-19）：`code=0 message=OK data={"prompt":true,"success_num":0}`
+  /// 里 **`success_num` 恒为 0**，即使写入真的生效（media_count 已 +1、
+  /// relation.favorite 已变 true），所以它**不能**用来判断是否生效。
+  /// 因此：
+  ///  - `accepted` 仍按 `code == 0` 给（平台是否接受请求）；
+  ///  - 把 `data.success_num` / `data.prompt` 解析进 [InteractionResult.message]，
+  ///    `code == 0` 但 `success_num == 0` 时给"平台未确认生效"，
+  ///    让 UI 能说清具体原因而不是空泛的"失败"；
+  ///  - **真正的是否生效由调用方复查**：写入后调
+  ///    [scanFoldersContainingVideo] 看归属有没有变。适配器不做这次复查
+  ///    （一次复查是 N 个夹 × 翻页的开销，时机应由 UI 决定）。
+  ///
+  /// [folderIds] / [removeFolderIds] 同时为 null 时走旧语义：
+  /// `favorite=true` → 加入默认收藏夹；`favorite=false` → 从当前归属的所有夹移出。
+  /// 多收藏夹同时操作由平台支持（`add_media_ids` 是逗号分隔的列表）。
   @override
   Future<InteractionResult> setFavorite(
     String platformVideoId, {
     required bool favorite,
     required PlatformSession session,
     int? aid,
+    List<int>? folderIds,
+    List<int>? removeFolderIds,
   }) async {
     final resolvedAid = aid ?? await _resolveAid(platformVideoId);
     if (resolvedAid == null) {
@@ -2322,58 +3179,581 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
       );
     }
 
-    // 取用户自建收藏夹列表
-    final listUrl = '$_apiBase/x/v3/fav/folder/created/list-all'
-        '?up_mid=${session.userId}';
-    final listResult = await _http.get(
-      listUrl,
-      headers: {'Referer': _referer, 'Cookie': session.cookieHeader},
-      platformId: id,
-    );
-    final listJson = listResult.jsonObject(platformId: id);
-    _assertApiOk(
-      listJson,
-      endpoint: '/x/v3/fav/folder/created/list-all',
-      // 该接口的 -400 表示 up_mid 无效（通常是登录态缺失），
-      // 不是"链接无效"——必须映射为 loginRequired。
-      badRequestCode: FusionErrorCode.loginRequired,
-      badRequestMessage: '登录状态无效，请重新登录后再收藏。',
-    );
+    List<int>? addIds;
+    List<int>? delIds;
 
-    final listData = listJson['data'];
-    final folders = (listData is Map ? listData['list'] : null);
-    if (folders is! List || folders.isEmpty) {
+    if (folderIds == null && removeFolderIds == null) {
+      // 旧语义（向后兼容）：只靠 favorite 布尔决定加还是减。
+      //
+      // 取消收藏时**只移出默认夹**，不为了"找出所有包含它的夹"而做一次
+      // 逐夹扫描：那是 14 个请求的量级（见 [scanFoldersContainingVideo]），
+      // 藏在一次写操作里等于让每次取消收藏都撞 412，
+      // 而且把成本从"调用方可控"变成"用户点一下就爆"。
+      //
+      // 需要"从所有夹移出"的调用方（UI 已经这么做）应显式传
+      // [removeFolderIds]——归属信息由调用方按自己的预算扫描后决定。
+      // 只收藏进默认夹是绝大多数情况，因此这个兜底语义是安全的。
+      final defaultId = _defaultFolderId(await _requireFolders(session));
+      if (favorite) {
+        addIds = [defaultId];
+      } else {
+        delIds = [defaultId];
+      }
+    } else {
+      addIds = (folderIds == null || folderIds.isEmpty) ? null : folderIds;
+      delIds = (removeFolderIds == null || removeFolderIds.isEmpty)
+          ? null
+          : removeFolderIds;
+    }
+
+    if (addIds == null && delIds == null) {
+      // 两侧都没给夹：一次请求都不该发（发了等于误操作默认夹）。
+      return const InteractionResult(
+        accepted: true,
+        message: '没有需要变更的收藏夹。',
+      );
+    }
+
+    // 实测 add_media_ids 与 del_media_ids **互斥**，同一次请求只能生效一侧。
+    // 因此"同时加 A 夹、移出 B 夹"必须拆成两次 POST，先加后删：
+    // 先删后加会在加失败时把视频彻底移出收藏，反过来最坏只是没移出。
+    final steps = <List<String>>[
+      if (addIds != null) ['add', addIds.join(',')],
+      if (delIds != null) ['del', delIds.join(',')],
+    ];
+
+    var allAccepted = true;
+    String? message;
+    Object? upstreamCode;
+    for (final step in steps) {
+      final isAdd = step[0] == 'add';
+      final json = await _postAuthed(
+        '/x/v3/fav/resource/deal',
+        body: {
+          'rid': '$resolvedAid',
+          'type': '2',
+          'add_media_ids': isAdd ? step[1] : '',
+          'del_media_ids': isAdd ? '' : step[1],
+          'csrf': _csrfFrom(session),
+        },
+        session: session,
+        endpoint: '/x/v3/fav/resource/deal',
+      );
+      final code = json['code'];
+      final ok = code == 0;
+      if (!ok) allAccepted = false;
+      // 失败的那一步优先保留其平台消息与码，便于排查
+      message = _favDealMessage(json, accepted: ok) ?? message;
+      upstreamCode = code;
+    }
+
+    return InteractionResult(
+      accepted: allAccepted,
+      message: message,
+      upstreamCode: upstreamCode,
+    );
+  }
+
+  /// 把 `fav/resource/deal` 的响应翻成一句可展示的原因。
+  ///
+  /// `code == 0` 但 `success_num == 0` 时明确说"平台未确认生效"：
+  /// 实测 `success_num` **恒为 0**，所以这句话本身也不能当成"失败"的结论，
+  /// 它的作用是把"平台只回了个 OK、没给任何生效证据"这件事如实说出来，
+  /// 让 UI 有依据去提示用户复查（而不是假装成功或假装失败）。
+  String? _favDealMessage(Map<String, Object?> json, {required bool accepted}) {
+    final raw = _nullableString(json['message']);
+    if (!accepted) return raw;
+
+    final data = json['data'];
+    if (data is! Map) return raw;
+    final successNum = _toInt(data['success_num']);
+    final prompt = data['prompt'];
+
+    final parts = <String>[
+      ?raw,
+      if (successNum == 0) '平台未确认生效（success_num=0），请复查收藏夹',
+      if (prompt == true) '平台返回了提示位',
+    ];
+    return parts.isEmpty ? null : parts.join('；');
+  }
+
+  /// 拉收藏夹列表，并在账号确实一个夹都没有时如实报错。
+  ///
+  /// 不静默返回空——那会让"收藏失败"伪装成"收藏成功"。
+  Future<List<FavoriteFolder>> _requireFolders(
+    PlatformSession session,
+  ) async {
+    final folders = await fetchFavoriteFolders(session: session);
+    if (folders.isEmpty) {
       throw FusionException(
         code: FusionErrorCode.permissionDenied,
-        userMessage: '你还没有创建收藏夹，请先在 B 站创建后再试。',
-        technicalMessage: 'No created fav folder for mid=${session.userId}',
+        userMessage: '你还没有收藏夹，请先在 B 站创建一个。',
+        technicalMessage: 'no fav folder for mid=${session.userId}',
         platformId: id,
       );
     }
+    return folders;
+  }
 
-    final first = Map<String, Object?>.from(folders.first as Map);
-    final mediaId = (first['id'] as num?)?.toInt();
-    if (mediaId == null) {
-      throw FusionException(
-        code: FusionErrorCode.upstreamError,
-        userMessage: '无法读取收藏夹 ID。',
-        technicalMessage: 'fav folder has no id',
-        platformId: id,
-      );
-    }
+  /// 取账号的默认收藏夹 ID。
+  ///
+  /// **按名称识别**（B 站默认夹固定叫「默认收藏夹」），
+  /// 不按数组下标 0、也不按 ID 硬编码——不同账号的默认夹 ID 不同。
+  /// 名称没匹配上时退回第一个夹（至少是用户自己的夹，收藏不会失败）。
+  int _defaultFolderId(List<FavoriteFolder> folders) {
+    final defaultFolder =
+        folders.firstWhere((f) => f.isDefault, orElse: () => folders.first);
+    return defaultFolder.id;
+  }
 
-    final json = await _postAuthed(
-      '/x/v3/fav/resource/deal',
-      body: {
-        'rid': '$resolvedAid',
-        'type': '2',
-        // add_media_ids 为空、del_media_ids 有值即为取消收藏
-        'add_media_ids': favorite ? '$mediaId' : '',
-        'del_media_ids': favorite ? '' : '$mediaId',
-        'csrf': _csrfFrom(session),
-      },
+  // ── 硬币余额 / 稍后再看 / 关注 ──────────────────────────────
+
+  @override
+  bool get supportsCoinBalance => true;
+
+  @override
+  bool get supportsWatchLater => true;
+
+  @override
+  bool get supportsFollowAuthor => true;
+
+  @override
+  bool get supportsSavedContent => true;
+
+  /// 拉取某个收藏夹里的内容。
+  ///
+  /// 实测：`GET /x/v3/fav/resource/list?media_id=&pn=&ps=&platform=web`
+  /// → `data.medias[]`（字段 `id/type/title/cover/page/duration/
+  /// upper{mid,name,face}/link/bvid/ctime/pubtime/fav_time/cnt_info`），
+  /// 总数在 `data.info.totals`。
+  ///
+  /// # 只收视频
+  ///
+  /// `type` 是 B 站的资源类型码（**2 = 视频**；其余是合集/音频/专栏等）。
+  /// 非视频条目**直接跳过**并在 [SavedVideoPage.notes] 里计数——
+  /// 把它们伪装成 UnifiedVideo 会让点进去必然播放失败，
+  /// 属于"把不知道的东西填成有"，违反全局的"不凭空生成"约束。
+  @override
+  Future<SavedVideoPage> fetchFavoriteFolderVideos(
+    int mediaId, {
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) async {
+    final pn = page < 1 ? 1 : page;
+    // 上限 20：实测 ps>20 时平台返回**空数组**而不是截断到 20，
+    // 一旦放到 100 就会"每页都空"，列表看起来像收藏夹是空的。
+    final ps = pageSize.clamp(1, 20);
+    final json = await _getAuthed(
+      '/x/v3/fav/resource/list'
+      '?media_id=$mediaId&pn=$pn&ps=$ps&platform=web',
       session: session,
-      endpoint: '/x/v3/fav/resource/deal',
+    );
+    _assertApiOk(
+      json,
+      endpoint: '/x/v3/fav/resource/list',
+      badRequestCode: FusionErrorCode.loginRequired,
+      badRequestMessage: '登录状态无效，请重新登录后再试。',
+    );
+
+    final data = json['data'];
+    if (data is! Map) {
+      return const SavedVideoPage(items: [], hasMore: false, total: 0);
+    }
+    final d = Map<String, Object?>.from(data);
+    final medias = d['medias'];
+    final apiHasMore = d['has_more'] is bool ? d['has_more'] as bool : null;
+    final info = d['info'] is Map
+        ? Map<String, Object?>.from(d['info'] as Map)
+        : const <String, Object?>{};
+    final total = _toInt(info['totals']) ?? 0;
+
+    return _buildSavedPage(
+      rawItems: medias is List ? medias : const [],
+      total: total,
+      page: pn,
+      pageSize: ps,
+      endpoint: '/x/v3/fav/resource/list',
+      mapper: _favMediaToVideo,
+      hasMoreFromApi: apiHasMore,
+    );
+  }
+
+  /// 拉取"稍后再看"列表。
+  ///
+  /// 实测（2026-10-19）：`GET /x/v2/history/toview/web?platform=web&pn=&ps=`
+  /// → `data.count`（总数）/ `data.list[]`，条目字段是
+  /// `aid/bvid/title/pic/duration/owner{mid,name,face}/pubdate/stat`
+  /// ——与收藏夹的 `medias` **不同构**（封面叫 `pic`、作者叫 `owner`、
+  /// 且没有 `type` 字段，因为这里只有视频），所以单独一个映射函数。
+  @override
+  Future<SavedVideoPage> fetchWatchLaterVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+  }) async {
+    final pn = page < 1 ? 1 : page;
+    // 上限 20：实测 ps>20 时平台返回**空数组**而不是截断到 20，
+    // 一旦放到 100 就会"每页都空"，列表看起来像收藏夹是空的。
+    final ps = pageSize.clamp(1, 20);
+    final json = await _getAuthed(
+      '/x/v2/history/toview/web?platform=web&pn=$pn&ps=$ps',
+      session: session,
+    );
+
+    final data = json['data'];
+    if (data is! Map) {
+      return const SavedVideoPage(
+        items: [],
+        hasMore: false,
+        total: 0,
+        upstreamEndpoint: '/x/v2/history/toview/web',
+      );
+    }
+    final d = Map<String, Object?>.from(data);
+    final list = d['list'];
+
+    return _buildSavedPage(
+      rawItems: list is List ? list : const [],
+      total: _toInt(d['count']) ?? 0,
+      page: pn,
+      pageSize: ps,
+      endpoint: '/x/v2/history/toview/web',
+      mapper: _toviewItemToVideo,
+    );
+  }
+
+  /// 已保存内容分页的统一装配（把两类条目源归一到 [SavedVideoPage]）。
+  ///
+  /// # hasMore 以平台的 `has_more` 为准，不用总数算
+  ///
+  /// B 站的 `info.totals` / `media_count` 在夹内存在**已失效条目**时与
+  /// 实际可翻页条数不一致（被删的视频仍计入总数但列表不返回），
+  /// 靠"总数 − 已加载"估算边界会漏页或多翻一页空页。所以优先采信
+  /// [hasMoreFromApi]；仅当平台没给该字段（null）时才退回估算，
+  /// 并在 notes 里写明这是估算值。
+  ///
+  /// 终止条件用「**原始页为空**」而不是「过滤后的 items 为空」：
+  /// 一页全是非视频条目（type != 2）时 items 会是空数组，
+  /// 若据此判定到底，用户往下翻就永远看不到后面的视频了。
+  SavedVideoPage _buildSavedPage({
+    required List<Object?> rawItems,
+    required int total,
+    required int page,
+    required int pageSize,
+    required String endpoint,
+    required UnifiedVideo? Function(Map<String, Object?> raw) mapper,
+    bool? hasMoreFromApi,
+  }) {
+    final items = <UnifiedVideo>[];
+    var skipped = 0;
+    for (final raw in rawItems) {
+      if (raw is! Map) continue;
+      final video = mapper(Map<String, Object?>.from(raw));
+      if (video == null) {
+        skipped++;
+        continue;
+      }
+      items.add(video);
+    }
+
+    final notes = <String>[
+      if (skipped > 0) '本页跳过 $skipped 条非视频或无 BV 号的条目。',
+    ];
+
+    // 平台明确说没有下一页 → 就是没有；平台没说 → 用总数估算并标注。
+    var hasMore = hasMoreFromApi ?? (total > 0 && page * pageSize < total);
+    if (rawItems.isEmpty) hasMore = false;
+    if (hasMoreFromApi == null && total > 0) {
+      notes.add('平台未返回 has_more，是否还有下一页按总数估算，可能有偏差。');
+    }
+
+    return SavedVideoPage(
+      items: items,
+      hasMore: hasMore,
+      total: total,
+      adapterId: id,
+      upstreamEndpoint: endpoint,
+      notes: notes,
+    );
+  }
+
+  /// 收藏夹条目（`/x/v3/fav/resource/list` 的 medias[i]）→ 统一视频。
+  UnifiedVideo? _favMediaToVideo(Map<String, Object?> m) {
+    // type=2 才是视频；其它类型一律不伪装成视频（见调用处注释）。
+    final type = _toInt(m['type']);
+    if (type != null && type != 2) return null;
+
+    final bvid = _nullableString(m['bvid']);
+    if (bvid == null) return null;
+
+    final upper = m['upper'] is Map
+        ? Map<String, Object?>.from(m['upper'] as Map)
+        : const <String, Object?>{};
+    final cnt = m['cnt_info'] is Map
+        ? Map<String, Object?>.from(m['cnt_info'] as Map)
+        : const <String, Object?>{};
+    final mid = _nullableString(upper['mid']);
+    final link = _nullableString(m['link']);
+
+    // 不对失效条目做任何推断：平台在视频被删/UP 主拉黑时仍会把条目
+    // 列出来（title 变占位串、type 可能非 2）。这里只搬接口明确给的字段，
+    // 能否播放由点进去时的播放策略决定，列表阶段不下结论。
+    return UnifiedVideo(
+      id: makeVideoId(id, bvid),
+      platformId: id,
+      platformVideoId: bvid,
+      // 原始链接用接口给的 link；没有就退回规范链接，不编造第三方域名
+      originalUrl: link ?? 'https://www.bilibili.com/video/$bvid',
+      canonicalUrl: 'https://www.bilibili.com/video/$bvid',
+      title: _stringOr(m['title'], '未命名视频'),
+      author: VideoAuthor(
+        name: _nullableString(upper['name']),
+        platformAuthorId: mid,
+        profileUrl: mid != null ? 'https://space.bilibili.com/$mid' : null,
+        avatarUrl: _nullableString(upper['face']),
+      ),
+      coverUrl: _normalizeCoverUrl(_nullableString(m['cover'])),
+      durationSeconds: _toDouble(m['duration']),
+      publishedAt: _epochToIso(m['pubtime']),
+      fetchedAt: DateTime.now().toUtc().toIso8601String(),
+      stats: VideoStats(
+        // cnt_info 里 play/like 可能是数字也可能是 "1.2万" 这类文本，
+        // 两者都兼容；拿不到就留 null。
+        viewCount: _parseCountText(cnt['play']),
+        likeCount: _parseCountText(cnt['like']),
+        danmakuCount: _parseCountText(cnt['danmaku']),
+      ),
+      // 收藏夹列表本身不声明可播性；交给现有播放策略在点开时解析，
+      // 这里给 unknown，避免"列表看着能播、点开失败"。
+      availability: VideoAvailability.unknown,
+      playbackModes: const [PlaybackMode.native, PlaybackMode.external],
+      requiresAuth: false,
+      diagnostics: VideoDiagnostics(
+        adapterId: id,
+        upstreamEndpoint: '/x/v3/fav/resource/list',
+        fromCache: false,
+        fetchDurationMs: 0,
+        limitations: const ['收藏夹列表不含宽高信息，播放时由播放策略解析。'],
+      ),
+    );
+  }
+
+  /// 稍后再看条目（`/x/v2/history/toview/web` 的 data.list[i]）→ 统一视频。
+  UnifiedVideo? _toviewItemToVideo(Map<String, Object?> m) {
+    final bvid = _nullableString(m['bvid']);
+    if (bvid == null) return null;
+
+    final owner = m['owner'] is Map
+        ? Map<String, Object?>.from(m['owner'] as Map)
+        : const <String, Object?>{};
+    final stat = m['stat'] is Map
+        ? Map<String, Object?>.from(m['stat'] as Map)
+        : const <String, Object?>{};
+    final mid = _nullableString(owner['mid']);
+
+    // 稍后再看条目天然带 aid，回填缓存后收藏/评论路径省掉一次 view 请求。
+    _rememberAid(bvid, m['aid']);
+
+    return UnifiedVideo(
+      id: makeVideoId(id, bvid),
+      platformId: id,
+      platformVideoId: bvid,
+      originalUrl: 'https://www.bilibili.com/video/$bvid',
+      canonicalUrl: 'https://www.bilibili.com/video/$bvid',
+      title: _stringOr(m['title'], '未命名视频'),
+      author: VideoAuthor(
+        name: _nullableString(owner['name']),
+        platformAuthorId: mid,
+        profileUrl: mid != null ? 'https://space.bilibili.com/$mid' : null,
+        avatarUrl: _nullableString(owner['face']),
+      ),
+      coverUrl: _normalizeCoverUrl(_nullableString(m['pic'])),
+      durationSeconds: _toDouble(m['duration']),
+      publishedAt: _epochToIso(m['pubdate']),
+      fetchedAt: DateTime.now().toUtc().toIso8601String(),
+      stats: VideoStats(
+        viewCount: _toInt(stat['views']),
+        likeCount: _toInt(stat['likes']),
+        danmakuCount: _toInt(stat['danmaku']),
+      ),
+      availability: VideoAvailability.unknown,
+      playbackModes: const [PlaybackMode.native, PlaybackMode.external],
+      requiresAuth: false,
+      diagnostics: VideoDiagnostics(
+        adapterId: id,
+        upstreamEndpoint: '/x/v2/history/toview/web',
+        fromCache: false,
+        fetchDurationMs: 0,
+        limitations: const ['稍后再看列表不含宽高信息，播放时由播放策略解析。'],
+      ),
+    );
+  }
+
+  /// 读取当前账号的可用硬币余额。
+  ///
+  /// 实测（2026-10-19）：`GET /x/member/web/exp/reward` →
+  /// `data.coins`。**类型不固定**：同一字段在不同账号/时点出现过
+  /// JSON 整数 `0` 与浮点 `0.0` 两种写法，所以不能 `(v as int)`，
+  /// 一律走 [_toInt]（它把任意 num 折成 int），并保留 null 语义。
+  ///
+  /// 同一响应里还有 `tags.enable_payment_qrcode`：它和余额**共同**决定
+  /// 能否投币（见 [setCoin] 的双重前置校验），所以这里把它缓存到
+  /// [_lastCoinsUsable]，供投币路径使用——余额接口本身不返回"能不能投"，
+  /// 只看余额会把"标志关闭"误判成"有钱就能投"。
+  ///
+  /// 未登录：平台返回 `-101`，映射为 loginRequired（见 [_getAuthed]）。
+  /// 返回 null 只在平台**没有** coins 键时发生——不当 0 用，
+  /// "不知道"和"没有币"必须可区分。
+  @override
+  Future<int?> fetchCoinBalance({required PlatformSession session}) async {
+    final json = await _getAuthed(
+      '/x/member/web/exp/reward',
+      session: session,
+    );
+    final data = json['data'];
+    if (data is! Map) return null;
+    final d = Map<String, Object?>.from(data);
+
+    // "平台是否允许用币"标志。
+    //
+    // 必须**显式判类型**：`tags` 存在但 `enable_payment_qrcode` 键缺失时，
+    // 宽松取整会拿到 null，而 `null != 0` 为 true → 错误判定"可以投币"，
+    // 于是放行一次注定被 116 拒绝的请求。
+    // 规则：tags 存在时按键的实际数值判定，**拿不到该键就按 false**
+    // （不鼓励投币）；连 tags 都没有时保持 null（不知道），
+    // 不做任何猜测，也**不沿用上一次的值**——陈旧缓存会把上个账号/
+    // 上个时点的结论带到这次投币上。
+    final tags = d['tags'];
+    if (tags is Map) {
+      final enable = tags['enable_payment_qrcode'];
+      _lastCoinsUsable = enable is num && enable.toInt() != 0;
+    } else {
+      _lastCoinsUsable = null;
+    }
+
+    return _toInt(d['coins']);
+  }
+
+  /// 最近一次余额查询里平台声明的"允许用币"标志。
+  ///
+  /// 三态：
+  ///  - `true`  —— 平台明确说允许（`enable_payment_qrcode != 0`）；
+  ///  - `false` —— 平台明确说不允许，**或** tags 存在但那个键缺失
+  ///    （实测平台确有"tags 在、键不在"的响应，此时按不允许处理，
+  ///    宁可少发一次请求，也不要给用户一个必然失败的按钮）；
+  ///  - `null`  —— 还没查过余额（连 tags 都没有的响应也算未知）。
+  ///
+  /// 投币前置检查用它 + 余额**两个**条件，因为实测两者会不一致
+  /// （标志为 1 但余额 0 → `-104`）。
+  bool? _lastCoinsUsable;
+
+  /// 该视频是否已在"稍后再看"里。
+  ///
+  /// 实测（2026-10-19）：
+  ///  - `GET /x/v2/history/toview/web?platform=web` → `code=0`，
+  ///    `data.count` / `data.list[]`（本测试号 count=0）。
+  ///  - **候选的 aid 直查端点不存在**：
+  ///    `GET /x/v2/history/toview/aid?aid=<aid>` 带不带 `platform=web`
+  ///    都返回 **HTTP 404**（两次独立实测均如此，响应体是 HTML 错误页）。
+  ///    因此无法"一个请求查清"，只能读列表比对——这里不假装存在该端点。
+  ///
+  /// # 为什么 ps 用 20 而不是 100（这是个真坑）
+  ///
+  /// 同一族的 `fav/resource/list` 实测：**ps>20 时返回空数组**
+  /// （ps=100/200 各请求一次，`medias` 长度都是 0；ps=20 正常给 20 条）。
+  /// 如果这里为了"一次取满 100 条"写 `ps=100`，很可能拿到空列表，
+  /// 于是 `fetchWatchLater` **永远返回 false** —— 表现是
+  /// "明明在稍后再看里，按钮却不亮"，而且不报任何错。
+  ///
+  /// 所以按 ps=20 有限翻页：既不踩空，也不无限翻。
+  /// 上限 [_watchLaterMaxPages] 页；翻到 count 或空页即停。
+  /// 若平台上调上限导致超出此范围，结果是"未在已核对范围内找到"，
+  /// 按 false 返回——漏判的后果是按钮不亮，用户重点一次即恢复
+  /// （add 幂等），不会破坏数据。
+  @override
+  Future<bool> fetchWatchLater({
+    required String platformVideoId,
+    required PlatformSession session,
+  }) async {
+    // 列表项同时给 aid 与 bvid，这里用 bvid 比对：
+    // 不需要 aid，也就省掉一次 view 解析（BV↔aid 有短/长两种形态的
+    // 历史问题，比对一律优先用 bvid 更稳）。
+    var seen = 0;
+    for (var pn = 1; pn <= _watchLaterMaxPages; pn++) {
+      final json = await _getAuthed(
+        '/x/v2/history/toview/web?platform=web&pn=$pn&ps=$_watchLaterPageSize',
+        session: session,
+      );
+      final data = json['data'];
+      if (data is! Map) return false;
+      final d = Map<String, Object?>.from(data);
+
+      final list = d['list'];
+      if (list is! List || list.isEmpty) return false;
+
+      for (final raw in list) {
+        if (raw is! Map) continue;
+        final m = Map<String, Object?>.from(raw);
+        final bv = _nullableString(m['bvid']) ?? _nullableString(m['bv_id']);
+        if (bv == platformVideoId) return true;
+        // 顺手回填 aid 缓存：条目带 aid，之后收藏/评论路径省一次 view
+        _rememberAid(platformVideoId, m['aid']);
+      }
+      seen += list.length;
+
+      final total = _toInt(d['count']);
+      if (total != null && seen >= total) return false;
+    }
+    return false;
+  }
+
+  /// 稍后再看读取的页大小与翻页上限。
+  ///
+  /// ps 固定 20：实测 ps>20 会让同族接口返回空数组（见
+  /// [fetchWatchLater]）。上限 5 页 = 最多核对 100 条，
+  /// 与平台"稍后再看最多 100 条"的口径一致。
+  static const int _watchLaterPageSize = 20;
+  static const int _watchLaterMaxPages = 5;
+
+  /// 加入 / 移出"稍后再看"。
+  ///
+  /// 实测（2026-10-19，可逆写回环）：
+  ///  - `POST /x/v2/history/toview/add`  参数 `aid` + `csrf` → `code=0 OK`
+  ///  - `POST /x/v2/history/toview/del`  参数 **`aid`（单数）** + `csrf` → `code=0 OK`
+  ///  - 同端点用 `aids=<JSON 数组>` 会返回 **`code=-400 请求错误`**（实测），
+  ///    Web 端界面上看到的"批量删除"是另一个形态；这里按实测可用的
+  ///    单数 `aid` 实现，**不要改回 aids=JSON**。
+  ///
+  /// # 写入后的读一致性
+  ///
+  /// 实测 add 成功（code=0）后立刻读 `toview/web`，`count` 会在约 1–2 秒内
+  /// 反映变化，但**不保证即时**（同一轮里出现过 add 返回 0 而列表仍为空）。
+  /// 因此本方法只声明"平台已接受"（`accepted`），
+  /// 调用方若需如实回显，应重查 [fetchWatchLater]，不要在同一次点击里
+  /// add 完马上读并据此判定失败。
+  @override
+  Future<InteractionResult> setWatchLater({
+    required String platformVideoId,
+    required bool add,
+    required PlatformSession session,
+  }) async {
+    final aid = await _resolveAid(platformVideoId);
+    if (aid == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '无法解析该视频的 aid，暂时无法操作稍后再看。',
+        technicalMessage: 'Cannot resolve aid for $platformVideoId',
+        platformId: id,
+      );
+    }
+
+    final endpoint = add ? '/x/v2/history/toview/add' : '/x/v2/history/toview/del';
+    final json = await _postAuthed(
+      endpoint,
+      body: {'aid': '$aid', 'platform': 'web', 'csrf': _csrfFrom(session)},
+      session: session,
+      endpoint: endpoint,
     );
 
     return InteractionResult(
@@ -2381,6 +3761,99 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
       message: _nullableString(json['message']),
       upstreamCode: json['code'],
     );
+  }
+
+  /// 关注 / 取关 UP 主。
+  ///
+  /// 实测（2026-10-19）：`POST /x/relation/modify`
+  ///  - `fid` = UP 主 mid
+  ///  - `act` = **1 关注 / 2 取关**（B 站这套码还有 3=拉黑、4=取消拉黑、5=屏蔽，
+  ///    本方法只用 1/2，其余语义不对 UI 暴露）
+  ///  - `re_sub` = 0（特别关注开关，固定 0）
+  ///  - `csrf` 必带，否则 -111
+  ///
+  /// # 成败判定：code==0 还不够
+  ///
+  /// 这类写接口在风控/参数异常时会返回**空 body 或 data=null**，
+  /// 而 code 仍可能是 0。只看 code 就会产生"假成功"：UI 提示已关注，
+  /// 重新拉状态又变回未关注，用户看到的是"点了没反应"。
+  /// 因此这里要求 `code == 0` **且** `data` 非 null 才算 accepted。
+  /// （[_postAuthed] 只在 2xx 时返回，所以 HTTP 状态这一层已经由它把关；
+  ///  非 2xx 会抛 [FusionException]，不会走到这里被当成成功。）
+  ///
+  /// 关注**状态**不在这里读：`archive/relation` 的 `data.attention`
+  /// 已随互动状态一并返回（见 [fetchInteractionState]）。
+  /// 另有权威读法 `GET /x/relation?fid=&ptype=1` 的 `attribute`
+  /// （实测存在，0 = 未关注；平台另有 2 = 已关注等取值），
+  /// 但那是多一个请求，按钮态不需要它。
+  @override
+  Future<InteractionResult> setFollowAuthor({
+    required String targetMid,
+    required bool follow,
+    required PlatformSession session,
+  }) async {
+    final mid = _toInt(targetMid);
+    if (mid == null || mid <= 0) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '无法识别该作者，暂时无法关注。',
+        technicalMessage: 'invalid targetMid="$targetMid"',
+        platformId: id,
+      );
+    }
+
+    final json = await _postAuthed(
+      '/x/relation/modify',
+      body: {
+        'fid': '$mid',
+        'act': follow ? '1' : '2',
+        're_sub': '0',
+        'csrf': _csrfFrom(session),
+      },
+      session: session,
+      endpoint: '/x/relation/modify',
+    );
+
+    final code = json['code'];
+    final data = json['data'];
+    final accepted = code == 0 && data != null;
+
+    return InteractionResult(
+      accepted: accepted,
+      message: accepted
+          ? _nullableString(json['message'])
+          : (code == 0
+              ? '平台返回成功但未给出结果（data 为空），关注状态未确认。'
+              : _nullableString(json['message'])),
+      upstreamCode: code,
+    );
+  }
+
+  /// 带登录态的 GET，把平台的登录错误统一映射为 loginRequired。
+  ///
+  /// 与 [_postAuthed] 同一套码映射：只读接口不会遇到 -111（csrf），
+  /// 但 -101 / -400 的处理必须一致，否则"登录失效"在不同入口表现不同。
+  Future<Map<String, Object?>> _getAuthed(
+    String path, {
+    required PlatformSession session,
+  }) async {
+    final result = await _http.get(
+      '$_apiBase$path',
+      headers: {'Referer': _referer, 'Cookie': session.cookieHeader},
+      platformId: id,
+    );
+    final json = result.jsonObject(platformId: id);
+    final code = json['code'];
+    if (code == -101) {
+      throw FusionException(
+        code: FusionErrorCode.loginRequired,
+        userMessage: '登录状态已失效，请重新登录后再操作。',
+        technicalMessage: '$path returned -101 (not logged in)',
+        upstreamCode: code,
+        platformId: id,
+      );
+    }
+    return json;
   }
 
   /// 带登录态的 POST，并把平台的登录错误统一映射为 loginRequired。
@@ -2446,12 +3919,24 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
   String _csrfFrom(PlatformSession session) =>
       session.cookies['bili_jct'] ?? '';
 
-  /// 解析视频的 aid（评论与收藏接口需要数字 aid）。
+  /// 解析视频的 aid（评论与收藏写入接口需要数字 aid）。
+  ///
+  /// 结果按 bvid 缓存，见 [_aidCache]：BV↔aid 一成不变，
+  /// 而评论分页与收藏写入会在同一次浏览里反复用到同一个 aid。
+  ///
+  /// 返回 null 表示解析失败（网络或风控）；**不缓存失败**，
+  /// 否则一次抖动会让该视频在整个会话内再也拿不到 aid。
   Future<int?> _resolveAid(String platformVideoId) async {
-    // BV 号 → aid 需要请求 view 接口
+    final cached = _aidCache[platformVideoId];
+    if (cached != null) return cached;
+
+    // BV 号 → aid 需要请求 view 接口。
+    // 用 `_videoIdQuery` 而不是硬拼 `bvid=`：从 av 号链接进来的
+    // platformVideoId 是 `av123` 形式，硬拼 bvid 会 404 → 收藏/评论
+    // 全部失败。
     try {
       final result = await _http.get(
-        '$_apiBase/x/web-interface/view?bvid=$platformVideoId',
+        '$_apiBase/x/web-interface/view?${_videoIdQuery(platformVideoId)}',
         headers: const {'Referer': _referer},
         platformId: id,
       );
@@ -2459,9 +3944,59 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
       if (json['code'] != 0) return null;
       final data = json['data'];
       if (data is! Map) return null;
-      return (data['aid'] as num?)?.toInt();
+      final aid = _toInt(data['aid']);
+      if (aid != null) _aidCache[platformVideoId] = aid;
+      return aid;
     } catch (_) {
       return null;
+    }
+  }
+
+  /// 用 view 接口返回的 aid 回填缓存（供已自行请求过 view 的路径复用）。
+  void _rememberAid(String platformVideoId, Object? aid) {
+    final parsed = _toInt(aid);
+    if (parsed != null) _aidCache[platformVideoId] = parsed;
+  }
+
+  /// 把 `platformVideoId` 归一成 BV 号。
+  ///
+  /// # 为什么需要它
+  ///
+  /// `extract()` 对 `/video/av123`、`?aid=123`、纯数字这几种输入会返回
+  /// **`av123` 形式**的 id（见 `_parseVideoId`）。而互动链路上有两类
+  /// 接口对 id 形式很敏感：
+  ///  - 收藏夹归属比对、稍后再看比对：平台列表里给的是 **bvid**，
+  ///    拿 `av123` 去比永远不命中 → 面板回显"未收藏"、复查判"未生效"；
+  ///  - `archive/like` / `coin/add` 的 `bvid` 参数：传 `av123` 直接报错。
+  ///
+  /// 所以凡是**必须用 bvid** 的地方，先过这个方法。BV↔aid 一一对应
+  /// 且永不变更，可安全缓存。
+  ///
+  /// 解析失败时**原样返回**（保持旧行为），由调用方按接口报错如实上报，
+  /// 不在这里静默改成别的 id。
+  Future<String> _resolveBvid(String platformVideoId) async {
+    if (platformVideoId.startsWith('BV')) return platformVideoId;
+    final cached = _bvidCache[platformVideoId];
+    if (cached != null) return cached;
+    try {
+      final result = await _http.get(
+        '$_apiBase/x/web-interface/view?${_videoIdQuery(platformVideoId)}',
+        headers: const {'Referer': _referer},
+        platformId: id,
+      );
+      final json = result.jsonObject(platformId: id);
+      if (json['code'] != 0) return platformVideoId;
+      final data = json['data'];
+      if (data is! Map) return platformVideoId;
+      final bv = _nullableString(data['bvid']);
+      if (bv == null || bv.isEmpty) return platformVideoId;
+      _bvidCache[platformVideoId] = bv;
+      // 同一次响应里顺带回填 aid，省掉后续一次 view
+      _rememberAid(bv, data['aid']);
+      _rememberAid(platformVideoId, data['aid']);
+      return bv;
+    } catch (_) {
+      return platformVideoId;
     }
   }
 
@@ -2493,4 +4028,72 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
         127 => '8K 超高清',
         _ => '未知清晰度',
       };
+}
+
+/// 单个收藏夹的核对结果。
+///
+/// 这四态必须分开：**"没找到"与"没核对完"是两件不同的事**。
+/// 把它们混成一个布尔，UI 就会把"还没翻到"显示成"用户没收藏进这个夹"。
+enum _FolderScanOutcome {
+  /// 命中：该夹包含该视频。
+  hit,
+
+  /// 翻到列表末尾仍未命中 → **确认不包含**。
+  notFound,
+
+  /// 请求失败、或页翻到上限仍未命中 → **不知道**（不计入已核对）。
+  skipped,
+
+  /// 被平台限流打断 → 停止整个扫描。
+  rateLimitedStop,
+}
+
+/// 一次扫描的请求预算。
+///
+/// 随扫描传递的独立对象，**不是**适配器字段：扫描可能同时进行两次
+/// （用户在列表里连开两个详情页），共享字段会让两次扫描互扣预算，
+/// 结果各自只核对到一半。
+///
+/// 计数按**真实发出的请求数**（含 http_client 内部自动重试），
+/// 不是按调用次数——否则一次"带 2 次内部重试"的调用会偷偷打 3 个请求，
+/// 节流反而放大限流。
+class _ScanBudget {
+  _ScanBudget(this.limit);
+
+  /// 允许的真实请求总数上限。
+  final int limit;
+
+  /// 已用量。
+  int used = 0;
+
+  /// 本次扫描是否撞到过限流。
+  bool rateLimited = false;
+
+  /// 是否还有余量发起下一个请求。
+  bool get hasRoom => used < limit;
+
+  /// 记账 n 个请求（可以超过上限：一次调用内部的重试也必须算进来，
+  /// 低估用量等于把成本藏起来）。
+  void consume([int n = 1]) => used += n;
+}
+
+/// 扫描内部一次 GET 的结果状态。
+enum _ScanGetStatus { ok, rateLimited, budgetExhausted }
+
+/// 扫描内部一次 GET 的返回值。
+///
+/// 用带状态的结构而不是 `Map?`：null 同时可能表示"预算用尽"和
+/// "被限流"，调用方无法区分，就会把一种情况提示成另一种
+/// （"该歇会儿再核对" vs "今天核对不完"）。
+class _ScanGetResult {
+  const _ScanGetResult.ok(this.json) : status = _ScanGetStatus.ok;
+  const _ScanGetResult.rateLimited()
+      : json = null,
+        status = _ScanGetStatus.rateLimited;
+  const _ScanGetResult.budgetExhausted()
+      : json = null,
+        status = _ScanGetStatus.budgetExhausted;
+
+  final Map<String, Object?>? json;
+  final _ScanGetStatus status;
 }

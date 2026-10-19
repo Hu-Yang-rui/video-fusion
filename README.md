@@ -42,12 +42,15 @@
 
 ## 界面
 
-三个主页面（接入直播的平台会多一个），Apple HIG 风格：
+四个主页面（接入直播的平台会多一个），Apple HIG 风格：
 
 - **推荐** — 全屏竖滑短视频流，滑到即播
 - **发现** — 长视频网格浏览 + 跨平台搜索
-- **直播** — 直播列表与直播间（仅 B 站，条件显示）
-- **设置** — 多平台账号管理与能力说明
+- **直播** — B 站与抖音直播列表、直播间（条件显示）
+- **我的** — 账号、我的收藏夹、稍后再看、观看历史；**设置**作为次级入口
+
+> 一级导航只放内容消费。收藏夹/历史/稍后再看这类内容型入口放在「我的」，
+> 而不是挤进设置页——用户不会去设置里找自己的收藏。
 
 设计系统位于 `lib/src/design/`：
 - 语义化配色（`label` / `separator` / `fill`，而非 `red1` / `blue2`）
@@ -94,17 +97,26 @@ lib/
 
 ```bash
 flutter pub get
-flutter test --concurrency=1                    # 343 项
+flutter test --concurrency=1                    # 535 项（8 项无凭据时跳过）
 flutter build apk --release --split-per-abi
 ```
 
 > `--concurrency=1` 不是可选项：并行编译时设计系统测试与真实网络测试
 > 偶发 `did not complete`（资源竞争，非真实失败），串行必过。
+>
+> 单测超时在 `dart_test.yaml` 里放宽到 120s：抖音直播 feed 实测空 body 率
+> 约 71%，客户端带 5 次重试，全量套件里会撞默认 30s 上限报
+> `did not complete`（单独跑该文件是稳的）。放宽超时不改变任何断言。
 
-真实网络测试（需要能访问 B站）：
+真实网络测试（需要能访问 B站/抖音）：
 
 ```bash
 flutter test test/interaction_live_test.dart --tags network
+
+# 收藏闭环（真实账号，含可逆写入）
+$env:BILI_COOKIE_FILE = 'D:\vf-local\bili_cookie.txt'   # 仓库外，绝不入库
+$env:VF_ALLOW_WRITE = '1'                               # 不加则只读
+flutter test test/favorite_live_test.dart --tags network
 ```
 
 ---

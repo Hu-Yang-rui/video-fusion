@@ -65,6 +65,48 @@ class FeedRequest {
   int get safePageSize => pageSize.clamp(4, 30);
 }
 
+/// 一页"已保存的内容"（收藏夹内条目 / 稍后再看条目）。
+///
+/// 与 [FeedPage] 分开定义的理由：FeedPage 来自平台的**推荐**接口，
+/// 语义是"平台给你推什么"；这里来自**用户自己的账号数据**，
+/// 语义是"用户存了什么"，因此必须带平台口径的总数 [total]，
+/// 让 UI 如实显示"共 N 条"，而不是拿已加载条数冒充。
+class SavedVideoPage {
+  const SavedVideoPage({
+    required this.items,
+    required this.hasMore,
+    required this.total,
+    this.adapterId = '',
+    this.upstreamEndpoint = '',
+    this.notes = const [],
+  });
+
+  /// 本页条目（已标准化为 [UnifiedVideo]，可直接进播放链路）。
+  final List<UnifiedVideo> items;
+
+  /// 是否还有下一页。
+  ///
+  /// 以平台返回的总数与已加载量为准，**不用**"本页非空"推断——
+  /// 恰好填满的一页最容易被误判成"还有更多"，导致无限翻页。
+  final bool hasMore;
+
+  /// 平台口径的总条数（B 站收藏夹 `data.info.totals` /
+  /// 稍后再看 `data.count`）。平台未给出时为 0，
+  /// UI 应据此**不显示总数**，而不是用 items.length 顶替。
+  final int total;
+
+  /// 提供该页的适配器 id（报告与排查用）。
+  final String adapterId;
+
+  /// 实际使用的上游接口标识（不含凭证）。
+  final String upstreamEndpoint;
+
+  /// 诊断说明（已脱敏）。例如"跳过 N 条非视频条目"。
+  final List<String> notes;
+
+  bool get isEmpty => items.isEmpty;
+}
+
 /// 推荐流来源描述，供 UI 展示"内容来源"切换。
 class FeedSource {
   const FeedSource({
