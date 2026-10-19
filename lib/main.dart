@@ -40,6 +40,8 @@ import 'src/ui/discover/discover_screen.dart';
 import 'src/ui/feed/feed_screen.dart';
 import 'src/ui/interaction/interaction_registry.dart';
 import 'src/ui/live/live_screen.dart';
+import 'src/ui/messages/im_store.dart';
+import 'src/ui/messages/messages_screen.dart';
 import 'src/ui/mobile/feed_controller.dart';
 import 'src/ui/mobile/link_intake_sheet.dart';
 import 'src/core/external_link.dart' show openInBrowser;
@@ -80,6 +82,9 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
   /// 同一视频只有一份控制器，避免两个入口显示不同的点赞/收藏状态。
   late final InteractionRegistry _interactions;
 
+  /// 私信状态仓库（会话列表 / 聊天页共享同一份）。
+  late final ImStore _imStore;
+
   final GlobalKey<AppShellState> _shellKey = GlobalKey<AppShellState>();
 
   /// 应用内 Navigator 的 context。
@@ -104,7 +109,14 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
   void initState() {
     super.initState();
     _buildDependencies();
+    // 私信未读数变化要反映到「我的」页的入口徽标上。
+    // 用同一个 store 通知，避免各页各存一份未读。
+    _imStore.addListener(_onImChanged);
     _bootstrap();
+  }
+
+  void _onImChanged() {
+    if (mounted) setState(() {});
   }
 
   /// 依赖装配。
@@ -128,6 +140,7 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
     _vault = CredentialVault(storage: FlutterSecureStore(), logger: logger);
     _feedController = FeedController(service: _service, logger: logger);
     _interactions = InteractionRegistry(service: _service, vault: _vault);
+    _imStore = ImStore(service: _service, vault: _vault);
     _progressStore = VideoProgressStore(
       storage: SharedPreferencesStore(),
       logger: logger,
@@ -187,7 +200,21 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
   void dispose() {
     _feedController.dispose();
     _interactions.dispose();
+    _imStore.dispose();
     super.dispose();
+  }
+
+  /// 构造消息页。
+  ///
+  /// 返回 null 表示当前没有任何平台支持私信 —— 此时 AppShell 不渲染
+  /// 消息标签，避免"点进去什么都没有"。
+  Widget? _messagesPage() {
+    if (_service.imPlatformIds.isEmpty) return null;
+    return MessagesScreen(
+      store: _imStore,
+      // 未登录时走现有的设置页登录流程（不新造一套登录）
+      onOpenLogin: _openSettings,
+    );
   }
 
   // ── 导航动作 ────────────────────────────────────────────────
@@ -350,6 +377,9 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
         // 直播页：只在平台确实声明 supportsLive 时注入，
         // 否则不出现空页面。
         livePage: _livePage(),
+        // 消息页：只在平台确实支持私信时注入（当前仅 B 站）。
+        // 与直播同理，不支持时不渲染标签，避免点进去空白。
+        messagesPage: _messagesPage(),
         profilePage: ProfileScreen(
           service: _service,
           registry: _registry,
@@ -360,6 +390,9 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
           onResumeVideo: (v, at) => _openDetail(v, resumeAt: at),
           onOpenSettings: _openSettings,
           onOpenLogin: _openSettings,
+          // 消息入口指向底部标签页（同一份 store，未读不会不一致）
+          onOpenMessages: () => _shellKey.currentState?.goToTab(AppTab.messages),
+          unreadCount: _imStore.unreadTotal,
         ),
       ),
     );

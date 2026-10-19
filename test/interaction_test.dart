@@ -1,4 +1,4 @@
-/// 互动功能测试。
+﻿/// 互动功能测试。
 ///
 /// 重点验证**不伪造状态**这一核心约束：
 ///  - 未登录时状态必须是 unknown，不能显示"未点赞"
@@ -22,6 +22,8 @@ import 'package:video_fusion/src/models/interaction.dart';
 import 'package:video_fusion/src/models/playback.dart';
 import 'package:video_fusion/src/models/unified_video.dart';
 
+import 'support/no_im_support.dart';
+
 // ── 测试替身 ──────────────────────────────────────────────────
 
 class MemoryStore implements KeyValueStore {
@@ -41,7 +43,7 @@ class MemoryStore implements KeyValueStore {
 }
 
 /// 可编程的互动适配器。
-class FakeInteractionAdapter implements PlatformAdapter {
+class FakeInteractionAdapter extends PlatformAdapter with NoImSupport {
   FakeInteractionAdapter({
     this.comments = true,
     this.like = true,
@@ -351,6 +353,7 @@ class FakeInteractionAdapter implements PlatformAdapter {
 
   @override
   bool get supportsSavedContent => false;
+
 
   @override
   Future<SavedVideoPage> fetchFavoriteFolderVideos(

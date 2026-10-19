@@ -10,6 +10,7 @@ import '../core/credential_vault.dart';
 import '../core/errors.dart';
 import '../core/http_client.dart';
 import '../models/feed.dart';
+import '../models/im.dart';
 import '../models/interaction.dart';
 import '../models/live.dart';
 import '../models/playback.dart';
@@ -643,6 +644,97 @@ abstract class PlatformAdapter {
 
   /// 拉取直播分区（一级）。
   Future<List<LiveArea>> fetchLiveAreas() async => const [];
+
+  // ── 私信（IM）──────────────────────────────────────────────
+  //
+  // 与互动不同：私信是**账号之间的通信**，不是对某个视频的操作。
+  // 因此不塞进 InteractionState，单独一组。
+  //
+  // 全部按"能力开关 + 默认抛 unsupportedPlatform"给出：
+  // UI 依据 [supportsIm] 决定是否渲染消息入口，
+  // 不支持的平台不会出现一个点进去空白的页面。
+
+  /// 该平台是否支持应用内私信。
+  bool get supportsIm => false;
+
+  /// 拉一页会话。
+  ///
+  /// [endTs] 是上一页最后一条的 `session_ts`，首页传 0。
+  /// 未登录抛 `loginRequired`；不支持抛 `unsupportedPlatform`。
+  Future<ImSessionPage> fetchImSessions({
+    required PlatformSession session,
+    int count = 20,
+    int endTs = 0,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持私信。',
+      technicalMessage: 'Adapter $id does not implement fetchImSessions',
+      platformId: id,
+    );
+  }
+
+  /// 拉一页历史消息。
+  ///
+  /// **服务端按新→旧返回**，调用方负责排序。
+  /// [endSeqno] 是上一页的 `min_seqno`，首页传 0。
+  Future<ImMessagePage> fetchImMessages({
+    required PlatformSession session,
+    required int talkerId,
+    int size = 20,
+    int endSeqno = 0,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持私信。',
+      technicalMessage: 'Adapter $id does not implement fetchImMessages',
+      platformId: id,
+    );
+  }
+
+  /// 发送一条文本消息。
+  ///
+  /// 返回的 [ImSendResult.accepted] 必须由**服务端确认**（code=0 且有 msg_key），
+  /// 不能以"HTTP 200"代替。
+  Future<ImSendResult> sendImMessage({
+    required PlatformSession session,
+    required int talkerId,
+    required String content,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持私信。',
+      technicalMessage: 'Adapter $id does not implement sendImMessage',
+      platformId: id,
+    );
+  }
+
+  /// 拉未读汇总（入口红点）。
+  Future<ImUnread> fetchImUnread({required PlatformSession session}) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持私信。',
+      technicalMessage: 'Adapter $id does not implement fetchImUnread',
+      platformId: id,
+    );
+  }
+
+  /// 批量取私信用户信息（昵称/头像）。
+  Future<Map<int, ImUserInfo>> fetchImUserInfos({
+    required PlatformSession session,
+    required List<int> uids,
+  }) async =>
+      const {};
+
+  /// 把某个会话标记为已读。
+  ///
+  /// 只能在用户真正打开会话、且已拉到最新消息后调用。
+  Future<bool> markImSessionRead({
+    required PlatformSession session,
+    required int talkerId,
+    required int ackSeqno,
+  }) async =>
+      false;
 }
 
 /// 适配器能力声明。用于报告与 UI 如实展示"已实现 / 受限"。

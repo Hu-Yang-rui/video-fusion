@@ -49,6 +49,8 @@ class ProfileScreen extends StatefulWidget {
     this.onOpenSettings,
     this.onOpenLogin,
     this.onResumeVideo,
+    this.onOpenMessages,
+    this.unreadCount = 0,
   });
 
   final VideoService service;
@@ -76,6 +78,16 @@ class ProfileScreen extends StatefulWidget {
 
   /// 从"继续观看"打开：带上续播位置。
   final void Function(UnifiedVideo video, Duration resumeAt)? onResumeVideo;
+
+  /// 打开消息页（底部标签之外的第二个入口）。
+  ///
+  /// 为什么两处都有：底部标签是"主动去看消息"，「我的」页这一行是
+  /// "账号相关入口"，两者习惯都成立。共用同一个 [ImStore]，
+  /// 所以未读数不会两边不一致。
+  final VoidCallback? onOpenMessages;
+
+  /// 未读私信总数（由外层从 [ImStore] 传入，保持单一真相）。
+  final int unreadCount;
 
   @override
   State<ProfileScreen> createState() => _ProfileScreenState();
@@ -221,6 +233,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   showChevron: true,
                   onTap: _openHistory,
                 ),
+                // 消息入口：只在平台确实支持私信时出现（当前仅 B 站），
+                // 不支持时整行不渲染 —— 不放点了没内容的死按钮。
+                if (widget.service.imPlatformIds.isNotEmpty)
+                  AppleListRow(
+                    leadingIcon: Icons.forum_rounded,
+                    leadingColor: c.green,
+                    title: '私信',
+                    subtitle: _hasAnySession
+                        ? (widget.unreadCount > 0
+                            ? '${widget.unreadCount} 条未读'
+                            : '查看会话')
+                        : '登录后查看私信',
+                    trailingText: widget.unreadCount > 0
+                        ? (widget.unreadCount > 99
+                            ? '99+'
+                            : '${widget.unreadCount}')
+                        : null,
+                    showChevron: true,
+                    onTap: widget.onOpenMessages ?? _requireLogin,
+                  ),
               ],
             ),
 

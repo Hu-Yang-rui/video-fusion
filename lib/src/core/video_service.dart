@@ -14,6 +14,7 @@ import '../core/errors.dart';
 import '../core/logger.dart';
 import '../core/playback_policy.dart';
 import '../models/feed.dart';
+import '../models/im.dart';
 import '../models/interaction.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
@@ -226,6 +227,91 @@ class VideoService {
     final adapter = _registry.byId(platformId);
     return adapter?.supportsFolderOwnershipScan ?? false;
   }
+
+  // ── 私信（IM）──────────────────────────────────────────────
+  //
+  // UI 只调这里，不直接碰适配器（与其它能力一致）。
+
+  /// 该平台是否支持应用内私信。
+  bool supportsImFor(String platformId) {
+    final adapter = _registry.byId(platformId);
+    return adapter?.supportsIm ?? false;
+  }
+
+  /// 支持私信的平台 id 列表（消息页据此决定显示哪些平台）。
+  List<String> get imPlatformIds => _registry.adapters
+      .where((a) => a.supportsIm)
+      .map((a) => a.id)
+      .toList(growable: false);
+
+  /// 拉一页会话。
+  Future<ImSessionPage> fetchImSessions(
+    String platformId, {
+    required PlatformSession session,
+    int count = 20,
+    int endTs = 0,
+  }) =>
+      _adapterFor(platformId).fetchImSessions(
+        session: session,
+        count: count,
+        endTs: endTs,
+      );
+
+  /// 拉一页历史消息（服务端新→旧）。
+  Future<ImMessagePage> fetchImMessages(
+    String platformId, {
+    required PlatformSession session,
+    required int talkerId,
+    int size = 20,
+    int endSeqno = 0,
+  }) =>
+      _adapterFor(platformId).fetchImMessages(
+        session: session,
+        talkerId: talkerId,
+        size: size,
+        endSeqno: endSeqno,
+      );
+
+  /// 发送文本消息。
+  Future<ImSendResult> sendImMessage(
+    String platformId, {
+    required PlatformSession session,
+    required int talkerId,
+    required String content,
+  }) =>
+      _adapterFor(platformId).sendImMessage(
+        session: session,
+        talkerId: talkerId,
+        content: content,
+      );
+
+  /// 未读汇总。
+  Future<ImUnread> fetchImUnread(
+    String platformId, {
+    required PlatformSession session,
+  }) =>
+      _adapterFor(platformId).fetchImUnread(session: session);
+
+  /// 批量取用户信息（昵称/头像）。
+  Future<Map<int, ImUserInfo>> fetchImUserInfos(
+    String platformId, {
+    required PlatformSession session,
+    required List<int> uids,
+  }) =>
+      _adapterFor(platformId).fetchImUserInfos(session: session, uids: uids);
+
+  /// 标记会话已读。
+  Future<bool> markImSessionRead(
+    String platformId, {
+    required PlatformSession session,
+    required int talkerId,
+    required int ackSeqno,
+  }) =>
+      _adapterFor(platformId).markImSessionRead(
+        session: session,
+        talkerId: talkerId,
+        ackSeqno: ackSeqno,
+      );
 
   /// 扫描"该视频在哪些收藏夹里"。
   ///

@@ -1,4 +1,4 @@
-/// 播放策略与服务集成测试。
+﻿/// 播放策略与服务集成测试。
 ///
 /// 覆盖需求八「播放测试」中可离线验证的部分，以及关键架构约束：
 ///  - 播放模式依据实际能力选择，不默认所有视频都能应用内播放
@@ -25,10 +25,12 @@ import 'package:video_fusion/src/models/interaction.dart';
 import 'package:video_fusion/src/models/playback.dart';
 import 'package:video_fusion/src/models/unified_video.dart';
 
+import 'support/no_im_support.dart';
+
 // ── 测试替身 ────────────────────────────────────────────────
 
 /// 可编程的假适配器：用于精确控制各平台的行为。
-class StubAdapter implements PlatformAdapter {
+class StubAdapter extends PlatformAdapter with NoImSupport {
   StubAdapter({
     required this.id,
     required this.displayName,
@@ -755,7 +757,7 @@ void main() {
 }
 
 /// 可在运行时切换成功/失败的适配器，用于验证刷新降级路径。
-class _FlakyAdapter implements PlatformAdapter {
+class _FlakyAdapter extends PlatformAdapter with NoImSupport {
   _FlakyAdapter({
     required this.id,
     required this.displayName,

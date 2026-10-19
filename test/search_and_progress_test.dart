@@ -1,4 +1,4 @@
-/// 跨平台搜索与观看进度测试。
+﻿/// 跨平台搜索与观看进度测试。
 ///
 /// 验证：
 ///  - 搜索失败与"没有结果"必须可区分
@@ -22,6 +22,8 @@ import 'package:video_fusion/src/models/interaction.dart';
 import 'package:video_fusion/src/models/playback.dart';
 import 'package:video_fusion/src/models/unified_video.dart';
 
+import 'support/no_im_support.dart';
+
 // ── 测试替身 ──────────────────────────────────────────────────
 
 /// 内存键值存储。
@@ -42,7 +44,7 @@ class MemoryStore implements KeyValueStore {
 }
 
 /// 可配置的搜索适配器。
-class FakeSearchAdapter implements PlatformAdapter {
+class FakeSearchAdapter extends PlatformAdapter with NoImSupport {
   FakeSearchAdapter({
     required this.id,
     required this.displayName,

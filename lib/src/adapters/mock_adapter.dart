@@ -16,6 +16,7 @@ import '../core/errors.dart';
 import '../core/http_client.dart';
 import '../core/logger.dart';
 import '../models/feed.dart';
+import '../models/im.dart';
 import '../models/interaction.dart';
 import '../models/live.dart';
 import '../models/playback.dart';
@@ -217,6 +218,74 @@ class MockAdapter implements PlatformAdapter {
 
   @override
   bool get supportsSavedContent => false;
+
+  /// Mock 平台不模拟私信：保持"不支持"，避免 UI 出现假消息入口。
+  @override
+  bool get supportsIm => false;
+
+  @override
+  Future<ImSessionPage> fetchImSessions({
+    required PlatformSession session,
+    int count = 20,
+    int endTs = 0,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '演示平台不支持私信。',
+        technicalMessage: 'mock adapter has no im',
+        platformId: id,
+      );
+
+  @override
+  Future<ImMessagePage> fetchImMessages({
+    required PlatformSession session,
+    required int talkerId,
+    int size = 20,
+    int endSeqno = 0,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '演示平台不支持私信。',
+        technicalMessage: 'mock adapter has no im',
+        platformId: id,
+      );
+
+  @override
+  Future<ImSendResult> sendImMessage({
+    required PlatformSession session,
+    required int talkerId,
+    required String content,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '演示平台不支持私信。',
+        technicalMessage: 'mock adapter has no im',
+        platformId: id,
+      );
+
+  @override
+  Future<ImUnread> fetchImUnread({required PlatformSession session}) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '演示平台不支持私信。',
+        technicalMessage: 'mock adapter has no im',
+        platformId: id,
+      );
+
+  @override
+  Future<Map<int, ImUserInfo>> fetchImUserInfos({
+    required PlatformSession session,
+    required List<int> uids,
+  }) async =>
+      const {};
+
+  @override
+  Future<bool> markImSessionRead({
+    required PlatformSession session,
+    required int talkerId,
+    required int ackSeqno,
+  }) async =>
+      false;
 
   @override
   Future<FolderOwnershipScan> scanFoldersContainingVideo({

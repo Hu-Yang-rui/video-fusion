@@ -59,7 +59,7 @@ import 'nav_gesture.dart';
 /// 一级导航的标签定义。
 ///
 /// 用枚举而不是下标：直播是否在场会改变下标，但不会改变语义。
-enum AppTab { feed, discover, live, profile }
+enum AppTab { feed, discover, live, messages, profile }
 
 /// 应用主框架。
 class AppShell extends StatefulWidget {
@@ -69,6 +69,7 @@ class AppShell extends StatefulWidget {
     required this.discoverPage,
     required this.profilePage,
     this.livePage,
+    this.messagesPage,
     this.initialIndex = 0,
     this.onFeedVisibilityChanged,
   });
@@ -81,6 +82,11 @@ class AppShell extends StatefulWidget {
 
   /// 直播页（可选）。为 null 时不显示直播标签。
   final Widget? livePage;
+
+  /// 消息页（可选）。为 null 时不显示消息标签。
+  ///
+  /// 与直播同理：平台不支持私信时不渲染，避免出现点进去空白的入口。
+  final Widget? messagesPage;
 
   final int initialIndex;
 
@@ -108,6 +114,7 @@ class AppShellState extends State<AppShell>
         AppTab.feed,
         AppTab.discover,
         if (widget.livePage != null) AppTab.live,
+        if (widget.messagesPage != null) AppTab.messages,
         AppTab.profile,
       ];
 
@@ -234,6 +241,7 @@ class AppShellState extends State<AppShell>
           AppTab.feed => widget.feedPage,
           AppTab.discover => widget.discoverPage,
           AppTab.live => widget.livePage!,
+          AppTab.messages => widget.messagesPage!,
           AppTab.profile => widget.profilePage,
         },
     ];
@@ -339,6 +347,11 @@ class AppShellState extends State<AppShell>
             activeIcon: Icons.live_tv_rounded,
             label: '直播',
           ),
+        AppTab.messages => const AppleTabItem(
+            icon: Icons.forum_outlined,
+            activeIcon: Icons.forum_rounded,
+            label: '消息',
+          ),
         AppTab.profile => const AppleTabItem(
             icon: Icons.person_outline_rounded,
             activeIcon: Icons.person_rounded,
@@ -346,13 +359,20 @@ class AppShellState extends State<AppShell>
           ),
       };
 
-  /// 标签项数量（供测试与诊断：无直播 3 项 / 有直播 4 项）。
+  /// 标签项数量（供测试与诊断）。
+  ///
+  /// 推荐/发现/我的 恒在；直播与消息各自按平台能力条件注入。
   @visibleForTesting
-  static List<AppleTabItem> itemsFor({required bool hasLive}) => [
+  static List<AppleTabItem> itemsFor({
+    required bool hasLive,
+    bool hasMessages = false,
+  }) =>
+      [
         for (final t in [
           AppTab.feed,
           AppTab.discover,
           if (hasLive) AppTab.live,
+          if (hasMessages) AppTab.messages,
           AppTab.profile,
         ])
           _itemOf(t),

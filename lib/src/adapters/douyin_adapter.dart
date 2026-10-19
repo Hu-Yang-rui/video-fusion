@@ -50,6 +50,7 @@ import '../core/http_client.dart';
 import '../core/logger.dart';
 import '../core/qr_login.dart';
 import '../models/feed.dart';
+import '../models/im.dart';
 import '../models/interaction.dart';
 import '../models/live.dart';
 import '../models/playback.dart';
@@ -936,6 +937,16 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   @override
   bool get supportsSavedContent => false;
 
+  /// 私信：抖音的会话/消息接口在 `/aweme/v1/im/*` 系，与视频接口同属
+  /// `X-Argus` 保护范围，且 IM 还额外要求设备注册与长连接握手。
+  ///
+  /// 实测（2026-10-19，APK 40.7.0）：`aweme/v1/aweme/detail` 一类匿名请求
+  /// 返回 HTTP 200 + **空 body**，签名算法由远程下发 JS 在 WebView 内生成，
+  /// 本地无法复刻。因此这里如实声明**不支持**，UI 不会出现抖音消息入口，
+  /// 也就不会有点进去空白的聊天页。
+  @override
+  bool get supportsIm => false;
+
   // 以下成员用 `implements` 声明时必须逐个重写：Dart 的 `implements`
   // 只继承**签名**、不继承接口里的默认实现，少写一个就是编译错误。
   // 抖音一律"如实不支持"，抛 unsupportedPlatform 而不是返回空数据
@@ -949,6 +960,73 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
         technicalMessage: 'douyin has no coin system',
         platformId: id,
       );
+
+  // ── 私信（不支持，如实抛错）────────────────────────────────
+
+  @override
+  Future<ImSessionPage> fetchImSessions({
+    required PlatformSession session,
+    int count = 20,
+    int endTs = 0,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '抖音私信需要平台签名，本应用不提供。',
+        technicalMessage: 'douyin im requires X-Argus (remote JS, not in APK)',
+        platformId: id,
+      );
+
+  @override
+  Future<ImMessagePage> fetchImMessages({
+    required PlatformSession session,
+    required int talkerId,
+    int size = 20,
+    int endSeqno = 0,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '抖音私信需要平台签名，本应用不提供。',
+        technicalMessage: 'douyin im requires X-Argus (remote JS, not in APK)',
+        platformId: id,
+      );
+
+  @override
+  Future<ImSendResult> sendImMessage({
+    required PlatformSession session,
+    required int talkerId,
+    required String content,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '抖音私信需要平台签名，本应用不提供。',
+        technicalMessage: 'douyin im requires X-Argus (remote JS, not in APK)',
+        platformId: id,
+      );
+
+  @override
+  Future<ImUnread> fetchImUnread({required PlatformSession session}) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '抖音私信需要平台签名，本应用不提供。',
+        technicalMessage: 'douyin im requires X-Argus (remote JS, not in APK)',
+        platformId: id,
+      );
+
+  // 这两个用 `implements` 也必须逐个重写（默认实现在接口里不被继承）。
+  @override
+  Future<Map<int, ImUserInfo>> fetchImUserInfos({
+    required PlatformSession session,
+    required List<int> uids,
+  }) async =>
+      const {};
+
+  @override
+  Future<bool> markImSessionRead({
+    required PlatformSession session,
+    required int talkerId,
+    required int ackSeqno,
+  }) async =>
+      false;
 
   @override
   Future<bool> fetchWatchLater({

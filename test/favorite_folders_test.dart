@@ -1,4 +1,4 @@
-/// 「B站收藏修复 + 统一互动状态管理」的回归测试。
+﻿/// 「B站收藏修复 + 统一互动状态管理」的回归测试。
 ///
 /// # 这组测试守护的是什么缺陷
 ///
@@ -49,6 +49,8 @@ import 'package:video_fusion/src/models/interaction.dart';
 import 'package:video_fusion/src/models/live.dart';
 import 'package:video_fusion/src/models/playback.dart';
 import 'package:video_fusion/src/models/unified_video.dart';
+
+import 'support/no_im_support.dart';
 import 'package:video_fusion/src/ui/interaction/interaction_controller.dart';
 import 'package:video_fusion/src/ui/interaction/interaction_registry.dart';
 
@@ -130,7 +132,7 @@ CredentialVault vaultWithSession({bool login = true, String platformId = 'fake'}
 ///  这份真相上（[applyWrites]=true）；要复现 B站的**假成功**（code=0 但没
 ///  生效）就设为 false：写请求照样返回 accepted，服务端却纹丝不动。
 ///  这样"复查"才有东西可查 —— 否则测试只是在看返回值，没有在看契约。
-class FolderCapableAdapter implements PlatformAdapter {
+class FolderCapableAdapter extends PlatformAdapter with NoImSupport {
   FolderCapableAdapter({
     this.supportsFolders = true,
     this.supportsScan = true,
@@ -581,6 +583,7 @@ class FolderCapableAdapter implements PlatformAdapter {
 
   @override
   bool get supportsSavedContent => false;
+
 
   @override
   Future<SavedVideoPage> fetchFavoriteFolderVideos(

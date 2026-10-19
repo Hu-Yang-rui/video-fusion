@@ -30,11 +30,13 @@ library;
 
 import '../core/errors.dart';
 import '../core/credential_vault.dart';
+import 'bilibili/im_client.dart';
 import 'bilibili/wbi_signer.dart';
 import '../core/http_client.dart';
 import '../core/logger.dart';
 import '../core/qr_login.dart';
 import '../models/feed.dart';
+import '../models/im.dart';
 import '../models/interaction.dart';
 import '../models/live.dart';
 import '../models/playback.dart';
@@ -4028,6 +4030,78 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
         127 => '8K 超高清',
         _ => '未知清晰度',
       };
+
+  // ── 私信（IM）──────────────────────────────────────────────
+  //
+  // 私信在另一个 host（api.vc.bilibili.com）且要带 message.bilibili.com
+  // 的 Referer/Origin，所以交给独立的 [BilibiliImClient] 处理，
+  // 不把两套 host/头的规则混在这个文件里。
+
+  late final BilibiliImClient _im = BilibiliImClient(
+    http: _http,
+    platformId: id,
+    logger: _logger,
+  );
+
+  @override
+  bool get supportsIm => true;
+
+  @override
+  Future<ImSessionPage> fetchImSessions({
+    required PlatformSession session,
+    int count = 20,
+    int endTs = 0,
+  }) =>
+      _im.fetchSessions(session: session, count: count, endTs: endTs);
+
+  @override
+  Future<ImMessagePage> fetchImMessages({
+    required PlatformSession session,
+    required int talkerId,
+    int size = 20,
+    int endSeqno = 0,
+  }) =>
+      _im.fetchMessages(
+        session: session,
+        talkerId: talkerId,
+        size: size,
+        endSeqno: endSeqno,
+      );
+
+  @override
+  Future<ImSendResult> sendImMessage({
+    required PlatformSession session,
+    required int talkerId,
+    required String content,
+  }) =>
+      _im.sendMessage(
+        session: session,
+        talkerId: talkerId,
+        content: content,
+      );
+
+  @override
+  Future<ImUnread> fetchImUnread({required PlatformSession session}) =>
+      _im.fetchUnread(session: session);
+
+  @override
+  Future<Map<int, ImUserInfo>> fetchImUserInfos({
+    required PlatformSession session,
+    required List<int> uids,
+  }) =>
+      _im.fetchUserInfos(session: session, uids: uids);
+
+  @override
+  Future<bool> markImSessionRead({
+    required PlatformSession session,
+    required int talkerId,
+    required int ackSeqno,
+  }) =>
+      _im.markRead(
+        session: session,
+        talkerId: talkerId,
+        ackSeqno: ackSeqno,
+      );
 }
 
 /// 单个收藏夹的核对结果。

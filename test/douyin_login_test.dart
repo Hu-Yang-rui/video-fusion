@@ -158,15 +158,21 @@ void main() {
       expect(src.contains('library_screen'), isFalse);
     });
 
-    test('导航项数正确（无直播 3 项 / 有直播 4 项）', () {
+    test('导航项定义齐全（推荐/发现/直播/消息/我的）', () {
       final src = File('lib/src/ui/shell/app_shell.dart').readAsStringSync();
-      // 统计 AppleTabItem 出现次数：推荐/发现/我的 必在，
-      // 直播条件加入
+      // 统计 AppleTabItem 出现次数：推荐/发现/我的 恒在，
+      // 直播与消息各自条件加入。
+      //
+      // 为什么是 5：私信功能加入后新增了「消息」标签
+      // （仅当平台声明 supportsIm 时才注入）。
+      // 这条断言守护的是**定义数没有意外增减**——
+      // 加了新标签要同步改这里，而不是让测试静默通过。
       final count = RegExp(r'AppleTabItem\(').allMatches(src).length;
-      expect(count, 4, reason: '推荐/发现/直播(条件)/我的 = 4 个定义');
+      expect(count, 5, reason: '推荐/发现/直播(条件)/消息(条件)/我的 = 5 个定义');
       expect(src.contains("label: '推荐'"), isTrue);
       expect(src.contains("label: '发现'"), isTrue);
       expect(src.contains("label: '直播'"), isTrue);
+      expect(src.contains("label: '消息'"), isTrue);
       // 第 4 项原来叫「设置」，收藏夹/稍后再看等内容入口进来后
       // 改名成了「我的」（设置作为子页仍存在）。
       // 本用例真正守护的是**第 4 个导航项没被删掉**（媒体库移除后
