@@ -185,7 +185,6 @@ void main() {
       // `code=8 用户未登录`，**不是** 403 Blocked by ArgusSecurityPlugin。
       // 因此能力翻转为 true，未登录时由适配器抛 loginRequired。
       //
-      // 依据：tool/probe_douyin_write_endpoints.mjs
       expect(
         _adapter().supportsLike,
         isTrue,

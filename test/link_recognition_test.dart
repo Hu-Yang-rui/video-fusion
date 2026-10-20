@@ -327,7 +327,7 @@ void main() {
       //
       // 2026-10-19 更新：detail 通过应用内 WebView（正式 UIFID）实测可用，
       // 因此 supportsMetadata 由 false 改为 true。
-      // 依据：`tool/probe_douyin_uifid_upgrade.mjs` 实测
+        // 实测
       //   - UIFID_TEMP @ ~500ms → detail 403
       //   - UIFID（正式）@ ~2500-4000ms → detail 200 + aweme_detail
       // requiresSignature 仍为 true：仍需要浏览器会话凭证（UIFID），

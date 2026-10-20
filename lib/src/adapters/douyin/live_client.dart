@@ -105,8 +105,7 @@ class DouyinLiveClient {
   ///
   /// 曾经有过一次**假阴性**：另一份探针的参数集缺 `device_platform`，
   /// 于是得出"54 组参数矩阵 0/54 全败、该端点不可用"的结论并写进了注释。
-  /// 根因就是缺这一个参数，不是端点失效。**改动这行前先跑
-  /// `node tool/vf_dy_roominfo_verify.mjs` 复现上面的消融表。**
+  /// 根因就是缺这一个参数，不是端点失效。**改动这行前先复现上面的消融表。**
   ///
   /// `channel` / `version_name` / `browser_*` / `screen_*` / `timezone_name`
   /// / `cookie_enabled` / `pc_client_type` 实测**全部可选**；

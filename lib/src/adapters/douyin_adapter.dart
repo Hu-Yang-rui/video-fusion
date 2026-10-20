@@ -371,7 +371,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
 
   /// 房间是否为竖屏直播。
   ///
-  /// # 判据（实测 12 房间，`tool/vf_dy_live_parse.mjs`）
+  /// # 判据（实测 12 个直播间）
   ///
   /// 读 `stream_url.extra` 里平台自声明的 width/height 与
   /// `stream_orientation` 对齐：
@@ -751,7 +751,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
 
   // ── 写操作公共通道（v0.5.0）──────────────────────────────────
   //
-  // # 实测依据（2026-10-19，`tool/probe_douyin_verify_paths.mjs`）
+  // # 实测依据（2026-10-19）
   //
   // 这些接口在**正式 UIFID** 下的真实形态：
   //
@@ -2255,7 +2255,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
 
   /// 这条 aweme 是不是"点开只会有声音、没有画面"的图文帖。
   ///
-  /// # 实测依据（`tool/vf_dy_aweme_mediatype.mjs`，穷举 28 个地址字段）
+  /// # 实测依据（穷举 28 个地址字段）
   ///
   /// ```
   /// 真视频  media_type=4 ：duration>0、images=0
@@ -2433,7 +2433,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   /// `www.douyin.com/aweme/v1/web/aweme/detail/`，必然得到
   /// `HTTP 403 Blocked by ArgusSecurityPlugin Uifid Not Found`。
   ///
-  /// 实测根因（见 `tool/probe_douyin_uifid_upgrade.mjs`）：
+  /// 实测根因：
   /// 平台分两级下发 uifid —— `UIFID_TEMP`（~500ms）与**正式 `UIFID`**
   /// （~2.5–4s）。detail 要求正式 UIFID，而裸 HTTP 请求连 TEMP 都没有。
   ///

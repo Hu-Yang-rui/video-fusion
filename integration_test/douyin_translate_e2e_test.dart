@@ -8,7 +8,7 @@
 ///
 /// # 与之前探针的区别
 ///
-/// 之前的 `tool/probe_douyin_translate.dart` 用纯 Dart `ABogus` 算签名，
+/// 之前用纯 Dart `ABogus` 算签名，
 /// 结果全是 `blocked`（7 字节）。但那**没有 WebView 会话**——
 /// 缺 UIFID、缺 secsdk 环境、缺页面级 cookie。
 ///
