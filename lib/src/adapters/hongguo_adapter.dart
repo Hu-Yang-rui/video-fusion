@@ -35,6 +35,7 @@ import '../models/feed.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
 import 'hongguo/parser.dart';
+import 'hongguo/playback_id.dart';
 import 'platform_adapter.dart';
 
 /// 红果短剧适配器。
@@ -265,9 +266,10 @@ class HongguoAdapter extends PlatformAdapter {
     final videoId = request.platformVideoId;
 
     // videoId 可能是 seriesId，也可能带分集（`{seriesId}#{index}`）
-    final parts = videoId.split('#');
-    final seriesId = parts[0];
-    final wantedIndex = parts.length > 1 ? int.tryParse(parts[1]) : null;
+    // 用统一的编解码器解析，避免各处重复拼字符串
+    final parsed = HongguoPlaybackId.parse(videoId);
+    final seriesId = parsed?.seriesId ?? videoId;
+    final wantedIndex = parsed?.episodeIndex;
 
     final detail = await fetchSeriesDetail(seriesId);
     if (detail.episodes.isEmpty) {
@@ -306,6 +308,85 @@ class HongguoAdapter extends PlatformAdapter {
       ],
       isDash: false,
     );
+  }
+
+  /// 构造某一集的播放标识（供 UI 切换分集、记录进度用）。
+  ///
+  /// 返回的字符串同时用于：
+  ///  - `PlaybackRequest.platformVideoId`（适配器据此定位分集）
+  ///  - `VideoProgressStore.videoId`（按集存进度）
+  String episodeVideoId(String seriesId, int episodeIndex) =>
+      HongguoPlaybackId(seriesId: seriesId, episodeIndex: episodeIndex)
+          .toVideoId();
+
+  /// 构造某一集的 [UnifiedVideo]（供「选集」与「续播」用）。
+  ///
+  /// # 为什么需要这个
+  ///
+  /// 红果一部剧几十集，但 `UnifiedVideo.id` 是 `{platformId}:{platformVideoId}`。
+  /// 如果所有分集共用同一个 `videoId`：
+  ///
+  ///  - 进度会串线（第 1 集看到 10 分钟，第 5 集继承）；
+  ///  - 历史记录只有一条，看不出看到第几集。
+  ///
+  /// 因此分集必须有自己的 `platformVideoId`（`{seriesId}#{index}`），
+  /// 由 [HongguoPlaybackId] 统一编码。
+  UnifiedVideo episodeVideo({
+    required String seriesId,
+    required String seriesTitle,
+    required int episodeIndex,
+    required int totalEpisodes,
+    String? coverUrl,
+    String? description,
+    String? fetchedAt,
+  }) {
+    final videoId = HongguoPlaybackId(
+      seriesId: seriesId,
+      episodeIndex: episodeIndex,
+    ).toVideoId();
+    final now = fetchedAt ?? DateTime.now().toIso8601String();
+
+    return UnifiedVideo(
+      id: '$id:$videoId',
+      platformId: id,
+      platformVideoId: videoId,
+      originalUrl: '$_origin/player/$seriesId',
+      canonicalUrl: '$_origin/player/$seriesId',
+      title: '$seriesTitle 第$episodeIndex集',
+      description: description,
+      author: const VideoAuthor(name: '红果短剧'),
+      coverUrl: coverUrl,
+      fetchedAt: now,
+      availability: VideoAvailability.available,
+      playbackModes: const [PlaybackMode.native],
+      diagnostics: VideoDiagnostics(
+        adapterId: id,
+        upstreamEndpoint: 'GET $_origin/player/{series_id}',
+        fromCache: false,
+        fetchDurationMs: 0,
+        notes: [
+          '第 $episodeIndex 集 / 共 $totalEpisodes 集',
+          '清晰度：360p',
+        ],
+      ),
+    );
+  }
+
+  /// 拉取剧集的全部分集（转成 [UnifiedVideo]，供选集列表用）。
+  Future<List<UnifiedVideo>> fetchEpisodeVideos(String seriesId) async {
+    final detail = await fetchSeriesDetail(seriesId);
+    final now = DateTime.now().toIso8601String();
+    return detail.episodes
+        .map((e) => episodeVideo(
+              seriesId: seriesId,
+              seriesTitle: detail.title,
+              episodeIndex: e.index,
+              totalEpisodes: detail.episodes.length,
+              coverUrl: detail.coverUrl,
+              description: detail.description,
+              fetchedAt: now,
+            ))
+        .toList();
   }
 
   // ── 首页推荐流（必需）────────────────────────────────────
