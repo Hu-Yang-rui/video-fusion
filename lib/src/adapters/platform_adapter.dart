@@ -1166,3 +1166,18 @@ class FolderOwnershipScan {
         'notes': notes,
       };
 }
+
+/// 能把平台视频标识解析为数字 ID 的适配器。
+///
+/// # 为什么单独一个接口
+///
+/// 有些平台接口要的是**数字 ID**（B 站的 `aid`），而链接里带的是
+/// 字母 ID（`bvid`）。解析需要额外一次请求，且只有部分平台有这个区分。
+///
+/// 做成独立接口而不是加到 [PlatformAdapter]：后者被 `implements` 时
+/// 要求实现全部成员，加一个方法会让所有适配器（含测试用的）
+/// 都要跟着改。
+abstract class NumericVideoIdCapable {
+  /// 解析数字视频 ID。平台没有该概念或解析失败时返回 null。
+  Future<int?> resolveNumericVideoId(String platformVideoId);
+}

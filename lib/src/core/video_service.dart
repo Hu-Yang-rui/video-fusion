@@ -618,11 +618,9 @@ class VideoService {
       pageSize: pageSize,
       session: session,
     );
-    // 翻译接口需要 `oid`（B 站 aid）。拉评论时顺手把当前视频 ID 记下来，
-    // 这样用户点「翻译」时不必再解析一次。
-    if (video.platformId == 'bilibili') {
-      _lastBilibiliAid = int.tryParse(video.platformVideoId);
-    }
+    // 翻译接口要的是数字 oid（B 站 aid），而链接里带的是字母 bvid。
+    // 两者不能直接互转，需要一次 view 请求；适配器侧有缓存。
+    await _rememberNumericVideoId(video);
     return result;
   }
 
@@ -641,8 +639,25 @@ class VideoService {
   // 而不是「两平台都能翻译」。后者需要抖音官方接口或第三方翻译服务，
   // 属于需求里说的"需要额外权限/费用"的范畴，已写进报告。
 
-  /// 当前视频的 B 站 aid（翻译接口入参）。
+  /// 当前视频的数字 ID（B 站 aid，翻译接口入参）。
+  ///
+  /// 只在适配器声明支持 [NumericVideoIdCapable] 时解析；
+  /// 解析失败保持原值，不覆盖成 null。
   int? _lastBilibiliAid;
+
+  Future<void> _rememberNumericVideoId(UnifiedVideo video) async {
+    // 声明成 Object? 而不是 PlatformAdapter?：
+    // NumericVideoIdCapable 与 PlatformAdapter 无继承关系，
+    // Dart 不会把前者提升到后者，声明成 Object? 才能提升。
+    final Object? adapter = _registry.byId(video.platformId);
+    if (adapter is! NumericVideoIdCapable) return;
+    try {
+      final id = await adapter.resolveNumericVideoId(video.platformVideoId);
+      if (id != null && id > 0) _lastBilibiliAid = id;
+    } catch (_) {
+      // 解析失败不阻断评论加载
+    }
+  }
 
   /// B 站翻译提供方（延迟创建，复用同一个 HTTP 客户端）。
   BilibiliTranslationProvider? _biliTranslation;

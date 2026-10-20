@@ -1044,7 +1044,7 @@ class DouyinLoginQr {
     required this.token,
     required this.fp,
     required this.createdAt,
-    this.expiresIn = const Duration(minutes: 3),
+    this.expiresIn = const Duration(minutes: 10),
   });
 
   /// 平台下发的二维码 PNG（base64）。直接展示，不做二次编码。
@@ -1057,6 +1057,13 @@ class DouyinLoginQr {
   final String fp;
 
   final DateTime createdAt;
+
+  /// 本地轮询窗口。
+  ///
+  /// 取 10 分钟而不是平台常见的 3 分钟：服务端才是过期判定的权威。
+  /// 若本地窗口短于服务端有效期，用户截图 → 切到抖音 → 相册选图
+  /// 这段时间一旦超过本地窗口，轮询就停了，用户扫码后不会有任何反应。
+  /// 宁可多轮询一会儿，也不要让用户扫了却卡住。
   final Duration expiresIn;
 
   bool get isExpired => DateTime.now().difference(createdAt) > expiresIn;

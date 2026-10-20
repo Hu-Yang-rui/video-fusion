@@ -43,7 +43,7 @@ import '../models/unified_video.dart';
 import 'json_helpers.dart';
 import 'platform_adapter.dart';
 
-class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
+class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoIdCapable {
   BilibiliAdapter({required FusionHttpClient http, FusionLogger? logger})
       : _http = http,
         _logger = logger ?? appLogger;
@@ -4500,6 +4500,10 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
       return null;
     }
   }
+
+  @override
+  Future<int?> resolveNumericVideoId(String platformVideoId) =>
+      _resolveAid(platformVideoId);
 
   /// 用 view 接口返回的 aid 回填缓存（供已自行请求过 view 的路径复用）。
   void _rememberAid(String platformVideoId, Object? aid) {

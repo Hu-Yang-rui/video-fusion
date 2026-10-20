@@ -501,34 +501,42 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
                 ),
               ),
             ),
-          // 控制条
-          AnimatedOpacity(
-            opacity: _showControls ? 1 : 0,
-            duration: AppleMotion.fast,
-            child: IgnorePointer(
-              ignoring: !_showControls,
-              child: PlayerControlBar(
-                position: _snapshot.position,
-                duration: _snapshot.duration,
-                buffered: _snapshot.buffered,
-                isPlaying: _snapshot.phase == PlayerPhase.playing,
-                volume: _snapshot.volume,
-                rate: 1.0,
-                onPlayPause: () {
-                  player.playOrPause();
-                  _scheduleHideControls();
-                },
-                onSeek: (d) {
-                  player.seek(d);
-                  _scheduleHideControls();
-                },
-                onSeekStart: () => _controlsTimer?.cancel(),
-                onSeekEnd: _scheduleHideControls,
-                onVolumeChanged: (v) => player.setVolume(v),
-                onRateChanged: (r) => player.rawPlayer.setRate(r),
-                onFullscreen: _toggleFullscreen,
-                title: widget.video.title,
-                subtitle: widget.video.author.name,
+          // 控制条：贴播放区底部。
+          //
+          // 必须用 Positioned —— Stack 的非定位子节点会被 StackFit.expand
+          // 拉满整个播放区，控制条内容就会贴到顶部并和返回按钮重叠。
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: AnimatedOpacity(
+              opacity: _showControls ? 1 : 0,
+              duration: AppleMotion.fast,
+              child: IgnorePointer(
+                ignoring: !_showControls,
+                child: PlayerControlBar(
+                  position: _snapshot.position,
+                  duration: _snapshot.duration,
+                  buffered: _snapshot.buffered,
+                  isPlaying: _snapshot.phase == PlayerPhase.playing,
+                  volume: _snapshot.volume,
+                  rate: 1.0,
+                  onPlayPause: () {
+                    player.playOrPause();
+                    _scheduleHideControls();
+                  },
+                  onSeek: (d) {
+                    player.seek(d);
+                    _scheduleHideControls();
+                  },
+                  onSeekStart: () => _controlsTimer?.cancel(),
+                  onSeekEnd: _scheduleHideControls,
+                  onVolumeChanged: (v) => player.setVolume(v),
+                  onRateChanged: (r) => player.rawPlayer.setRate(r),
+                  onFullscreen: _toggleFullscreen,
+                  title: widget.video.title,
+                  subtitle: widget.video.author.name,
+                ),
               ),
             ),
           ),
