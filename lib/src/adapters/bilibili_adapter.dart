@@ -11,10 +11,6 @@
 /// | 播放地址 | `/x/player/playurl` | 无（未登录降级到低清） |
 /// | 短链展开 | `b23.tv` 302 | 无 |
 ///
-/// 参考的公开实现（用于交叉验证参数语义，未复制其代码）：
-///  - SocialSisterYi/bilibili-API-collect（社区维护的接口文档）
-///  - yt-dlp 的 bilibili extractor（参数组合交叉验证）
-///
 /// **本适配器不携带任何 Cookie / SESSDATA / access_token，不调用需要登录的接口。**
 ///
 /// ## 实测确认的能力边界（2026-02 实测，详见 docs/02-API可用性与权限调查报告.md）

@@ -134,8 +134,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         .whereType<QrLoginCapable>()
         .toList();
 
-    // 支持 Cookie 导入但**不支持**扫码的平台（当前是抖音）。
-    // 这些平台的扫码登录被平台签名拦截，如实告知用户走导入路径。
+    // 只支持 Cookie 导入、没有应用内扫码的平台。
+    // 这类平台如实告知用户走导入路径，不摆一个点了必然失败的入口。
     final importOnly = widget.registry.adapters
         .where((a) => a.id != 'mock')
         .where((a) => a is! QrLoginCapable)

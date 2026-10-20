@@ -51,6 +51,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -130,6 +131,8 @@ class DouyinWebSigner {
   DouyinWebSigner({FusionLogger? logger}) : _logger = logger ?? appLogger;
 
   final FusionLogger _logger;
+
+  final _random = Random();
 
   HeadlessInAppWebView? _webView;
   SignerReadiness _readiness = SignerReadiness.none;
@@ -380,24 +383,46 @@ class DouyinWebSigner {
   ///
   /// **不得写入日志或持久化**：包含平台签发的会话凭证。
   Future<Map<String, String>> snapshotCookies() async {
-    final controller = _webView?.webViewController;
-    if (controller == null) return const {};
+    final out = <String, String>{};
+
+    // 1) 先读 CookieManager：它能拿到 httpOnly 的登录凭证
+    //    （sessionid / sessionid_ss / sid_guard 都是 httpOnly）。
+    //    document.cookie 读不到这些，只看它会把"已登录"误判成"未登录"。
     try {
-      final raw = await controller.evaluateJavascript(
-        source: 'document.cookie',
+      final cookies = await CookieManager.instance().getCookies(
+        url: WebUri(_currentOrigin),
       );
-      final out = <String, String>{};
-      for (final part in '$raw'.split(';')) {
-        final trimmed = part.trim();
-        final eq = trimmed.indexOf('=');
-        if (eq <= 0) continue;
-        out[trimmed.substring(0, eq)] = trimmed.substring(eq + 1);
+      for (final c in cookies) {
+        if (c.name.isEmpty) continue;
+        out[c.name] = c.value;
       }
-      return out;
     } catch (_) {
-      return const {};
+      // 读不到就走下面的兜底
     }
+
+    // 2) 兜底：document.cookie（能拿到非 httpOnly 的那部分）
+    final controller = _webView?.webViewController;
+    if (controller != null) {
+      try {
+        final raw = await controller.evaluateJavascript(
+          source: 'document.cookie',
+        );
+        for (final part in '$raw'.split(';')) {
+          final trimmed = part.trim();
+          final eq = trimmed.indexOf('=');
+          if (eq <= 0) continue;
+          out.putIfAbsent(trimmed.substring(0, eq), () => trimmed.substring(eq + 1));
+        }
+      } catch (_) {
+        // 忽略
+      }
+    }
+
+    return out;
   }
+
+  /// 当前 WebView 所在站点，用于按域读 Cookie。
+  String _currentOrigin = 'https://www.douyin.com';
 
   /// 当前会话是否带登录态（有 `sessionid` 或 `sid_guard` 之类的登录 Cookie）。
   ///
@@ -408,6 +433,216 @@ class DouyinWebSigner {
     // 抖音 Web 端登录后会出现 sessionid / sid_guard / passport_csrf_token
     const loginMarkers = ['sessionid', 'sid_guard', 'sessionid_ss'];
     return loginMarkers.any((m) => (cookies[m] ?? '').isNotEmpty);
+  }
+
+  // ── 扫码登录 ──────────────────────────────────────────────
+  //
+  // 登录接口在页面上下文里发，因为 passport 会校验页面 JS 算出的
+  // 风控 Cookie（`__ac_signature` 等）。原生 HTTP 客户端没有这个
+  // Cookie，直连必然被拦；在页面里发则天然携带。
+
+  /// 申请登录二维码。
+  ///
+  /// 返回二维码 PNG（base64）与轮询用的 token。
+  Future<DouyinLoginQr> fetchLoginQr() async {
+    final now = DateTime.now();
+    final fp = _genFp();
+
+    final params = <String, String>{
+      ..._passportParams,
+      'ts': '${now.millisecondsSinceEpoch ~/ 1000}',
+      'fp': fp,
+      'verifyFp': fp,
+      'biz_trace_id': _hex8(),
+      'msToken': _genMsToken(),
+    };
+
+    final res = await requestPost(
+      path: '/passport/web/get_qrcode/',
+      params: params,
+      body: 'need_logo=false&is_frontier=true&is_new_login=1'
+          '&next=https%3A%2F%2Fwww.douyin.com&need_short_url=true',
+      requireFullUifid: false,
+    );
+
+    final json = res.tryParseJson();
+    final data = json?['data'];
+    if (data is! Map) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '抖音登录服务返回异常。',
+        technicalMessage: 'get_qrcode: data is not a map '
+            '(status=${res.statusCode}, len=${res.body.length})',
+        platformId: 'douyin',
+        retryable: true,
+      );
+    }
+
+    final d = Map<String, Object?>.from(data);
+    final code = (d['error_code'] as num?)?.toInt() ?? -1;
+    if (code != 0) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '抖音暂未下发登录二维码，请稍后重试。',
+        technicalMessage: 'get_qrcode: error_code=$code '
+            'desc=${d['description'] ?? ''}',
+        platformId: 'douyin',
+        retryable: true,
+      );
+    }
+
+    final qr = (d['qrcode'] as String?) ?? '';
+    final token = (d['token'] as String?) ?? '';
+    if (qr.isEmpty || token.isEmpty) {
+      throw FusionException(
+        code: FusionErrorCode.parseError,
+        userMessage: '抖音登录二维码解析失败。',
+        technicalMessage: 'get_qrcode: qrcode/token 为空',
+        platformId: 'douyin',
+        retryable: true,
+      );
+    }
+
+    return DouyinLoginQr(
+      imageBase64: qr,
+      token: token,
+      fp: fp,
+      createdAt: now,
+    );
+  }
+
+  /// 轮询扫码状态。
+  Future<DouyinLoginPoll> pollLoginQr(DouyinLoginQr qr) async {
+    if (qr.isExpired) {
+      return const DouyinLoginPoll(
+        phase: DouyinLoginPhase.expired,
+        message: '二维码已过期，请刷新。',
+      );
+    }
+
+    final params = <String, String>{
+      ..._passportParams,
+      'ts': '${DateTime.now().millisecondsSinceEpoch ~/ 1000}',
+      'fp': qr.fp,
+      'verifyFp': qr.fp,
+      'biz_trace_id': _hex8(),
+      'p_ts': '${DateTime.now().millisecondsSinceEpoch}',
+      'msToken': _genMsToken(),
+    };
+
+    final res = await requestPost(
+      path: '/passport/web/check_qrconnect/',
+      params: params,
+      body: 'need_logo=false&is_frontier=true'
+          '&token=${qr.token}'
+          '&is_new_login=1&next=https%3A%2F%2Fwww.douyin.com'
+          '&need_short_url=true',
+      requireFullUifid: false,
+    );
+
+    final json = res.tryParseJson();
+    final data = json?['data'];
+    if (data is! Map) {
+      return const DouyinLoginPoll(
+        phase: DouyinLoginPhase.failed,
+        message: '抖音登录服务返回异常。',
+      );
+    }
+
+    final d = Map<String, Object?>.from(data);
+    final code = (d['error_code'] as num?)?.toInt() ?? -1;
+    final status = (d['status'] as String?) ?? '';
+
+    if (code == 4031) {
+      return const DouyinLoginPoll(
+        phase: DouyinLoginPhase.blocked,
+        message: '抖音风控拦截了本次登录，请在浏览器里完成登录后导入 Cookie。',
+      );
+    }
+    if (code != 0) {
+      return DouyinLoginPoll(
+        phase: DouyinLoginPhase.failed,
+        message: '登录失败（错误码 $code）。',
+      );
+    }
+
+    // status: 1 待扫码 / 2 已扫码待确认 / 3 已确认（下发凭证）
+    switch (status) {
+      case '1':
+        return const DouyinLoginPoll(
+          phase: DouyinLoginPhase.waitingForScan,
+          message: '请用抖音 App 扫描二维码。',
+        );
+      case '2':
+        return const DouyinLoginPoll(
+          phase: DouyinLoginPhase.waitingForConfirm,
+          message: '已扫码，请在手机上确认登录。',
+        );
+      case '3':
+        final cookies = await snapshotCookies();
+        final redirect = (d['redirect_url'] as String?) ?? '';
+        return DouyinLoginPoll(
+          phase: DouyinLoginPhase.succeeded,
+          cookies: cookies,
+          displayName: (d['nickname'] as String?) ??
+              (d['screen_name'] as String?) ??
+              '',
+          userId: '${d['uid'] ?? d['user_id'] ?? ''}',
+          avatarUrl: (d['avatar_url'] as String?) ?? '',
+          message: redirect.isEmpty ? '登录成功。' : null,
+        );
+      default:
+        return DouyinLoginPoll(
+          phase: DouyinLoginPhase.failed,
+          message: '未知登录状态：$status',
+        );
+    }
+  }
+
+  /// passport 接口的固定参数（与网页端登录组件一致）。
+  static const Map<String, String> _passportParams = {
+    'passport_jssdk_version': '3.4.9',
+    'passport_jssdk_type': 'normal',
+    'is_from_ttaccountsdk': '1',
+    'aid': '6383',
+    'language': 'zh',
+    'account_app_language': 'zh-CN',
+    'is_from_iesaccountsaas': '1',
+    'p_ui': '2.4.10',
+    'p_ca': '4.0.26',
+    'p_ca_real': '1.0.0.938',
+    'account_sdk_source': 'web',
+    'device_platform': 'web_app',
+    'p_js_v': '3.4.9',
+    'p_js_t': 'pro',
+    'p_zt': '3.3.30',
+    'p_ver': '1.1.4-beta.5',
+    'p_ver_real': '0',
+    'p_bd': '1.0.1.19-fix.01',
+    'request_host': 'https://www.douyin.com',
+  };
+
+  String _hex8() =>
+      DateTime.now().microsecondsSinceEpoch.toRadixString(16).padLeft(8, '0').substring(0, 8);
+
+  String _genFp() {
+    const chars = '0123456789abcdef';
+    final sb = StringBuffer('verify_');
+    for (var i = 0; i < 32; i++) {
+      sb.write(chars[_random.nextInt(chars.length)]);
+    }
+    return sb.toString();
+  }
+
+  String _genMsToken() {
+    const chars =
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    final sb = StringBuffer();
+    for (var i = 0; i < 107; i++) {
+      sb.write(chars[_random.nextInt(chars.length)]);
+    }
+    sb.write('=');
+    return sb.toString();
   }
 
   /// 在页面上下文里发一次 GET 请求，**返回原始字节**。
@@ -779,4 +1014,74 @@ class DouyinWebSigner {
       } catch (_) {}
     }
   }
+}
+
+/// 扫码登录阶段。
+enum DouyinLoginPhase {
+  /// 等待用户扫码。
+  waitingForScan,
+
+  /// 已扫码，等待用户在手机上确认。
+  waitingForConfirm,
+
+  /// 登录成功。
+  succeeded,
+
+  /// 二维码过期。
+  expired,
+
+  /// 失败。
+  failed,
+
+  /// 被风控拦截。
+  blocked,
+}
+
+/// 一次扫码登录会话。
+class DouyinLoginQr {
+  const DouyinLoginQr({
+    required this.imageBase64,
+    required this.token,
+    required this.fp,
+    required this.createdAt,
+    this.expiresIn = const Duration(minutes: 3),
+  });
+
+  /// 平台下发的二维码 PNG（base64）。直接展示，不做二次编码。
+  final String imageBase64;
+
+  /// 轮询用的 token。
+  final String token;
+
+  /// 本次会话的设备指纹串。
+  final String fp;
+
+  final DateTime createdAt;
+  final Duration expiresIn;
+
+  bool get isExpired => DateTime.now().difference(createdAt) > expiresIn;
+}
+
+/// 一次轮询的结果。
+class DouyinLoginPoll {
+  const DouyinLoginPoll({
+    required this.phase,
+    this.cookies = const {},
+    this.displayName = '',
+    this.userId = '',
+    this.avatarUrl = '',
+    this.message,
+  });
+
+  final DouyinLoginPhase phase;
+
+  /// 登录成功时下发的全部 Cookie（含 httpOnly 的会话凭证）。
+  final Map<String, String> cookies;
+
+  final String displayName;
+  final String userId;
+  final String avatarUrl;
+  final String? message;
+
+  bool get succeeded => phase == DouyinLoginPhase.succeeded;
 }

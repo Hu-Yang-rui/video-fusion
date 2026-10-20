@@ -126,8 +126,7 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
     final http = FusionHttpClient(logger: logger);
     final secureStore = FlutterSecureStore();
 
-    // 注：抖音"本地签名库"通道已封存（`archive/douyin-native-signer/`）。
-    // 当前抖音的唯一通道是应用内隐藏 WebView，不需要额外装配。
+    // 抖音的签名与登录都在应用内隐藏 WebView 里完成，不需要额外装配。
 
     _registry = PlatformRegistry(adapters: [
       BilibiliAdapter(http: http, logger: logger),

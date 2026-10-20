@@ -34,11 +34,9 @@
 ///  - **官方嵌入播放**：`open.douyin.com/player/video?vid={id}` 返回 200，
 ///    无 `X-Frame-Options` / CSP 限制，可作为官方嵌入播放入口。
 ///
-/// # 参考的公开实现
+/// # 签名与凭证
 ///
-///  - Evil0ctal/Douyin_TikTok_Download_API（Apache-2.0）：`a_bogus` 签名算法
-///  - JoeanAmier/TikTokDownloader：可读的 `a_bogus` JS 参考实现
-///  - SocialSisterYi/bilibili-API-collect 的同类社区文档方法学
+/// `a_bogus` 由本仓库内的纯 Dart 实现产出，不依赖外部服务。
 ///
 /// 本适配器**不携带**任何 Cookie、`UIFID_TEMP`、`ttwid`、账号令牌，
 /// 也不生成伪造的设备指纹。
@@ -60,7 +58,6 @@ import '../models/unified_video.dart';
 import '../models/video_danmaku.dart';
 import 'douyin/live_client.dart';
 import 'douyin/live_danmaku_http.dart';
-import 'douyin/login_client.dart';
 import 'douyin/web_signer.dart';
 import 'json_helpers.dart';
 import 'platform_adapter.dart';
@@ -107,22 +104,15 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   final FusionHttpClient _http;
   final FusionLogger _logger;
 
-  // # 关于"本地签名库"通道（已封存）
+  // 请求统一走应用内隐藏 WebView（见 `douyin/web_signer.dart`）：
+  // 页面上下文里发请求会自带 Referer 与风控相关 Cookie，
+  // 裸 HTTP 客户端没有这些，会被服务端拦下。
   //
-  // 曾实现过一条"把 `libmetasec_ml.so` 打进 APK、由 App 自己产出
-  // `X-Argus`/`X-Gorgon`"的通道（`archive/douyin-native-signer/`）。
-  // 已封存，原因见该目录的 README。一句话总结：
-  //
-  //  - 功能上不多一件（Web 端已覆盖详情/评论/推荐/直播/热榜）
-  //  - 真正卡住搜索与点赞的是**登录态**，不是签名
-  //  - 需要 arm64 真机 + app-bound license + 设备身份自洽，三关
-  //  - 即便全过，服务端是否接受 header 也无人验证
-  //
-  // 因此当前唯一通道是应用内隐藏 WebView（见 `douyin/web_signer.dart`）。
-
-  // 注：原先这里有个 `_shareReferer` 常量，用于裸 HTTP 请求 detail。
-  // 现在 detail 走 WebView（页面内 fetch 自带 Referer），
-  // 该常量已无用途，删除以免误导后来者以为还有裸请求路径。
+  // 不采用"在 App 内加载本地签名库自产 `X-Argus`/`X-Gorgon`"的方案：
+  // 签名库需要服务端签发的授权配置才能初始化，缺它则任何调用都会
+  // 被库自己中止；而拿到该配置必须在已 root 的真机上抓取。
+  // 另外这条通道功能上不多一件——详情/评论/推荐/直播/热榜
+  // 都已在页面上下文里可用。
 
   @override
   String get id => 'douyin';
@@ -152,15 +142,26 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   //
   // 实测：`get_qrcode` 与 `check_qrconnect` 均返回 `error_code: 0`。
 
-  /// 扫码登录客户端（懒加载）。
-  DouyinLoginClient? _loginClient;
-
-  DouyinLoginClient get _ensureLoginClient => _loginClient ??=
-      DouyinLoginClient(http: _http, logger: _logger);
-
+  /// 扫码登录走隐藏 WebView 的页面上下文。
+  ///
+  /// passport 接口会校验页面 JS 算出的风控 Cookie。
+  /// 原生 HTTP 客户端没有这个 Cookie，直连会被风控拦下；
+  /// 在页面里发请求则天然携带。
   @override
   Future<QrLoginChallenge> requestQrChallenge() async {
-    final challenge = await _ensureLoginClient.requestQrCode();
+    final signer = _ensureSigner;
+    final ready = await signer.ensureReady();
+    if (!ready) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '登录组件初始化失败，请检查网络后重试。',
+        technicalMessage: 'signer not ready when requesting login qr',
+        platformId: id,
+        retryable: true,
+      );
+    }
+
+    final qr = await signer.fetchLoginQr();
 
     return QrLoginChallenge(
       platformId: id,
@@ -168,18 +169,18 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       // 必须走 qrImageBase64（直接展示），不能塞进 qrContent ——
       // 那会让 UI 把 base64 字符串当二维码内容重新编码，画出扫不出的假码。
       qrContent: '',
-      qrImageBase64: challenge.qrBase64,
+      qrImageBase64: qr.imageBase64,
       // challengeKey 编码 token 与 fp：`token|fp`
       // 轮询时两者都必须与申请时一致
-      challengeKey: '${challenge.token}|${challenge.fp}',
-      createdAt: DateTime.now(),
-      expiresIn: challenge.expiresAt.difference(DateTime.now()),
+      challengeKey: '${qr.token}|${qr.fp}',
+      createdAt: qr.createdAt,
+      expiresIn: qr.expiresIn,
     );
   }
 
   @override
   Future<QrLoginPollResult> pollQrChallenge(QrLoginChallenge challenge) async {
-    final client = _ensureLoginClient;
+    final signer = _ensureSigner;
 
     // 从 challenge 还原出轮询需要的信息。
     // fp 需要与申请二维码时一致，但 QrLoginChallenge 没有这个字段，
@@ -188,29 +189,31 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     final token = parts.first;
     final fp = parts.length > 1 ? parts[1] : '';
 
-    final internal = DouyinQrChallenge(
-      qrBase64: challenge.qrImageBase64 ?? challenge.qrContent,
+    final result = await signer.pollLoginQr(DouyinLoginQr(
+      imageBase64: challenge.qrImageBase64 ?? '',
       token: token,
-      expiresAt: challenge.createdAt.add(challenge.expiresIn),
       fp: fp,
-    );
-
-    final result = await client.pollQrStatus(internal);
+      createdAt: challenge.createdAt,
+      expiresIn: challenge.expiresIn,
+    ));
 
     final phase = switch (result.phase) {
       DouyinLoginPhase.waitingForScan => QrLoginPhase.waitingForScan,
       DouyinLoginPhase.waitingForConfirm => QrLoginPhase.waitingForConfirm,
       DouyinLoginPhase.succeeded => QrLoginPhase.succeeded,
       DouyinLoginPhase.expired => QrLoginPhase.expired,
+      // 风控被拦不是"失败可重试"，而是换路径的信号
       DouyinLoginPhase.blocked => QrLoginPhase.failed,
+      DouyinLoginPhase.failed => QrLoginPhase.failed,
     };
 
     return QrLoginPollResult(
       phase: phase,
       message: result.message,
-      cookies: result.session?.cookies ?? const {},
-      userId: result.session?.userId,
-      displayName: result.session?.displayName,
+      cookies: result.cookies,
+      userId: result.userId.isEmpty ? null : result.userId,
+      displayName: result.displayName.isEmpty ? null : result.displayName,
+      avatarUrl: result.avatarUrl.isEmpty ? null : result.avatarUrl,
     );
   }
 
@@ -1344,8 +1347,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   // 因此这里抛 `loginRequired` 而非 `unsupportedPlatform`——
   // 语义准确：**接口可达，缺的是登录**。
   //
-  // 待办：拿到真实登录 Cookie 后，按
-  // `APK样本/逆向分析/抖音/私信通知接口-结论修正.md` 实现。
+  // 待办：拿到真实登录 Cookie 后接入具体调用。
 
   FusionException _imNeedsLogin(String operation) => FusionException(
         code: FusionErrorCode.loginRequired,
@@ -2627,7 +2629,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   ///  - 文案改为真实说明
   ///  - 统计字段按实测填充（`play_count` 恒为 0，仍不采用）
   ///
-  /// 字段路径参考公开实现的解析逻辑，并遵循"缺失即 null"的原则。
+  /// 字段路径按实测响应确定，并遵循"缺失即 null"的原则。
   VideoMetadata _parseAwemeDetail(
     Map<String, Object?> detail,
     LinkMatch match,
@@ -2679,7 +2681,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       height: height,
       publishedAt: _epochToIso(detail['create_time']),
       stats: VideoStats(
-        // 公开实现记录：抖音 web 接口的 play_count 恒为 0，不可信，故不采用
+        // 实测：抖音 web 接口的 play_count 恒为 0，不可信，故不采用
         viewCount: null,
         likeCount: (statistics['digg_count'] as num?)?.toInt(),
         danmakuCount: null,

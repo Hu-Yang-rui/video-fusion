@@ -4,7 +4,7 @@
 ///
 /// 会话来自 `session_svr/v1/session_svr/get_sessions`，
 /// 消息来自 `svr_sync/v1/svr_sync/fetch_session_msgs`。
-/// 实测的响应结构见 `video-fusion-prompts/APK-API-REPORT.md` 与 HANDOVER §十六。
+
 ///
 /// # 设计约束
 ///

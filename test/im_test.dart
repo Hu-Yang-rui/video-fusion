@@ -10,7 +10,7 @@
 ///  - 签名能力：如实报告不可用 + 提供方默认抛错
 ///
 /// 所有 mock 响应都按**真实实测结构**构造（字段名取自
-/// `video-fusion-prompts/APK-API-REPORT.md`），但 mock 通过**不算**
+/// 但 mock 通过**不算**
 /// 真实接口已验证 —— 真实验证见 `test/im_live_test.dart`。
 library;
 
