@@ -88,21 +88,31 @@
 
 ## 文档
 
+逆向分析产物（APK 样本、接口测绘、探针脚本）**不入公开仓库**，
+统一放在私有的
+[video-fusion-prompts](https://github.com/Hu-Yang-rui/video-fusion-prompts)。
+
+本仓库内的文档：
+
 | 想知道什么 | 看哪个 |
 |---|---|
-| APK 逆向产物 | `APK样本/README.md` |
-| 逆向方法论 | `APK样本/逆向分析/通用/README.md` |
-| 抖音接口测绘全记录 | `APK样本/逆向分析/抖音/APK-API-逆向报告.md` |
-| 抖音私信为何可达 | `APK样本/逆向分析/抖音/私信通知接口-结论修正.md` |
-| 抖音直播弹幕怎么通的 | `APK样本/逆向分析/抖音/直播弹幕HTTP通道.md` |
-| 抖音签名库为什么封存 | `archive/douyin-native-signer-v2/README.md` |
-| 红果短剧 Web 端方案 | `APK样本/逆向分析/红果短剧/Web端直取方案.md` |
 | **代码审计与瘦身** | `docs/CODE-AUDIT-2026-10-20.md` |
 | 项目约定（给 Agent） | `AGENTS.md` |
+| 签名库为什么封存 | `archive/douyin-native-signer-v2/README.md` |
+| 项目能力总览 | 本文档 |
 
-完整的逐轮实测证据与复现脚本在
-[video-fusion-prompts](https://github.com/Hu-Yang-rui/video-fusion-prompts)
-仓库（私有）。
+私有仓库（需权限）里的逆向产物：
+
+| 内容 | 说明 |
+|---|---|
+| 抖音接口测绘全记录 | APK 40.7.0 静态分析 + 逐轮实测 |
+| 抖音私信为何可达 | `code=8` vs `404` 的判定依据 |
+| 抖音直播弹幕怎么通的 | `im/fetch` HTTP 轮询实测 |
+| B站接口矩阵 | wbi 签名、弹幕、私信、收藏闭环 |
+| 红果短剧 Web 端方案 | 官网零签名直取 MP4 |
+| 各平台 APK 包结构清单 | so / dex / 大资源 |
+
+完整的逐轮实测证据与复现脚本也在该私有仓库的 `HANDOVER.md`。
 
 ---
 
