@@ -152,3 +152,8 @@ key.properties
 /docs/DOUYIN-*.md
 /docs/SESSION-RESULTS.md
 /docs/CODE-AUDIT-*.md
+# 提示词与封存代码：不入公开仓库
+# 完整内容在私有仓库 video-fusion-prompts
+/AGENTS.md
+/archive/
+/tool/VF_DY_LIVE_REPORT.md
