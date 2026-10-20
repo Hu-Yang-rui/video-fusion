@@ -146,3 +146,9 @@ key.properties
 #
 # 本地仍保留在 APK样本/，供本机分析使用。
 /APK样本/
+# 抖音/B站逆向分析文档（含真实接口路径与风控细节）
+# 完整内容在私有仓库 video-fusion-prompts
+/douyin-research/
+/docs/DOUYIN-*.md
+/docs/SESSION-RESULTS.md
+/docs/CODE-AUDIT-*.md
