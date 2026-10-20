@@ -284,4 +284,84 @@ void main() {
       expect(d1.seriesId, '7503745441910017049');
     });
   });
+  group('红果适配器：集数可用性（实测覆盖不完整）', () {
+    test('360p 不可用时抛明确错误，不返回假播放源', () async {
+      final player = readFixture('hongguo_player.html');
+      if (player == null) return;
+
+      // 播放页正常，但 HEAD 请求返回 404（模拟真实情况：
+      // 第 8、9、13-18、21-29 集官网确实 404）
+      final adapter = HongguoAdapter(
+        http: _UnplayableHttp(player),
+        logger: FusionLogger(enabled: false),
+      );
+
+      expect(
+        () => adapter.resolvePlayback(
+          PlaybackRequest(
+            platformVideoId: '7503745441910017049#1',
+            canonicalUrl:
+                'https://hongguoduanju.com/player/7503745441910017049',
+            preferredMode: PlaybackMode.native,
+          ),
+        ),
+        throwsA(isA<FusionException>().having(
+          (e) => e.userMessage,
+          'userMessage',
+          contains('暂无可播放的公开源'),
+        )),
+        reason: '不能返回一个注定 404 的播放地址',
+      );
+    });
+
+    test('isEpisodePlayable 对 404 返回 false', () async {
+      final player = readFixture('hongguo_player.html');
+      if (player == null) return;
+
+      final adapter = HongguoAdapter(
+        http: _UnplayableHttp(player),
+        logger: FusionLogger(enabled: false),
+      );
+      expect(await adapter.isEpisodePlayable('123'), isFalse);
+    });
+  });
+}
+
+/// 播放页正常，但 mp4 HEAD 返回 404。
+class _UnplayableHttp extends FusionHttpClient {
+  _UnplayableHttp(this.playerHtml) : super();
+  final String playerHtml;
+
+  @override
+  Future<HttpResult> get(
+    String url, {
+    Map<String, String> headers = const {},
+    String? platformId,
+    Duration? timeout,
+    bool? followRedirects,
+    Set<int>? acceptStatuses,
+    bool keepRawBytes = false,
+  }) async =>
+      HttpResult(
+        statusCode: 200,
+        body: playerHtml,
+        headers: const {},
+        url: url,
+        attempts: 1,
+        durationMs: 1,
+      );
+
+  @override
+  Future<HttpResult> send(
+    HttpRequestSpec spec, {
+    bool? followRedirects,
+  }) async =>
+      HttpResult(
+        statusCode: 404,
+        body: '',
+        headers: const {},
+        url: spec.url,
+        attempts: 1,
+        durationMs: 1,
+      );
 }

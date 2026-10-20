@@ -289,6 +289,29 @@ class HongguoAdapter extends PlatformAdapter {
           )
         : detail.episodes.first;
 
+    // 关键：官网 360p 不是每集都有（实测第 8、9、13–18、21–29 集 404）。
+    // 不能假设"拿到 vid 就能播"，先探测。
+    final playable = await isEpisodePlayable(ep.vid);
+    if (!playable) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '第 ${ep.index} 集暂无可播放的公开源。'
+            '红果官网只对部分集数开放公开播放（实测约前 7 集及零星几集），'
+            '其余需要官方 APP。',
+        technicalMessage: '360p HEAD returned non-2xx for vid=${ep.vid} '
+            '(seriesId=$seriesId, episode=${ep.index}); '
+            '官网公开源覆盖不完整，非本项目实现缺陷',
+        platformId: id,
+        retryable: false,
+        diagnostics: {
+          'seriesId': seriesId,
+          'episode': ep.index,
+          'vid': ep.vid,
+          'note': '官网公开 360p 仅覆盖部分集数',
+        },
+      );
+    }
+
     return NativePlaybackSource(
       videoId: videoId,
       videoStreamUrl: ep.playUrl,
@@ -387,6 +410,70 @@ class HongguoAdapter extends PlatformAdapter {
               fetchedAt: now,
             ))
         .toList();
+  }
+
+  /// 探测某一集的 360p 是否真的可播。
+  ///
+  /// # 为什么需要
+  ///
+  /// 实测发现：**官网的 360p 不是每集都有**。
+  ///
+  /// 逐集探测 76 集的结果（2026-10-20）：
+  ///
+  /// ```
+  /// 第 1–7 集   ✓
+  /// 第 8–9 集   ✗ 404
+  /// 第 10–12 集 ✓
+  /// 第 13–18 集 ✗ 404
+  /// 第 19–20 集 ✓
+  /// 第 21–29 集 ✗ 404
+  /// 第 30、48 集 ✓（零散可用）
+  /// 第 40 集以后 ✗ 404
+  /// ```
+  ///
+  /// 这与 TV 版 Release 说明一致：「公开备用页面只开放前三集」
+  /// ——实际是**部分集有兜底缓存**，不是完整覆盖。
+  ///
+  /// 因此不能假设「拿到 vid 就能播」，必须探测。
+  Future<bool> isEpisodePlayable(String vid) async {
+    if (vid.isEmpty) return false;
+    try {
+      final res = await _http.send(
+        HttpRequestSpec(
+          url: '$_origin/video/public/$vid/360p.mp4',
+          method: 'HEAD',
+          headers: {
+            'User-Agent': _webUa,
+            'Referer': '$_origin/',
+          },
+          platformId: id,
+          timeout: const Duration(seconds: 12),
+        ),
+      );
+      return res.statusCode == 200 || res.statusCode == 206;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 探测整部剧哪些集可播（供 UI 标记不可用集）。
+  ///
+  /// 并发限制 4，避免对平台造成压力。
+  Future<Map<int, bool>> probeEpisodes(String seriesId) async {
+    final detail = await fetchSeriesDetail(seriesId);
+    final result = <int, bool>{};
+
+    const concurrency = 4;
+    for (var i = 0; i < detail.episodes.length; i += concurrency) {
+      final batch = detail.episodes.skip(i).take(concurrency).toList();
+      final results = await Future.wait(
+        batch.map((e) => isEpisodePlayable(e.vid)),
+      );
+      for (var j = 0; j < batch.length; j++) {
+        result[batch[j].index] = results[j];
+      }
+    }
+    return result;
   }
 
   // ── 首页推荐流（必需）────────────────────────────────────
