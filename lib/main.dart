@@ -22,6 +22,7 @@ import 'package:media_kit/media_kit.dart';
 
 import 'src/adapters/bilibili_adapter.dart';
 import 'src/adapters/douyin_adapter.dart';
+import 'src/adapters/hongguo_adapter.dart';
 import 'src/adapters/mock_adapter.dart';
 import 'src/adapters/platform_registry.dart';
 import 'src/core/credential_vault.dart';

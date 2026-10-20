@@ -78,15 +78,15 @@ key.properties
 # æ„å»ºç¬¦å·
 /build/symbols/
 
-# ÌáÊ¾´Ê×Ó²Ö¿â£¨¶ÀÁ¢Ë½ÓĞ²Ö¿â£¬²»ÄÉÈëÖ÷²Ö¿â£©
+# ï¿½ï¿½Ê¾ï¿½ï¿½ï¿½Ó²Ö¿â£¨ï¿½ï¿½ï¿½ï¿½Ë½ï¿½Ğ²Ö¿â£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¿â£©
 /_prompts/
 
 
-# ä¯ÀÀÆ÷ mint ¹¤×÷Çø£¨º¬ Cookie£¬¾ø²»Èë¿â£©
+# ï¿½ï¿½ï¿½ï¿½ï¿½ mint ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Cookieï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½â£©
 /_mint/
 
 
-# Gradle ¹¹½¨²úÎï
+# Gradle ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 /android/build/
 
 
@@ -156,4 +156,5 @@ key.properties
 # å®Œæ•´å†…å®¹åœ¨ç§æœ‰ä»“åº“ video-fusion-prompts
 /AGENTS.md
 /archive/
-/tool/VF_DY_LIVE_REPORT.md/docs/
+/tool/VF_DY_LIVE_REPORT.md
+/docs/

@@ -219,15 +219,25 @@ class InteractionController extends ChangeNotifier {
 
   /// 该平台是否有可用的翻译能力。
   ///
-  /// 抖音目前没有官方评论翻译接口，也没有已授权的通用翻译服务，
-  /// 因此返回 false —— UI 据此**不渲染翻译入口**，
-  /// 而不是给一个点了必然失败的按钮。
-  bool get supportsTranslation => video.platformId == 'bilibili';
+  /// # 结论修正（2026-10-20）
+  ///
+  /// 早期版本只允许 B 站，理由是"抖音没有官方评论翻译接口"。
+  /// **该结论已被推翻**——抖音前端 bundle 里有：
+  ///
+  ///   POST /aweme/v1/web/comment/translate/
+  ///   GET  /aweme/v1/web/text/translate/
+  ///
+  /// 裸请求返回 `blocked`（网关拦截），但那是**会话环境不足**，
+  /// 不是接口不存在。因此抖音现在也渲染翻译入口，
+  /// 由 [DouyinTranslationProvider] 在真实 WebView 会话里尝试，
+  /// 失败时按实际响应分类给出准确原因。
+  bool get supportsTranslation =>
+      video.platformId == 'bilibili' || video.platformId == 'douyin';
 
   /// 翻译能力的不可用原因（供 UI 在必要时说明）。
   String? get translationUnavailableReason => supportsTranslation
       ? null
-      : '该平台的翻译接口需要登录态，当前不可用。';
+      : '该平台没有可用的评论翻译接口。';
 
   /// 目标语言。
   TranslationLanguage _translationLanguage = TranslationLanguage.zhHans;

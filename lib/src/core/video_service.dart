@@ -6,6 +6,7 @@
 ///  - 单个平台的失败不得阻塞其它平台的可用内容。
 library;
 
+import '../adapters/douyin/web_signer.dart';
 import '../adapters/platform_adapter.dart';
 import '../adapters/platform_registry.dart';
 import '../adapters/bilibili/im_upload_client.dart';
@@ -16,6 +17,7 @@ import '../core/http_client.dart';
 import '../core/logger.dart';
 import '../core/playback_policy.dart';
 import '../core/bilibili_translation_provider.dart';
+import '../core/douyin_translation_provider.dart';
 import '../core/translation_service.dart';
 import '../models/feed.dart';
 import '../models/translation.dart';
@@ -645,6 +647,9 @@ class VideoService {
   /// B 站翻译提供方（延迟创建，复用同一个 HTTP 客户端）。
   BilibiliTranslationProvider? _biliTranslation;
 
+  /// 抖音翻译提供方（延迟创建，复用调用方传入的 WebView 签名器）。
+  DouyinTranslationProvider? _douyinTranslation;
+
   /// 统一的翻译服务。
   TranslationService? _translation;
 
@@ -666,32 +671,60 @@ class VideoService {
   ///
   /// 返回的一定是 [TranslationResult]（失败也是结果，不抛异常），
   /// 因为评论面板里单条翻译失败不该中断整页。
+  ///
+  /// # 平台路由（2026-10-20 修正）
+  ///
+  /// 早期版本在这里硬编码 `platformId != 'bilibili'` 就返回失败，
+  /// 理由是"抖音没有翻译接口"。**该结论已被推翻**——
+  /// 抖音前端 bundle 里有 `/aweme/v1/web/comment/translate/` 与
+  /// `/aweme/v1/web/text/translate/`。
+  ///
+  /// 现在按平台选 provider：
+  ///  - `bilibili` → [BilibiliTranslationProvider]（rpid 驱动，需登录）
+  ///  - `douyin`   → [DouyinTranslationProvider]（WebView 会话内签名）
+  ///  - 其它       → 如实说明无可用翻译
   Future<TranslationResult> translateComment({
     required String platformId,
     required String commentId,
     required String text,
     PlatformSession? session,
     TranslationLanguage? language,
+    DouyinWebSigner? douyinSigner,
   }) async {
-    final service = translationServiceFor(session: session);
+    switch (platformId) {
+      case 'bilibili':
+        final service = translationServiceFor(session: session);
+        return service.translateComment(
+          commentId: commentId,
+          text: text,
+          language: language,
+        );
 
-    // 抖音（以及任何非 B 站平台）没有原生翻译接口。
-    // 走 B 站提供方必然失败，与其发一个注定失败的请求，
-    // 不如在这里就给出准确原因。
-    if (platformId != 'bilibili') {
-      return TranslationResult.failure(
-        errorMessage: '该平台没有可用的官方评论翻译接口，'
-            '且当前没有已授权的通用翻译服务。',
-        providerId: 'none',
-        targetLanguage: language ?? service.targetLanguage,
-      );
+      case 'douyin':
+        // 抖音翻译依赖 WebView 会话（签名 + UIFID 在页面上下文里）。
+        // 没有 signer 就如实说明，而不是发一个注定 blocked 的请求。
+        if (douyinSigner == null) {
+          return TranslationResult.failure(
+            errorMessage: '抖音翻译需要页面会话，当前未就绪。',
+            providerId: 'douyin',
+            targetLanguage: language ?? TranslationLanguage.zhHans,
+          );
+        }
+        final provider = _douyinTranslation ??=
+            DouyinTranslationProvider(signer: douyinSigner, logger: _logger);
+        return provider.translate(
+          text: text,
+          targetLanguage: language ?? TranslationLanguage.zhHans,
+          commentId: commentId,
+        );
+
+      default:
+        return TranslationResult.failure(
+          errorMessage: '该平台没有可用的评论翻译接口。',
+          providerId: 'none',
+          targetLanguage: language ?? TranslationLanguage.zhHans,
+        );
     }
-
-    return service.translateComment(
-      commentId: commentId,
-      text: text,
-      language: language,
-    );
   }
 
 
