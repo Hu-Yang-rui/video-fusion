@@ -83,9 +83,22 @@ class HongguoEpisodeMedia {
 
   bool get isEmpty => qualities.isEmpty;
 
-  /// 取最接近目标高度的档位。
+  /// 取目标清晰度的档位。
+  ///
+  /// 先按档位标签精确匹配（`1080` → `1080p`），匹配不到再按物理高度
+  /// 找最接近的。不直接用高度差是因为平台的 `height` 是**实际编码高度**，
+  /// 与档位标签不一致：实测 540p 档的 height 是 1024，
+  /// 若按高度差算，请求 1080 会选中 540p（差 56）而不是 1080p（差 840）。
   HongguoQuality? pickByHeight(int targetHeight) {
     if (qualities.isEmpty) return null;
+
+    // 1) 标签精确匹配
+    final label = '${targetHeight}p';
+    for (final q in qualities) {
+      if (q.definition == label) return q;
+    }
+
+    // 2) 退化为高度差
     HongguoQuality best = qualities.first;
     var bestDiff = (best.height - targetHeight).abs();
     for (final q in qualities) {

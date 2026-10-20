@@ -402,7 +402,7 @@ class HongguoAdapter extends PlatformAdapter {
     final now = fetchedAt ?? DateTime.now().toIso8601String();
 
     return UnifiedVideo(
-      id: '$id:$videoId',
+      id: videoId,
       platformId: id,
       platformVideoId: videoId,
       originalUrl: '$_origin/player/$seriesId',
