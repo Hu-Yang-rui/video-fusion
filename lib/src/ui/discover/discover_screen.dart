@@ -61,6 +61,26 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   bool _searchMode = false;
   String _query = '';
 
+  /// 请求代际号：每次"换来源 / 换关键词 / 刷新"递增。
+  ///
+  /// # 为什么必须有它（真实缺陷）
+  ///
+  /// 发现页有三个并发入口：分类切换、下拉刷新、搜索。它们都写同一组
+  /// `_items` / `_offset` / `_error`。没有代际号时：
+  ///   - 用户点分类 A → 请求发出
+  ///   - 立刻点分类 B → 请求发出，`_items.clear()`
+  ///   - **A 的响应后到** → 把 A 的内容写进"B 的列表"
+  ///
+  /// 表现为"点了 B 却显示 A 的视频"，且下拉刷新后可能变成两者混杂。
+  /// 递增代际号后，旧响应回来直接丢弃。
+  int _generation = 0;
+
+  /// 当前是否处于"用户主动切换"的状态（决定是否显示整页骨架）。
+  ///
+  /// 关键：**刷新已有内容时不显示骨架**，否则列表会闪一下空白再回来，
+  /// 这是发现页"点视频前页面跳动"的观感来源之一。
+  bool get _showSkeleton => _loading && _items.isEmpty;
+
   @override
   void initState() {
     super.initState();
@@ -89,14 +109,16 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
 
   Future<void> _reload() async {
     final source = _active;
-    if (source == null || _loading) return;
+    if (source == null) return;
 
+    final gen = ++_generation;
     setState(() {
       _loading = true;
       _error = null;
-      _items.clear();
       _offset = 0;
       _hasMore = true;
+      // 换来源 / 刷新时清空，避免旧内容与新内容混杂
+      _items.clear();
     });
 
     final result = await widget.service.fetchFeed(
@@ -104,7 +126,8 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
       request: FeedRequest(offset: 0, pageSize: 20),
     );
 
-    if (!mounted) return;
+    // 期间换了来源 / 又刷新了一次：丢弃
+    if (!mounted || gen != _generation) return;
     setState(() {
       _loading = false;
       if (result.ok) {
@@ -119,6 +142,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
 
   Future<void> _loadMore() async {
     if (_loadingMore || !_hasMore || _loading || _active == null) return;
+    final gen = _generation;
     setState(() => _loadingMore = true);
 
     final result = await widget.service.fetchFeed(
@@ -126,7 +150,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
       request: FeedRequest(offset: _offset, pageSize: 20),
     );
 
-    if (!mounted) return;
+    if (!mounted || gen != _generation) return;
     setState(() {
       _loadingMore = false;
       if (result.ok) {
@@ -147,6 +171,42 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     _scroll.dispose();
     _searchCtrl.dispose();
     super.dispose();
+  }
+
+  /// 网格代理：按**内容实际高度**算每格高度，而不是写死宽高比。
+  ///
+  /// # 为什么不能用固定 childAspectRatio（真实缺陷）
+  ///
+  /// 卡片内容是「16:10 封面 + 2 行标题 + 1 行作者」，文字高度会随
+  /// 系统字号缩放变化。写死 `childAspectRatio: 0.78` 时：
+  ///  - 默认字号下：格子 230dp，内容约 180dp → 底部多出 50dp 空白
+  ///  - 系统字号 2.0 倍下：文字块涨到约 236dp > 230dp → **溢出**
+  ///
+  /// 溢出表现为黄黑条 / "BOTTOM OVERFLOWED"，且在小屏机上更容易触发。
+  /// 改为 `mainAxisExtent`：用当前 `textScaler` 把标题与作者行的真实
+  /// 高度算出来，再加上封面高度，格子永远刚好装得下内容。
+  ///
+  /// 这样也顺带解决了"底部留白过大"的观感问题。
+  SliverGridDelegate _gridDelegate(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    // 两列：减去左右 pageInset 与列间距后对半分
+    final cardWidth =
+        (width - AppleSpace.pageInset * 2 - AppleSpace.md) / 2;
+    // 封面固定 16:10（与 VideoGridCard 的 AspectRatio 一致）
+    final coverHeight = cardWidth * 10 / 16;
+
+    final scaler = MediaQuery.textScalerOf(context);
+    final titleSize = scaler.scale(AppleType.subheadline.fontSize ?? 15);
+    final authorSize = scaler.scale(AppleType.caption1.fontSize ?? 12);
+    // 标题 2 行（行高 1.35）+ 间距 3 + 作者 1 行（行高约 1.3）
+    final textBlock = titleSize * 1.35 * 2 + 3 + authorSize * 1.3;
+
+    return SliverGridDelegateWithFixedCrossAxisCount(
+      crossAxisCount: 2,
+      mainAxisSpacing: AppleSpace.lg,
+      crossAxisSpacing: AppleSpace.md,
+      mainAxisExtent: coverHeight + AppleSpace.sm + textBlock + 2,
+    );
   }
 
   @override
@@ -282,6 +342,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   }
 
   Future<void> _performSearch(String query) async {
+    final gen = ++_generation;
     setState(() {
       _loading = true;
       _error = null;
@@ -291,7 +352,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
 
     final result = await widget.service.searchVideos(query, pageSize: 20);
 
-    if (!mounted) return;
+    if (!mounted || gen != _generation) return;
     setState(() {
       _loading = false;
       if (result.ok) {
@@ -303,7 +364,10 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   }
 
   Widget _buildBody(AppleColors c) {
-    if (_loading) {
+    // 只在"首次加载 / 换来源后还没内容"时显示骨架。
+    // 已有内容时的刷新走 RefreshIndicator 的转圈，不替换整页 ——
+    // 否则每次下拉都闪一次空白，观感像页面在跳。
+    if (_showSkeleton) {
       return _buildSkeleton(c);
     }
 
@@ -345,12 +409,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
               AppleSize.tabBar +
               AppleSpace.xl,
         ),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 2,
-          mainAxisSpacing: AppleSpace.lg,
-          crossAxisSpacing: AppleSpace.md,
-          childAspectRatio: 0.78,
-        ),
+        gridDelegate: _gridDelegate(context),
         itemCount: _items.length + (_loadingMore ? 2 : 0),
         itemBuilder: (context, index) {
           if (index >= _items.length) {
@@ -384,12 +443,9 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
         horizontal: AppleSpace.pageInset,
         vertical: AppleSpace.xs,
       ),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        mainAxisSpacing: AppleSpace.lg,
-        crossAxisSpacing: AppleSpace.md,
-        childAspectRatio: 0.78,
-      ),
+      // 骨架与真实卡片用同一个代理：否则加载完成的一瞬间
+      // 格子高度会变，列表整体跳动一下（这正是"进入前闪一下"的成因）。
+      gridDelegate: _gridDelegate(context),
       itemCount: 6,
       itemBuilder: (context, i) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,

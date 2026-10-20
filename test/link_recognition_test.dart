@@ -64,6 +64,7 @@ class FakeHttpClient extends FusionHttpClient {
     Duration? timeout,
     bool? followRedirects,
     Set<int>? acceptStatuses,
+    bool keepRawBytes = false,
   }) async {
     requestedUrls.add(url);
     throw FusionException(
@@ -322,15 +323,22 @@ void main() {
       expect(bili.capabilities.supportsNativePlayback, isTrue);
 
       // 抖音：APK 逆向分析后确认 feed 接口返回 mp4 直链，
-      // 因此 supportsNativePlayback 已升级为 true；
-      // 但详情/搜索仍需 Argus 签名，requiresSignature 保持 true。
+      // 因此 supportsNativePlayback 已升级为 true。
+      //
+      // 2026-10-19 更新：detail 通过应用内 WebView（正式 UIFID）实测可用，
+      // 因此 supportsMetadata 由 false 改为 true。
+      // 依据：`tool/probe_douyin_uifid_upgrade.mjs` 实测
+      //   - UIFID_TEMP @ ~500ms → detail 403
+      //   - UIFID（正式）@ ~2500-4000ms → detail 200 + aweme_detail
+      // requiresSignature 仍为 true：仍需要浏览器会话凭证（UIFID），
+      // 只是现在由应用内 WebView 自行获取，而不是"不支持"。
       final dy = all.firstWhere((d) => d.id == 'douyin');
       expect(dy.capabilities.supportsNativePlayback, isTrue,
           reason: 'feed 返回 video/mp4 直链，支持原生播放');
       expect(dy.capabilities.requiresSignature, isTrue,
-          reason: '详情/搜索接口仍需 X-Argus 签名');
-      expect(dy.capabilities.supportsMetadata, isFalse,
-          reason: '按 aweme_id 查详情不可用，只能通过 feed 拿元数据');
+          reason: '仍需要浏览器会话凭证（正式 UIFID），只是已由 WebView 实现');
+      expect(dy.capabilities.supportsMetadata, isTrue,
+          reason: 'detail 走应用内 WebView（正式 UIFID）已实测可用');
     });
   });
 

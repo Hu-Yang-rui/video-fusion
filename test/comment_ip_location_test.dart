@@ -54,6 +54,7 @@ class FakeHttp extends FusionHttpClient {
     Duration? timeout,
     bool? followRedirects,
     Set<int>? acceptStatuses,
+    bool keepRawBytes = false,
   }) async {
     // view 接口：用于把 BV 解析成 aid
     if (url.contains('/x/web-interface/view')) {

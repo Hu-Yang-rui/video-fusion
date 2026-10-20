@@ -1,4 +1,4 @@
-﻿name: video_fusion
+name: video_fusion
 description: "A new Flutter project."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.4.0+4
+version: 0.5.0+5
 
 environment:
   sdk: ^3.13.4
@@ -46,6 +46,19 @@ dependencies:
   flutter_secure_storage: ^11.2.0
   media_kit_libs_android_video: ^1.3.8
   flutter_inappwebview: 6.2.0-beta.3
+  image_picker: ^1.2.4
+
+  # 已移除的直接依赖：jni / jni_flutter / ffi / jni_util
+  #
+  # 它们原本只服务于「本地签名库（libmetasec_ml.so）」那条路，
+  # 该方案已封存到 archive/douyin-native-signer-v2/。
+  #
+  # 删除依据（2026-10-20 审计）：
+  #  - 全仓库（lib / test / tool）搜 `package:jni|jni_flutter|jni_util|ffi/`
+  #    → 零引用
+  #  - pubspec.lock 里这四个包没有父依赖（不是 flutter_inappwebview 的传递依赖）
+  #
+  # 重新启用签名库时按 archive/douyin-native-signer-v2/README.md 恢复。
 
 dev_dependencies:
   flutter_test:

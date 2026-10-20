@@ -1,4 +1,4 @@
-﻿/// 「B站收藏修复 + 统一互动状态管理」的回归测试。
+/// 「B站收藏修复 + 统一互动状态管理」的回归测试。
 ///
 /// # 这组测试守护的是什么缺陷
 ///
@@ -689,6 +689,7 @@ class _StubHttp extends FusionHttpClient {
     Duration? timeout,
     bool? followRedirects,
     Set<int>? acceptStatuses,
+    bool keepRawBytes = false,
   }) async {
     requestedUrls.add(url);
     final body = responses.entries

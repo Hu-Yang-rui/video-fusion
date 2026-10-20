@@ -9,6 +9,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'errors.dart';
 import 'logger.dart';
@@ -34,6 +35,7 @@ class HttpResult {
     required this.durationMs,
     this.redirectChain = const [],
     this.setCookies = const [],
+    this.rawBytes,
   });
 
   final int statusCode;
@@ -43,6 +45,16 @@ class HttpResult {
   final int attempts;
   final int durationMs;
   final List<String> redirectChain;
+
+  /// 响应体的**原始字节**。
+  ///
+  /// [body] 是把字节按 UTF-8 解码后的文本，对 JSON / HTML 够用，
+  /// 但对**二进制响应**（B站弹幕 `seg.so` 是 protobuf）会丢信息：
+  /// 非 UTF-8 字节会被替换成 U+FFFD，无法还原。
+  ///
+  /// 因此二进制接口必须读这个字段，不能读 [body]。
+  /// 为 null 表示调用方没有要求保留原始字节（默认不保留，省内存）。
+  final Uint8List? rawBytes;
 
   /// 原始 `Set-Cookie` 头（未合并、未解析）。
   ///
@@ -143,6 +155,7 @@ class HttpRequestSpec {
     this.platformId,
     this.followRedirects,
     this.acceptStatuses,
+    this.keepRawBytes = false,
   });
 
   final String url;
@@ -156,6 +169,12 @@ class HttpRequestSpec {
 
   /// 允许接受的状态码；为 null 时接受 2xx。
   final Set<int>? acceptStatuses;
+
+  /// 是否保留响应体的原始字节（见 [HttpResult.rawBytes]）。
+  ///
+  /// 二进制接口（B站弹幕 protobuf）必须置 true，否则拿不到可解析的数据。
+  /// 默认 false：文本响应保留字节只是浪费内存。
+  final bool keepRawBytes;
 }
 
 /// 统一 HTTP 客户端。
@@ -214,10 +233,25 @@ class FusionHttpClient {
           if (location != null) redirectChain.add(location);
         }
 
-        final body = await response
-            .transform(utf8.decoder)
-            .join()
-            .timeout(timeout, onTimeout: () => '');
+        // 二进制响应必须保留原始字节：UTF-8 解码会把非 UTF-8 字节
+        // 替换成 U+FFFD，protobuf 数据因此无法还原。
+        Uint8List? rawBytes;
+        String body;
+        if (spec.keepRawBytes) {
+          final chunks = <int>[];
+          await response
+              .timeout(timeout, onTimeout: (sink) => sink.close())
+              .forEach(chunks.addAll);
+          rawBytes = Uint8List.fromList(chunks);
+          // 仍然给一个 body：调用方可能用它做错误信息（例如 403 的
+          // 文本原因）。用 latin1 而不是 utf8，避免解码抛异常。
+          body = latin1.decode(rawBytes, allowInvalid: true);
+        } else {
+          body = await response
+              .transform(utf8.decoder)
+              .join()
+              .timeout(timeout, onTimeout: () => '');
+        }
 
         final responseHeaders = <String, String>{};
         response.headers.forEach((name, values) {
@@ -250,6 +284,7 @@ class FusionHttpClient {
             durationMs: durationMs,
             redirectChain: redirectChain,
             setCookies: setCookies,
+            rawBytes: rawBytes,
           );
         }
 
@@ -367,6 +402,7 @@ class FusionHttpClient {
     Duration? timeout,
     bool? followRedirects,
     Set<int>? acceptStatuses,
+    bool keepRawBytes = false,
   }) =>
       send(HttpRequestSpec(
         url: url,
@@ -375,6 +411,7 @@ class FusionHttpClient {
         timeout: timeout,
         followRedirects: followRedirects,
         acceptStatuses: acceptStatuses,
+        keepRawBytes: keepRawBytes,
       ));
 
   /// 发起 POST 并返回文本。

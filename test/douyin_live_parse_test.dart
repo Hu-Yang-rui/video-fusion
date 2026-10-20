@@ -39,6 +39,7 @@ class FakeLiveHttp extends FusionHttpClient {
     Duration? timeout,
     bool? followRedirects,
     Set<int>? acceptStatuses,
+    bool keepRawBytes = false,
   }) async {
     calls++;
     lastUrl = url;

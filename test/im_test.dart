@@ -1,4 +1,4 @@
-﻿/// 私信（IM）测试。
+/// 私信（IM）测试。
 ///
 /// 守护的是"**不许用假数据冒充真实功能**"这条底线：
 ///  - 消息正文解析：四种实测类型（1/18 文本、10 系统卡片、2 图片、未知）
@@ -18,7 +18,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:video_fusion/src/adapters/douyin/signature_capability.dart';
 import 'package:video_fusion/src/adapters/bilibili/im_client.dart';
 import 'package:video_fusion/src/adapters/platform_adapter.dart';
 import 'package:video_fusion/src/adapters/platform_registry.dart';
@@ -708,73 +707,6 @@ void main() {
       expect(chat.messages.map((m) => m.msgKey), isNot(contains('stale')),
           reason: '代际号变化后，旧请求的结果必须被丢弃，'
               '否则会把用户刚刷新的列表覆盖回旧数据');
-    });
-  });
-
-  // ── 8. 签名能力审计 ───────────────────────────────────────
-  group('抖音签名能力审计', () {
-    test('当前结论：不可用，且给出原因与证据', () {
-      final cap = DouyinSignatureCapability.audited();
-      expect(cap.available, isFalse);
-      expect(cap.kind, DouyinSignatureKind.none);
-      expect(cap.reason, isNotEmpty);
-      expect(cap.evidence.length, greaterThanOrEqualTo(4),
-          reason: '证据链要能追溯，不能只写一句"不可用"');
-      expect(cap.verifiedAt, isNotNull);
-    });
-
-    test('受影响的接口清单覆盖详情/搜索/话题/互动', () {
-      final cap = DouyinSignatureCapability.audited();
-      final paths = cap.affectedEndpoints.map((e) => e.endpoint).toList();
-      expect(paths, contains('/aweme/v1/aweme/detail/'));
-      expect(paths, contains('/aweme/v1/general/search/single/'));
-      expect(paths, contains('/aweme/v1/challenge/detail/'));
-      expect(paths, contains('/aweme/v1/commit/item/digg/'));
-      // 每个受保护接口都必须标出"需要签名"
-      for (final e in cap.affectedEndpoints) {
-        expect(e.requiresSignature, isTrue);
-        expect(e.observedResult, isNotEmpty);
-      }
-    });
-
-    test('用户可见文案说明不可用但不谎称已实现', () {
-      final cap = DouyinSignatureCapability.audited();
-      expect(cap.userFacingNotice, contains('不实现'));
-      expect(cap.userFacingNotice, contains('推荐流'));
-    });
-
-    test('诊断信息不含任何密钥/凭据字段', () {
-      final d = DouyinSignatureCapability.audited().toDiagnostics();
-      final text = d.toString().toLowerCase();
-      for (final banned in ['secret', 'password', 'sessdata', 'bili_jct', 'token=']) {
-        expect(text.contains(banned), isFalse,
-            reason: '诊断信息不得包含凭据（命中 $banned）');
-      }
-    });
-
-    test('默认提供方不可用，且签名调用明确抛 unsupportedPlatform', () async {
-      final provider = DouyinSignatureProvider.unavailable;
-      expect(provider.isAvailable, isFalse);
-      await expectLater(
-        provider.sign(const DouyinSignatureContext(
-          method: 'GET',
-          path: '/aweme/v1/aweme/detail/',
-          query: 'aweme_id=1',
-          timestampMs: 0,
-        )),
-        throwsA(isA<FusionException>().having(
-          (e) => e.code,
-          'code',
-          FusionErrorCode.unsupportedPlatform,
-        )),
-      );
-    });
-
-    test('签名结果的有效期判断（供将来接入授权提供方时复用）', () {
-      const r = DouyinSignatureResult(headers: {'X-Argus': 'x'}, expiresAtMs: 1000);
-      expect(r.isExpiredAt(999), isFalse);
-      expect(r.isExpiredAt(1000), isTrue);
-      expect(r.isExpiredAt(1001), isTrue);
     });
   });
 

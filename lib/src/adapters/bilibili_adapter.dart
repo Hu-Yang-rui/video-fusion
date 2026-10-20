@@ -31,6 +31,9 @@ library;
 import '../core/errors.dart';
 import '../core/credential_vault.dart';
 import 'bilibili/im_client.dart';
+import 'bilibili/im_emote_client.dart';
+import 'bilibili/im_upload_client.dart';
+import '../models/video_danmaku.dart';
 import 'bilibili/wbi_signer.dart';
 import '../core/http_client.dart';
 import '../core/logger.dart';
@@ -41,6 +44,7 @@ import '../models/interaction.dart';
 import '../models/live.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
+import 'json_helpers.dart';
 import 'platform_adapter.dart';
 
 class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
@@ -1862,6 +1866,160 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     );
   }
 
+  // ── 视频内弹幕 ──────────────────────────────────────────────
+  //
+  // # 与直播弹幕的区别
+  //
+  // `fetchLiveDanmakuEndpoint` 拿的是**直播间实时弹幕流**的连接参数
+  // （wss + token），要自己维护长连接。
+  //
+  // 这里拿的是**点播视频时间轴上的弹幕**，一次 HTTP 拿一段，
+  // 用于在播放器上叠加显示。两者接口、协议、生命周期都不同。
+  //
+  // # 接口选择（实测本轮，真实视频 BV1GJ411x7h7 / cid=137649199）
+  //
+  // | 接口 | 结果 |
+  // |---|---|
+  // | `/x/v2/dm/web/seg.so?type=1&oid={cid}&pid={aid}&segment_index=N` | 200 / 163,551 字节 |
+  // | `/x/v1/dm/list.so?oid={cid}`（旧版 XML） | 200 / 108,364 字节 |
+  //
+  // 两者内容一致。本实现**只用 protobuf**：
+  //  - XML 的 `<d p="...">` 是位置耦合的（第 1 个字段是时间、第 2 个是模式…），
+  //    平台改一下顺序就全错位
+  //  - protobuf 是字段号耦合，加字段不影响已有字段
+  //
+  // # 分段语义
+  //
+  // 按视频时长切段，**每段 6 分钟（360 秒）**，`segment_index` 从 1 开始。
+  // 实测 `segment_index` 是必需参数，缺了返回空。
+  // 因此必须知道时长才能拉全——调用方从 `VideoMetadata.durationSeconds` 传。
+
+  @override
+  bool get supportsVideoDanmaku => true;
+
+  @override
+  Future<List<VideoDanmaku>> fetchVideoDanmaku(
+    String platformVideoId, {
+    double? durationSeconds,
+    double? fromSeconds,
+    double? toSeconds,
+  }) async {
+    // 弹幕接口的 `oid` 是 **cid**（不是 aid，也不是 bvid）。
+    // view 接口的响应里 cid 是**第一 P** 的 cid；多 P 视频要按分 P 取，
+    // 本方法只覆盖第一 P——多 P 的 cid 需要调用方另传，这里如实说明。
+    final cid = await _resolveCid(platformVideoId);
+    if (cid == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '无法解析该视频的分区 ID，暂时无法加载弹幕。',
+        technicalMessage: 'Cannot resolve cid for $platformVideoId',
+        platformId: id,
+      );
+    }
+
+    final aid = await _resolveAid(platformVideoId);
+    final segments = danmakuSegmentCount(durationSeconds);
+
+    final collected = <VideoDanmaku>[];
+    final seen = <String>{};
+
+    for (var index = 1; index <= segments; index++) {
+      final url = '$_apiBase/x/v2/dm/web/seg.so'
+          '?type=1&oid=$cid'
+          '${aid != null ? '&pid=$aid' : ''}'
+          '&segment_index=$index';
+
+      final result = await _http.get(
+        url,
+        headers: {
+          'Referer': '$_referer/video/$platformVideoId',
+          'Accept': '*/*',
+        },
+        platformId: id,
+        acceptStatuses: const {200, 304},
+        keepRawBytes: true,
+      );
+
+      // 304 = 该段没有弹幕（平台用这个表示空段，而不是返回空体）。
+      if (result.statusCode == 304) continue;
+
+      final bytes = result.rawBytes;
+      if (bytes == null || bytes.isEmpty) continue;
+
+      DanmakuSegment parsed;
+      try {
+        parsed = parseDanmakuSegment(bytes, segmentIndex: index);
+      } on FormatException catch (e) {
+        // 单段解析失败不该让整次调用失败：记录后继续拉下一段。
+        // 但如果**所有**段都失败，下面会因为结果为空而报错。
+        _logger.warn('video danmaku: segment parse failed', {
+          'cid': cid,
+          'segment': index,
+          'bytes': bytes.length,
+          'error': e.message,
+        });
+        continue;
+      }
+
+      for (final item in parsed.items) {
+        if (seen.add(item.id)) collected.add(item);
+      }
+    }
+
+    if (collected.isEmpty) {
+      throw FusionException(
+        code: FusionErrorCode.parseError,
+        userMessage: '抖音返回了无法解析的弹幕数据。',
+        technicalMessage: 'video danmaku: all $segments segment(s) empty or '
+            'unparsable for cid=$cid (duration=$durationSeconds)',
+        platformId: id,
+        retryable: true,
+        diagnostics: {
+          'cid': cid,
+          'aid': aid,
+          'segments': segments,
+        },
+      );
+    }
+
+    // 按时间排序：播放器要顺序消费。
+    collected.sort((a, b) => a.progressMs.compareTo(b.progressMs));
+
+    // 时间区间过滤（可选）。
+    if (fromSeconds == null && toSeconds == null) return collected;
+    final fromMs = ((fromSeconds ?? 0) * 1000).round();
+    final toMs = toSeconds == null ? null : (toSeconds * 1000).round();
+    return collected
+        .where((d) =>
+            d.progressMs >= fromMs && (toMs == null || d.progressMs <= toMs))
+        .toList(growable: false);
+  }
+
+  /// cid 缓存（弹幕接口按 cid 取，同一视频会反复用到）。
+  final Map<String, int> _cidCache = {};
+
+  /// 解析视频的 cid（第一 P）。
+  ///
+  /// 与 [_resolveAid] 共用同一次 view 请求的结果，但分开缓存：
+  /// aid 与 cid 是两个不同用途的标识，混在一个 map 里会误导。
+  Future<int?> _resolveCid(String platformVideoId) async {
+    final cached = _cidCache[platformVideoId];
+    if (cached != null) return cached;
+
+    final json = await _http.getJson(
+      '$_apiBase/x/web-interface/view?${_videoIdQuery(platformVideoId)}',
+      headers: const {'Referer': _referer, 'Accept': 'application/json'},
+      platformId: id,
+    );
+    if ((json['code'] as num?)?.toInt() != 0) return null;
+    final data = json['data'];
+    if (data is! Map) return null;
+    final cid = (Map<String, Object?>.from(data)['cid'] as num?)?.toInt();
+    if (cid == null) return null;
+    _cidCache[platformVideoId] = cid;
+    return cid;
+  }
+
   // ── 辅助 ────────────────────────────────────────────────────
 
   String _videoIdQuery(String videoId) {
@@ -1953,17 +2111,9 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
   ///
   /// B 站同一个接口里 id 的类型并不统一（一级分区是数字、
   /// 二级分区是字符串），因此不能直接 `as num?`。
-  static int? _toInt(Object? value) {
-    if (value is num) return value.toInt();
-    if (value is String) return int.tryParse(value);
-    return null;
-  }
+  static int? _toInt(Object? value) => jsonToInt(value);
 
-  static String? _nullableString(Object? value) {
-    if (value == null) return null;
-    if (value is String) return value.isEmpty ? null : value;
-    return value.toString();
-  }
+  static String? _nullableString(Object? value) => jsonToNullableString(value);
 
   /// 宽松取浮点：兼容 num、数字字符串与 "MM:SS"/"H:MM:SS" 时长文本。
   ///
@@ -2991,17 +3141,418 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     );
 
     final code = json['code'];
+    // 风控拦截（-401）时把平台给的判据带出来：
+    // 用户据此知道"去网页端验证一次就能过"，而不是反复点重试。
+    final risk = _parseRiskControl(json);
+
     return InteractionResult(
       accepted: code == 0,
-      // 两道校验的失败各有其义，不能都揉成"投币失败"：
-      // 一个是账号能力问题（等也没用），一个是余额问题（攒够才行）。
+      // 各失败的语义不同，不能都揉成"投币失败"：
+      // 能力问题（等也没用）/ 余额问题（攒够才行）/ 风控（去验证）。
       message: switch (code) {
         0 => _nullableString(json['message']),
         116 => '当前账号不可用币（平台已关闭该能力）。',
         -104 => '硬币余额不足，无法投币。',
+        -401 => risk?.userHint ?? '投币被风控拦截，请到网页端操作一次再回来。',
+        -403 => '账号被风控标记，投币失败。',
         _ => _nullableString(json['message']),
       },
       upstreamCode: code,
+      riskControl: risk,
+    );
+  }
+
+  // ── 评论点赞 / 评论回复 / 一键三连 ──────────────────────────
+  //
+  // 本轮实测（2026-10-19，真实登录账号）：
+  //
+  // | 接口 | 结果 |
+  // |---|---|
+  // | `POST /x/v2/reply/action` | `code=0 OK`（点赞成功） |
+  // | `POST /x/v2/reply/add` | `code=0`，返回 `data.rpid_str` |
+  // | `POST /x/v2/reply/del` | `code=0 OK`（撤回成功） |
+  // | `POST /x/web-interface/archive/like` | `code=0 OK` |
+  // | `POST /x/web-interface/coin/add` | **`-401 非法访问`**（风控，见下） |
+  // | `POST /x/v3/fav/resource/deal` | `code=0`（**必须带 `add_media_ids`**） |
+  //
+  // # 投币的两个真实拦截（必须区分，文案不同）
+  //
+  //  - `-401 非法访问` + `data.ga_data.decisions = ["verify_captcha_level3"]`
+  //    → **风控要求人机验证**，不是余额问题，重试无用
+  //  - `-403 账号异常,操作失败` → 账号被风控标记
+  //  - `-104 操作余额不足` / `116 消耗的硬币大于剩余数` → 余额或能力问题
+  //
+  // 注意 `-401` 的响应体里 `data.ga_data` 明确写了要哪一级验证码，
+  // 这是唯一能区分"风控"与"参数错"的证据，必须读出来告诉用户。
+  //
+  // # 收藏的坑
+  //
+  // `add_media_ids` **不能为空**。传空串返回 `2001000 参数错误`。
+  // 必须先从 `folder/created/list-all` 拿真实夹 id（默认收藏夹也在里面）。
+  // 且响应里 `data.success_num` **恒为 0**，即使写入生效——不能用它判成败，
+  // 要复查归属。
+
+  @override
+  bool get supportsCommentLike => true;
+
+  @override
+  Future<InteractionResult> setCommentLike(
+    String platformVideoId, {
+    required String commentId,
+    required bool like,
+    required PlatformSession session,
+  }) async {
+    final aid = await _resolveAid(platformVideoId);
+    if (aid == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '无法解析该视频的 ID，暂时无法给评论点赞。',
+        technicalMessage: 'Cannot resolve aid for $platformVideoId',
+        platformId: id,
+      );
+    }
+
+    final rpid = int.tryParse(commentId);
+    if (rpid == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '评论 ID 格式不正确。',
+        technicalMessage: 'commentId "$commentId" is not numeric',
+        platformId: id,
+      );
+    }
+
+    final json = await _postAuthed(
+      '/x/v2/reply/action',
+      body: {
+        'oid': '$aid',
+        'type': '1',
+        'rpid': '$rpid',
+        // B站语义：1 = 点赞，0 = 取消点赞
+        'action': like ? '1' : '0',
+        'csrf': _csrfFrom(session),
+      },
+      session: session,
+      endpoint: '/x/v2/reply/action',
+    );
+
+    final code = json['code'];
+    return InteractionResult(
+      accepted: code == 0,
+      message: _nullableString(json['message']),
+      upstreamCode: code,
+    );
+  }
+
+  @override
+  bool get supportsCommentReply => true;
+
+  @override
+  Future<String?> replyComment(
+    String platformVideoId, {
+    required String message,
+    required PlatformSession session,
+    String? replyToCommentId,
+  }) async {
+    final text = message.trim();
+    if (text.isEmpty) {
+      throw FusionException(
+        code: FusionErrorCode.invalidUrl,
+        userMessage: '回复内容不能为空。',
+        technicalMessage: 'empty reply message',
+        platformId: id,
+      );
+    }
+
+    final aid = await _resolveAid(platformVideoId);
+    if (aid == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '无法解析该视频的 ID，暂时无法回复。',
+        technicalMessage: 'Cannot resolve aid for $platformVideoId',
+        platformId: id,
+      );
+    }
+
+    final body = <String, String>{
+      'oid': '$aid',
+      'type': '1',
+      'message': text,
+      'csrf': _csrfFrom(session),
+      // 平台要求显式声明是 web 端发的；缺了会被判 -400。
+      'plat': '1',
+    };
+
+    // 二级评论：带上父评论 id 与所属根评论 id。
+    //
+    // 实测：只带 root 不带 parent（或反之）都返回 -400 参数错误。
+    // 对一级评论的回复，root 与 parent 是同一个值。
+    if (replyToCommentId != null && replyToCommentId.isNotEmpty) {
+      body['root'] = replyToCommentId;
+      body['parent'] = replyToCommentId;
+    }
+
+    final json = await _postAuthed(
+      '/x/v2/reply/add',
+      body: body,
+      session: session,
+      endpoint: '/x/v2/reply/add',
+    );
+
+    final code = json['code'];
+    if (code != 0) {
+      // 实测（2026-10-19）该接口的失败码：
+      //
+      // | code | 含义 | 能否重试 |
+      // |---|---|---|
+      // | `12051` | **评论频率限制**（同一账号短时间内连发） | 等一会儿可以 |
+      // | `12002` | 评论内容被屏蔽（含敏感词） | 改内容 |
+      // | `-101` | 未登录（由 _postAuthed 已拦） | 登录 |
+      // | `-111` | csrf 失效（由 _postAuthed 已拦） | 重登 |
+      //
+      // `12051` 最容易被误判成"未知错误"——它是**频控**，不是内容问题，
+      // 也不代表接口挂了。必须给用户"稍后再试"而不是"失败"。
+      if (code == 12051) {
+        throw FusionException(
+          code: FusionErrorCode.rateLimited,
+          userMessage: '评论发得太快了，请稍等一会儿再发。',
+          technicalMessage: 'reply/add returned 12051 (comment rate limited)',
+          upstreamCode: code,
+          platformId: id,
+          retryable: true,
+          diagnostics: const {
+            'blockedBy': 'comment_rate_limit',
+            'note': '同一账号短时间内连发评论会被频控，等几十秒即可',
+          },
+        );
+      }
+      if (code == 12002) {
+        throw FusionException(
+          code: FusionErrorCode.permissionDenied,
+          userMessage: '这条评论包含平台不允许的内容，请修改后再发。',
+          technicalMessage: 'reply/add returned 12002 (content rejected)',
+          upstreamCode: code,
+          platformId: id,
+          retryable: false,
+        );
+      }
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '回复失败：${_nullableString(json['message']) ?? '未知原因'}',
+        technicalMessage: 'reply/add returned $code',
+        upstreamCode: code,
+        platformId: id,
+      );
+    }
+
+    final data = json['data'];
+    if (data is Map) {
+      final d = Map<String, Object?>.from(data);
+      final rpidStr = _nullableString(d['rpid_str']);
+      if (rpidStr != null) return rpidStr;
+      final rpid = (d['rpid'] as num?)?.toInt();
+      if (rpid != null) return '$rpid';
+    }
+    // 平台接受了但没给 id：如实返回 null，不编造。
+    return null;
+  }
+
+  @override
+  bool get supportsTripleAction => true;
+
+  @override
+  Future<TripleActionResult> tripleAction(
+    String platformVideoId, {
+    required PlatformSession session,
+    int coinCount = 1,
+  }) async {
+    final steps = <TripleActionStep>[];
+
+    // ── 1) 点赞 ──
+    //
+    // 先查当前状态：已点赞时**不发**点赞请求（重复点赞会被判 -400），
+    // 直接记为已完成。这不是偷懒——重复请求会消耗风控配额。
+    var alreadyLiked = false;
+    try {
+      final state = await fetchInteractionState(
+        platformVideoId,
+        session: session,
+      );
+      alreadyLiked = state.known && state.liked;
+    } catch (_) {
+      // 查不到就按"未点赞"处理，多一次幂等请求比漏点赞好。
+    }
+
+    if (alreadyLiked) {
+      steps.add(const TripleActionStep(
+        name: 'like',
+        ok: true,
+        message: '此前已点赞',
+      ));
+    } else {
+      try {
+        final r = await setLike(
+          platformVideoId,
+          like: true,
+          session: session,
+        );
+        steps.add(TripleActionStep(
+          name: 'like',
+          ok: r.accepted,
+          message: r.message,
+          upstreamCode: r.upstreamCode,
+        ));
+      } on FusionException catch (e) {
+        steps.add(TripleActionStep(
+          name: 'like',
+          ok: false,
+          message: e.userMessage,
+          upstreamCode: e.upstreamCode,
+        ));
+      }
+    }
+
+    // ── 2) 投币 ──
+    //
+    // 投币走 `select_like=1` 而不是先点赞再投币：平台在同一次请求里
+    // 完成"投币时顺带点赞"，比两次请求省一半风控配额。
+    // 但如果上面已经点赞成功，这里 `select_like` 传 0 避免重复。
+    try {
+      final r = await setCoin(
+        platformVideoId,
+        count: coinCount.clamp(1, 2),
+        session: session,
+        alsoLike: false,
+      );
+      steps.add(TripleActionStep(
+        name: 'coin',
+        ok: r.accepted,
+        message: r.accepted ? null : _coinFailureHint(r.upstreamCode),
+        upstreamCode: r.upstreamCode,
+      ));
+    } on FusionException catch (e) {
+      steps.add(TripleActionStep(
+        name: 'coin',
+        ok: false,
+        message: e.userMessage,
+        upstreamCode: e.upstreamCode,
+      ));
+    }
+
+    // ── 3) 收藏 ──
+    //
+    // 必须带真实收藏夹 id：传空 `add_media_ids` 返回 2001000 参数错误。
+    try {
+      final folders = await fetchFavoriteFolders(session: session);
+      final target = _pickDefaultFolder(folders);
+      if (target == null) {
+        steps.add(const TripleActionStep(
+          name: 'favorite',
+          ok: false,
+          message: '该账号没有可用的收藏夹，无法收藏。',
+        ));
+      } else {
+        final r = await setFavorite(
+          platformVideoId,
+          favorite: true,
+          session: session,
+          folderIds: [target.id],
+        );
+        steps.add(TripleActionStep(
+          name: 'favorite',
+          ok: r.accepted,
+          message: r.accepted ? null : r.message,
+          upstreamCode: r.upstreamCode,
+        ));
+      }
+    } on FusionException catch (e) {
+      steps.add(TripleActionStep(
+        name: 'favorite',
+        ok: false,
+        message: e.userMessage,
+        upstreamCode: e.upstreamCode,
+      ));
+    }
+
+    return TripleActionResult(steps: steps);
+  }
+
+  /// 从收藏夹列表里挑一个用于收藏的目标。
+  ///
+  /// 优先"默认收藏夹"（`title` 含"默认"），否则取第一个。
+  /// **不硬编码任何 id**：不同账号的默认夹 id 完全不同。
+  FavoriteFolder? _pickDefaultFolder(List<FavoriteFolder> folders) {
+    if (folders.isEmpty) return null;
+    for (final f in folders) {
+      if (f.title.contains('默认')) return f;
+    }
+    return folders.first;
+  }
+
+  /// 投币失败的可操作提示。
+  ///
+  /// `-401` 是**风控**（响应体里 `ga_data.decisions` 会写明要哪级验证码），
+  /// 与余额不足完全是两回事——重试无意义，要引导用户去网页端验证。
+  String _coinFailureHint(Object? code) => switch (code) {
+        -401 => '投币被风控拦截（需要人机验证），请到网页端手动投币。',
+        -403 => '账号被风控标记，投币失败。',
+        -104 => '硬币余额不足。',
+        116 => '当前账号不可用币。',
+        _ => '投币失败。',
+      };
+  /// 从 `-401` 的响应体里解析风控细节。
+  ///
+  /// 实测响应结构（2026-10-19，真实账号）：
+  /// ```json
+  /// {
+  ///   "code": -401, "message": "非法访问",
+  ///   "data": {
+  ///     "ga_data": {
+  ///       "decisions": ["verify_captcha_level3"],
+  ///       "risk_level": 1,
+  ///       "decision_ctx": {
+  ///         "scene": "video_coin",
+  ///         "verify_exempt_by_decision": "1",
+  ///         "v_voucher": "voucher_..."
+  ///       }
+  ///     }
+  ///   }
+  /// }
+  /// ```
+  ///
+  /// 这些字段决定了用户该怎么处理：
+  ///  - `decisions` 里的 `verify_captcha_levelN` 说要哪一级验证码
+  ///  - `scene` 说明是哪个动作触发的风控（`video_coin` / `video_like` …）
+  ///  - `verify_exempt_by_decision == "1"` 说明该账号本身是白名单，
+  ///    只是本次被临时拦（换个时间可能就过）
+  ///
+  /// **不返回 `v_voucher` 与 `grisk_id`**：前者是一次性验证凭据，
+  /// 后者是风控会话标识，都不该出现在用户可见文案或日志里。
+  PlatformRiskControl? _parseRiskControl(Map<String, Object?> json) {
+    if ((json['code'] as num?)?.toInt() != -401) return null;
+    final data = json['data'];
+    if (data is! Map) return null;
+    final gaData = Map<String, Object?>.from(data)['ga_data'];
+    if (gaData is! Map) return null;
+    final ga = Map<String, Object?>.from(gaData);
+
+    final rawDecisions = ga['decisions'];
+    final decisions = <String>[];
+    if (rawDecisions is List) {
+      for (final d in rawDecisions) {
+        if (d is String) decisions.add(d);
+      }
+    }
+
+    final ctx = ga['decision_ctx'] is Map
+        ? Map<String, Object?>.from(ga['decision_ctx'] as Map)
+        : const <String, Object?>{};
+
+    return PlatformRiskControl(
+      decisions: decisions,
+      riskLevel: (ga['risk_level'] as num?)?.toInt(),
+      scene: _nullableString(ctx['scene']),
+      exemptByDecision: '${ctx['verify_exempt_by_decision'] ?? ''}' == '1',
     );
   }
 
@@ -4003,16 +4554,9 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
   }
 
   static String _stringOr(Object? value, String fallback) =>
-      _nullableString(value) ?? fallback;
+      jsonToStringOr(value, fallback);
 
-  static String? _epochToIso(Object? value) {
-    if (value is! num || value <= 0) return null;
-    final dt = DateTime.fromMillisecondsSinceEpoch(
-      value.toInt() * 1000,
-      isUtc: true,
-    );
-    return dt.toIso8601String();
-  }
+  static String? _epochToIso(Object? value) => jsonEpochToIso(value);
 
   /// 清晰度码值 → 展示标签。只标注实际已知的档位。
   static String _qualityLabel(int? id) => switch (id) {
@@ -4043,8 +4587,40 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
     logger: _logger,
   );
 
+  late final BilibiliImUploadClient _imUpload = BilibiliImUploadClient(
+    http: _http,
+    platformId: id,
+    logger: _logger,
+  );
+
+  late final BilibiliEmoteClient _imEmote = BilibiliEmoteClient(
+    http: _http,
+    platformId: id,
+    logger: _logger,
+  );
+
   @override
   bool get supportsIm => true;
+
+  /// 支持发送图片（上传接口 + 消息体形态均来自官方前端代码）。
+  ///
+  /// **注意**：能力"已实现"与"已验证跑通"是两件事。上传接口在本项目里
+  /// 只验证到"匿名请求返回 -101"，带真实登录态的上传未验证。
+  @override
+  bool get supportsImImageSend => true;
+
+  /// 支持读取表情面板。
+  ///
+  /// 同样是"已实现、未用真实登录态验证拿到列表"。
+  @override
+  bool get supportsImEmote => true;
+
+  /// 支持发送自定义表情消息（协议层）。
+  ///
+  /// 但平台对"发送未收藏的表情"可能拒绝，本项目**未验证**，
+  /// 因此 UI 不暴露该入口，只做接收侧渲染。
+  @override
+  bool get supportsImCustomEmojiSend => false;
 
   @override
   Future<ImSessionPage> fetchImSessions({
@@ -4102,6 +4678,48 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable {
         talkerId: talkerId,
         ackSeqno: ackSeqno,
       );
+
+  @override
+  Future<ImMedia> uploadImImage({
+    required PlatformSession session,
+    required List<int> bytes,
+    required String filename,
+  }) =>
+      _imUpload.uploadImage(
+        session: session,
+        bytes: bytes,
+        filename: filename,
+      );
+
+  @override
+  Future<ImSendResult> sendImImage({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      _im.sendImageMessage(
+        session: session,
+        talkerId: talkerId,
+        media: media,
+      );
+
+  @override
+  Future<ImSendResult> sendImCustomEmoji({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      _im.sendCustomEmojiMessage(
+        session: session,
+        talkerId: talkerId,
+        media: media,
+      );
+
+  @override
+  Future<ImEmotePanel> fetchImEmotePanel({
+    required PlatformSession session,
+  }) =>
+      _imEmote.fetchPanel(session: session);
 }
 
 /// 单个收藏夹的核对结果。

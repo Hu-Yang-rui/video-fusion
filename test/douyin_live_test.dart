@@ -180,11 +180,16 @@ void main() {
       expect(_adapter().supportsComments, isTrue);
     });
 
-    test('点赞不可用时明确抛错（未登录）', () async {
+    test('点赞能力已声明为支持（实测只需登录，不是签名拦截）', () {
+      // 2026-10-19 更新：实测 `commit/item/digg` 未登录返回
+      // `code=8 用户未登录`，**不是** 403 Blocked by ArgusSecurityPlugin。
+      // 因此能力翻转为 true，未登录时由适配器抛 loginRequired。
+      //
+      // 依据：tool/probe_douyin_write_endpoints.mjs
       expect(
         _adapter().supportsLike,
-        isFalse,
-        reason: '抖音点赞需 Argus 签名，应如实声明不支持',
+        isTrue,
+        reason: '实测 code=8 需登录，Web 端可实现',
       );
     });
   });

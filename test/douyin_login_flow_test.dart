@@ -84,6 +84,7 @@ class FakePassportHttp extends FusionHttpClient {
     Duration? timeout,
     bool? followRedirects,
     Set<int>? acceptStatuses,
+    bool keepRawBytes = false,
   }) async =>
       _r(url, '{}', const []);
 

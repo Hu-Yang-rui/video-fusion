@@ -95,35 +95,46 @@ void main() {
       }
     });
 
-    test('抖音直播弹幕如实声明不支持（不返回假端点）', () async {
-      // 这条守护的是**不许伪造端点**，不是钉死某个错误码：
-      //  - `unsupportedPlatform`：本项目不实现（原始语义）
-      //  - `capabilityUnavailable`：平台有此能力但缺设备侧签名
-      // 两者都表达"拿不到"，都算如实。真正禁止的是"返回一个假 wss
-      // 地址让 UI 显示正在连接"。
+    test('抖音直播弹幕走 HTTP 轮询端点（不再需要 wss 签名）', () async {
+      // # 这条断言的语义在本轮变了
       //
-      // 实测失败链（2026-10-19）：wss 升级返回 HTTP/1.1 200 而非 101；
-      // im/fetch 匿名恒空 data；room/chat 需登录；历史弹幕端点全部
-      // url doesn't match；sign 类端点 404；本机无 sign.js。
-      expect(
-        () => _douyin().fetchLiveDanmakuEndpoint(1),
-        throwsA(
-          isA<FusionException>()
-              .having(
-                (e) => e.code,
-                'code',
-                anyOf(
-                  FusionErrorCode.unsupportedPlatform,
-                  FusionErrorCode.capabilityUnavailable,
-                ),
-              )
-              .having(
-                (e) => e.technicalMessage,
-                'technicalMessage 必须交代具体失败点',
-                anyOf(contains('signature'), contains('wss'), contains('danmaku')),
-              ),
-        ),
-      );
+      // 上一版守护的是"不许伪造 wss 端点"，断言 `fetchLiveDanmakuEndpoint`
+      // 抛错。那个结论基于"直播弹幕只能走 wss、而 wss 需要 webmssdk 签名"。
+      //
+      // 本轮实测推翻了这个前提：`/webcast/im/fetch/` 是 **HTTP 轮询**，
+      // 不需要签名也不需要长连接。之前测成"空 data"是因为用了**已下播的
+      // 房间号**——房间 `status != 2` 时该接口返回空。
+      //
+      // 因此现在这条守护改成：
+      //  - 房间号无效 / 未开播 → 如实抛错（不是返回假端点）
+      //  - 不返回任何 wss 地址（hostList 必须为空，表示走 HTTP）
+      //
+      // 真实弹幕的解析正确性由 `douyin_live_danmaku_http_test.dart` 守护。
+      try {
+        final endpoint = await _douyin().fetchLiveDanmakuEndpoint(1);
+        // 若能返回，必须是 HTTP 轮询形态：没有 wss host
+        expect(
+          endpoint.hostList,
+          isEmpty,
+          reason: 'HTTP 轮询端点不应携带 wss 地址（那会让 UI 去连一个连不上的 socket）',
+        );
+        expect(endpoint.roomKey, isNotNull);
+      } on FusionException catch (e) {
+        // 房间不存在 → videoIdNotFound（retryable=false，重试没意义）
+        // 房间存在但未开播 → capabilityUnavailable（retryable=true）
+        // 两种都必须如实区分，不能一律"失败"
+        expect(
+          e.code,
+          anyOf(
+            FusionErrorCode.capabilityUnavailable,
+            FusionErrorCode.videoNotFound,
+            FusionErrorCode.videoIdNotFound,
+          ),
+        );
+        if (e.code == FusionErrorCode.capabilityUnavailable) {
+          expect(e.retryable, isTrue, reason: '未开播的房间稍后可能开播');
+        }
+      }
     });
   });
 

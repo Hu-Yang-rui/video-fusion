@@ -8,12 +8,17 @@ library;
 
 import '../adapters/platform_adapter.dart';
 import '../adapters/platform_registry.dart';
+import '../adapters/bilibili/im_upload_client.dart';
 import '../core/cache.dart';
 import '../core/credential_vault.dart';
 import '../core/errors.dart';
+import '../core/http_client.dart';
 import '../core/logger.dart';
 import '../core/playback_policy.dart';
+import '../core/bilibili_translation_provider.dart';
+import '../core/translation_service.dart';
 import '../models/feed.dart';
+import '../models/translation.dart';
 import '../models/im.dart';
 import '../models/interaction.dart';
 import '../models/playback.dart';
@@ -162,16 +167,25 @@ class VideoService {
     VideoCache? cache,
     FusionLogger? logger,
     PlaybackPolicy? policy,
+    FusionHttpClient? http,
   })  : _registry = registry,
         _store = store,
         _cache = cache ?? VideoCache(),
         _logger = logger ?? appLogger,
+        _httpClient = http ?? FusionHttpClient(logger: logger),
         _policy = policy ?? PlaybackPolicy(registry: registry, logger: logger);
 
   final PlatformRegistry _registry;
   final VideoStore _store;
   final VideoCache _cache;
   final FusionLogger _logger;
+
+  /// 翻译等"服务级"能力复用的 HTTP 客户端。
+  ///
+  /// 未显式注入时自建一个（与适配器各自持有的实例等价，
+  /// 只是少了连接复用）。显式注入可让翻译与适配器共享超时/重试配置。
+  final FusionHttpClient _httpClient;
+
   final PlaybackPolicy _policy;
 
   VideoCache get cache => _cache;
@@ -312,6 +326,102 @@ class VideoService {
         talkerId: talkerId,
         ackSeqno: ackSeqno,
       );
+
+  // ── 私信：媒体能力 ──────────────────────────────────────────
+
+  /// 该平台是否支持在私信里发送图片。
+  bool supportsImImageSendFor(String platformId) =>
+      _registry.byId(platformId)?.supportsImImageSend ?? false;
+
+  /// 该平台是否支持表情面板。
+  bool supportsImEmoteFor(String platformId) =>
+      _registry.byId(platformId)?.supportsImEmote ?? false;
+
+  /// 该平台是否支持发送自定义表情。
+  bool supportsImCustomEmojiSendFor(String platformId) =>
+      _registry.byId(platformId)?.supportsImCustomEmojiSend ?? false;
+
+  /// 上传一张图片，返回可用于构造消息的媒体信息。
+  ///
+  /// 失败归一化为 [FusionException]。
+  Future<ImMedia> uploadImImage(
+    String platformId, {
+    required PlatformSession session,
+    required List<int> bytes,
+    required String filename,
+  }) async {
+    // 先在服务层做本地校验：UI 层不该知道"20MB 上限"这种平台知识，
+    // 也不该 import 适配器实现文件。
+    final validation = BilibiliImUploadClient.validateFile(
+      filename,
+      bytes.length,
+    );
+    if (!validation.ok) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: validation.reason!,
+        technicalMessage: 'local upload validation failed for $filename',
+        platformId: platformId,
+        retryable: false,
+      );
+    }
+    try {
+      return await _adapterFor(platformId).uploadImImage(
+        session: session,
+        bytes: bytes,
+        filename: filename,
+      );
+    } catch (e) {
+      throw uploadErrorToFusion(e, platformId: platformId);
+    }
+  }
+
+  /// 读取本地文件为字节（供 UI 层调用，集中处理 IO 错误）。
+  ///
+  /// 放在服务层而不是让 UI 直接 `File(...).readAsBytes()`：
+  /// IO 失败要归一化成 [FusionException]，UI 只需按错误码分支。
+  Future<List<int>> readLocalImage(String path) async {
+    try {
+      return await BilibiliImUploadClient.readFile(path);
+    } catch (e) {
+      throw uploadErrorToFusion(e);
+    }
+  }
+
+  /// 发送图片消息。
+  Future<ImSendResult> sendImImage(
+    String platformId, {
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      _adapterFor(platformId).sendImImage(
+        session: session,
+        talkerId: talkerId,
+        media: media,
+      );
+
+  /// 发送自定义表情消息。
+  Future<ImSendResult> sendImCustomEmoji(
+    String platformId, {
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      _adapterFor(platformId).sendImCustomEmoji(
+        session: session,
+        talkerId: talkerId,
+        media: media,
+      );
+
+  /// 拉取表情面板。
+  ///
+  /// 失败不抛异常，返回 `loaded: false` 的面板。
+  Future<ImEmotePanel> fetchImEmotePanel(
+    String platformId, {
+    required PlatformSession session,
+  }) =>
+      _adapterFor(platformId).fetchImEmotePanel(session: session);
 
   /// 扫描"该视频在哪些收藏夹里"。
   ///
@@ -500,13 +610,90 @@ class VideoService {
         platformId: video.platformId,
       );
     }
-    return adapter.fetchComments(
+    final result = await adapter.fetchComments(
       video.platformVideoId,
       page: page,
       pageSize: pageSize,
       session: session,
     );
+    // 翻译接口需要 `oid`（B 站 aid）。拉评论时顺手把当前视频 ID 记下来，
+    // 这样用户点「翻译」时不必再解析一次。
+    if (video.platformId == 'bilibili') {
+      _lastBilibiliAid = int.tryParse(video.platformVideoId);
+    }
+    return result;
   }
+
+  // ── 评论翻译 ────────────────────────────────────────────────
+  //
+  // 统一入口：UI 只调这里，不接触具体平台的翻译实现。
+  //
+  // 设计要点：
+  //  1. **B 站有自己的官方翻译接口**，但只吃 `reply_id`，需要登录。
+  //  2. **抖音没有可用翻译接口**（详见 APK-API-REPORT.md §八）。
+  //  3. 抖音评论的翻译请求会走到 B 站提供方，但**必然失败**——
+  //     因为没有 `reply_id`。这里如实返回失败原因，
+  //     不用假译文冒充，也不假装"抖音支持翻译"。
+  //
+  // 换句话说：本服务现在提供的是「统一入口 + 诚实的边界」，
+  // 而不是「两平台都能翻译」。后者需要抖音官方接口或第三方翻译服务，
+  // 属于需求里说的"需要额外权限/费用"的范畴，已写进报告。
+
+  /// 当前视频的 B 站 aid（翻译接口入参）。
+  int? _lastBilibiliAid;
+
+  /// B 站翻译提供方（延迟创建，复用同一个 HTTP 客户端）。
+  BilibiliTranslationProvider? _biliTranslation;
+
+  /// 统一的翻译服务。
+  TranslationService? _translation;
+
+  /// 取翻译服务（首次调用时创建）。
+  ///
+  /// [session] 用于注入登录态：B 站翻译接口需要 Cookie。
+  TranslationService translationServiceFor({PlatformSession? session}) {
+    final provider = _biliTranslation ??= BilibiliTranslationProvider(
+      http: _httpClient,
+      logger: _logger,
+    );
+    provider.cookieHeader = session?.cookieHeader;
+    provider.currentAid = _lastBilibiliAid;
+
+    return _translation ??= TranslationService(provider: provider);
+  }
+
+  /// 翻译一条评论。
+  ///
+  /// 返回的一定是 [TranslationResult]（失败也是结果，不抛异常），
+  /// 因为评论面板里单条翻译失败不该中断整页。
+  Future<TranslationResult> translateComment({
+    required String platformId,
+    required String commentId,
+    required String text,
+    PlatformSession? session,
+    TranslationLanguage? language,
+  }) async {
+    final service = translationServiceFor(session: session);
+
+    // 抖音（以及任何非 B 站平台）没有原生翻译接口。
+    // 走 B 站提供方必然失败，与其发一个注定失败的请求，
+    // 不如在这里就给出准确原因。
+    if (platformId != 'bilibili') {
+      return TranslationResult.failure(
+        errorMessage: '该平台没有可用的官方评论翻译接口，'
+            '且当前没有已授权的通用翻译服务。',
+        providerId: 'none',
+        targetLanguage: language ?? service.targetLanguage,
+      );
+    }
+
+    return service.translateComment(
+      commentId: commentId,
+      text: text,
+      language: language,
+    );
+  }
+
 
   /// 查询互动状态。
   Future<InteractionState> fetchInteractionState(

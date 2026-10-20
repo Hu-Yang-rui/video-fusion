@@ -1,4 +1,4 @@
-﻿/// 测试替身共用：声明"不支持私信"的一整套成员。
+/// 测试替身共用：声明"不支持私信"的一整套成员。
 ///
 /// # 为什么需要它
 ///
@@ -80,4 +80,48 @@ mixin NoImSupport on PlatformAdapter {
     required int ackSeqno,
   }) async =>
       false;
+
+  // ── 私信媒体能力（v0.5.0 新增，同样要逐个重写）──────────────
+  //
+  // 与上面同理：`implements` 不继承默认实现。这 7 个成员是
+  // 图片/表情/视频相关能力，测试替身一律声明不可用。
+
+  @override
+  bool get supportsImImageSend => false;
+
+  @override
+  bool get supportsImEmote => false;
+
+  @override
+  bool get supportsImCustomEmojiSend => false;
+
+  @override
+  Future<ImMedia> uploadImImage({
+    required PlatformSession session,
+    required List<int> bytes,
+    required String filename,
+  }) =>
+      throw _unsupported;
+
+  @override
+  Future<ImSendResult> sendImImage({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      throw _unsupported;
+
+  @override
+  Future<ImSendResult> sendImCustomEmoji({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      throw _unsupported;
+
+  @override
+  Future<ImEmotePanel> fetchImEmotePanel({
+    required PlatformSession session,
+  }) async =>
+      const ImEmotePanel(unavailableReason: '测试替身不支持表情面板。');
 }

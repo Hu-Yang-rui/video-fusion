@@ -14,6 +14,12 @@ analyzer:
     - build/**
     - windows/**
     - android/**
+    # 封存代码：不参与编译、不参与静态检查。
+    #
+    # 目前只含 `archive/douyin-native-signer/`（抖音本地签名库通道），
+    # 封存原因见该目录的 README。代码本身是完整的，只是对项目的
+    # 实际价值接近零，且需要 arm64 真机 + license 才能验证。
+    - archive/**
 
 linter:
   # The lint rules applied to this project can be customized in the

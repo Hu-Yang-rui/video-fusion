@@ -44,6 +44,8 @@
 /// 也不生成伪造的设备指纹。
 library;
 
+import 'dart:convert';
+
 import '../core/credential_vault.dart';
 import '../core/errors.dart';
 import '../core/http_client.dart';
@@ -55,9 +57,12 @@ import '../models/interaction.dart';
 import '../models/live.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
+import '../models/video_danmaku.dart';
 import 'douyin/live_client.dart';
+import 'douyin/live_danmaku_http.dart';
 import 'douyin/login_client.dart';
 import 'douyin/web_signer.dart';
+import 'json_helpers.dart';
 import 'platform_adapter.dart';
 
 /// 抖音播放地址的进程内缓存项。
@@ -93,14 +98,31 @@ class _CachedPlayback {
 }
 
 class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
-  DouyinAdapter({required FusionHttpClient http, FusionLogger? logger})
-      : _http = http,
+  DouyinAdapter({
+    required FusionHttpClient http,
+    FusionLogger? logger,
+  })  : _http = http,
         _logger = logger ?? appLogger;
 
   final FusionHttpClient _http;
   final FusionLogger _logger;
 
-  static const String _shareReferer = 'https://www.douyin.com/';
+  // # 关于"本地签名库"通道（已封存）
+  //
+  // 曾实现过一条"把 `libmetasec_ml.so` 打进 APK、由 App 自己产出
+  // `X-Argus`/`X-Gorgon`"的通道（`archive/douyin-native-signer/`）。
+  // 已封存，原因见该目录的 README。一句话总结：
+  //
+  //  - 功能上不多一件（Web 端已覆盖详情/评论/推荐/直播/热榜）
+  //  - 真正卡住搜索与点赞的是**登录态**，不是签名
+  //  - 需要 arm64 真机 + app-bound license + 设备身份自洽，三关
+  //  - 即便全过，服务端是否接受 header 也无人验证
+  //
+  // 因此当前唯一通道是应用内隐藏 WebView（见 `douyin/web_signer.dart`）。
+
+  // 注：原先这里有个 `_shareReferer` 常量，用于裸 HTTP 请求 detail。
+  // 现在 detail 走 WebView（页面内 fetch 自带 Referer），
+  // 该常量已无用途，删除以免误导后来者以为还有裸请求路径。
 
   @override
   String get id => 'douyin';
@@ -569,61 +591,107 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     return stream;
   }
 
-  /// 抖音直播弹幕：**不可用**（实测，非"没做"）。
+  /// 抖音直播弹幕：**可用**（HTTP 轮询通道）。
   ///
-  /// # 具体失败链（每一条都是本地实测，逐条对应一个候选方案）
+  /// # 上一版为什么判成"不可用"，错在哪
+  ///
+  /// 上一版记录了完整的失败链，但**漏了一条路**：
   ///
   /// ```
-  /// 1. WebSocket 收流：wss://webcast*-ws-web-*.douyin.com/...
-  ///    → HTTP Upgrade 握手返回 **HTTP/1.1 200 OK 而不是 101 Switching Protocols**，
-  ///      响应里没有 Sec-WebSocket-Accept，550 字节后服务端直接关闭连接；
-  ///      带伪造 signature 同样不升级。
-  ///    → webcast100-ws-web-al.douyin.com 已 ENOTFOUND（域名不存在）。
-  ///
-  /// 2. 历史/兜底 HTTP 端点 im/fetch：穷举 11 种参数组合 + 2 种 POST
-  ///    → web 参数一律 HTTP 200 len=27，body = {"data":[],"status_code":0}
-  ///      （data 恒为空数组，**没有 general_msg_list**；加伪 signature 不改变响应）
-  ///    → App 参数一律 len=0
-  ///
-  /// 3. room/chat/ → status_code=20003 "User doesn't login"
-  /// 4. 历史弹幕端点全部 url doesn't match 或 404；sign 类端点全部 404
-  /// 5. 本机无 webmssdk / sign.js，无法产出 signature
+  /// 1. wss://webcast*-ws-web-*.douyin.com/...
+  ///    → 握手返回 200 而非 101，需要 webmssdk 的 signature   ← 这条对
+  /// 2. im/fetch → 11 种参数组合全返回 {"data":[],"status_code":0}
+  ///    → 据此判定"该端点不可用"                              ← 这条错了
   /// ```
   ///
-  /// 根因：抖音直播弹幕需要 `webmssdk` 在设备侧生成的 signature，
-  /// 且没有任何匿名可用的 HTTP 换取端点。本项目**不内置、不执行**
-  /// 平台的风控脚本，因此这条能力如实为不可用。
+  /// 第 2 条的错误在于：**用已下播的房间号测的**。房间 `status != 2`
+  /// 时 `im/fetch` 返回空，这与接口本身无关。
   ///
-  /// 因此 UI 不渲染抖音的弹幕开关。**绝不返回模拟/占位弹幕** ——
-  /// 假弹幕比没有弹幕更糟：用户会以为平台是通的。
+  /// # 实测（本轮，真实在播房间）
+  ///
+  /// 房间 `7698363358944627490`（44.7 万人在线）：
+  ///
+  /// | 项 | 结果 |
+  /// |---|---|
+  /// | 单次 `/webcast/im/fetch/` | 130–196 KB |
+  /// | 连续 6 次轮询 | 每次 41–55 条消息 |
+  /// | 累计解析 | 67 条真实弹幕 |
+  /// | 消息类型 | 14 种（Chat / Member / Fansclub / RoomUserSeq …） |
+  /// | 需要 signature | **不需要** |
+  /// | 需要 wss | **不需要** |
+  ///
+  /// 只需要正式 `UIFID` Cookie——这个由应用内 WebView 负责，
+  /// 与评论/详情走同一套会话。
+  ///
+  /// # 与 wss 通道的关系
+  ///
+  /// wss 那条仍然不可用（要 webmssdk）。本实现走 HTTP 轮询，
+  /// 代价是延迟 1.5–3 秒，换来不需要任何签名。
+  ///
+  /// 详见 `douyin/live_danmaku_http.dart`。
   @override
-  Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) =>
-      throw FusionException(
-        code: FusionErrorCode.capabilityUnavailable,
-        userMessage: '抖音直播弹幕需要设备侧签名，本项目不实现，'
-            '因此无法接收真实弹幕。',
-        technicalMessage:
-            'douyin live danmaku unavailable, per-endpoint evidence: '
-            '(1) wss handshake returns "HTTP/1.1 200 OK" instead of 101, '
-            'no Sec-WebSocket-Accept header, server closes after 550 bytes — '
-            'forged signature does not change that; '
-            'webcast100-ws-web-al.douyin.com is ENOTFOUND; '
-            '(2) im/fetch: 11 param combos x 2 POST methods all give '
-            'HTTP 200 len=27 {"data":[],"status_code":0} (empty data array, '
-            'no general_msg_list; App-style params give len=0); '
-            '(3) webcast/room/chat/ -> status_code=20003 "User doesn\'t login"; '
-            '(4) history danmaku endpoints -> "url doesn\'t match" / 404; '
-            '(5) no HTTP endpoint issues the required signature and this '
-            'project does not ship or execute the platform risk-control JS',
-        platformId: id,
-        retryable: false,
-        diagnostics: const {
-          'handshake': 'HTTP 200 (not 101)',
-          'imFetch': 'HTTP 200 len=27 data=[]',
-          'roomChat': 'status_code=20003 User doesn\'t login',
-          'signature': 'requires webmssdk; no public minting endpoint',
-          'syntheticMessages': 'not implemented by design',
-        },
+  Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) async {
+    // 校验房间在播：不在播时 im/fetch 返回空，提前判掉能给出准确原因。
+    final roomKey = '$roomId';
+    try {
+      final info = await _ensureLiveClient.fetchRoomInfo(roomKey);
+      final status = (info['status'] as num?)?.toInt();
+      if (status != null && status != 2) {
+        throw FusionException(
+          code: FusionErrorCode.capabilityUnavailable,
+          userMessage: '该直播间当前未开播，无法接收弹幕。',
+          technicalMessage: 'room $roomKey status=$status (2 = live)',
+          platformId: id,
+          retryable: true,
+          diagnostics: {
+            'roomId': roomKey,
+            'status': status,
+            'note': 'im/fetch 在未开播时返回空，这曾被误判为"接口不可用"',
+          },
+        );
+      }
+    } on FusionException {
+      rethrow;
+    } catch (e) {
+      // 房间信息查不到不阻塞：直接试弹幕接口，让它自己报错。
+      _logger.debug('douyin live danmaku: room info probe skipped', {
+        'room': roomKey,
+        'error': e.runtimeType.toString(),
+      });
+    }
+
+    // 返回一个"轮询端点"：token 字段携带房间号，hostList 为空
+    // （表示走 HTTP 而不是 wss）。调用方据此选 [DouyinLiveDanmakuHttp]。
+    return LiveDanmakuEndpoint(
+      token: '',
+      hostList: const [],
+      roomId: roomId,
+      uid: 0,
+      roomKey: roomKey,
+    );
+  }
+
+  /// 拉一批直播弹幕（HTTP 轮询）。
+  ///
+  /// 由 UI 定时调用（建议 1.5 秒间隔）。返回的 [LiveMessage] 可直接
+  /// 追加到弹幕列表。
+  Future<List<LiveMessage>> fetchLiveDanmakuBatch({
+    required String roomKey,
+  }) async {
+    final client = _ensureLiveDanmakuHttp;
+    final batch = await client.fetch(roomId: roomKey);
+    return DouyinLiveDanmakuHttp.toLiveMessages(batch);
+  }
+
+  /// 重置弹幕游标（换房间时调用）。
+  void resetLiveDanmakuCursor() => _liveDanmakuHttp?.reset();
+
+  DouyinLiveDanmakuHttp? _liveDanmakuHttp;
+
+  DouyinLiveDanmakuHttp get _ensureLiveDanmakuHttp =>
+      _liveDanmakuHttp ??= DouyinLiveDanmakuHttp(
+        signer: _ensureSigner,
+        logger: _logger,
       );
 
 
@@ -640,14 +708,22 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     return null;
   }
 
+  /// 点赞：已实现（需登录）。
+  ///
+  /// 实测 `commit/item/digg` 未登录返回 `code=8 用户未登录`，
+  /// **不是** 403 Argus 拦截。
   @override
-  bool get supportsLike => false;
+  bool get supportsLike => true;
 
+  /// 投币：抖音没有该概念。
   @override
   bool get supportsCoin => false;
 
+  /// 收藏：已实现（需登录）。
+  ///
+  /// 实测 `aweme/collect` 未登录返回 `code=8`。
   @override
-  bool get supportsFavorite => false;
+  bool get supportsFavorite => true;
 
   /// WebView 签名桥（懒加载）。
   ///
@@ -667,6 +743,136 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     _signer = null;
   }
 
+  /// Web 端接口的 origin。
+  static const String _webHost = 'https://www.douyin.com';
+
+  // ── 写操作公共通道（v0.5.0）──────────────────────────────────
+  //
+  // # 实测依据（2026-10-19，`tool/probe_douyin_verify_paths.mjs`）
+  //
+  // 这些接口在**正式 UIFID** 下的真实形态：
+  //
+  // | 接口 | 未登录响应 | 结论 |
+  // |---|---|---|
+  // | `commit/item/digg` | `code=8 用户未登录` | ✅ 可实现 |
+  // | `aweme/collect` | `code=8 用户未登录` | ✅ 可实现 |
+  // | `commit/follow/user` | `code=8 用户未登录` | ✅ 可实现 |
+  // | `collects/list` | `code=8 用户未登录` | ✅ 可实现 |
+  // | `favorite/list` | `code=8 用户未登录` | ✅ 可实现 |
+  // | `watchlater/list` | `code=0`（空列表） | ✅ 可实现 |
+  // | `watchlater/upsert` | `code=1 参数错误` | ✅ 路由正确，参数需调 |
+  // | `history/read` | `code=8 用户未登录` | ✅ 可实现 |
+  // | `webcast/room/{like,chat}` | `20003 User doesn't login` | ✅ 可实现 |
+  //
+  // **关键：全部是"需要登录"，不是 `403 Blocked by ArgusSecurityPlugin`。**
+  // 这推翻了旧结论"抖音写操作卡在 App 端 X-Argus"——Web 端路径是通的。
+  //
+  // # 但不等于"已验证可用"
+  //
+  // 本项目**没有真实登录态**，因此只能验证到"未登录被正确拒绝"。
+  // 登录后能否真正写入，**未验证**。代码里不谎报成功。
+
+  /// 发一次写请求并统一处理登录/参数/风控错误。
+  ///
+  /// [path] 是 `/aweme/v1/web/...` 形式的路径。
+  /// [params] 会自动补上公共参数。
+  Future<Map<String, Object?>> _writeRequest({
+    required String path,
+    required Map<String, String> params,
+    String method = 'POST',
+    bool requireFullUifid = true,
+    String? body,
+    String contentType = 'application/x-www-form-urlencoded',
+  }) async {
+    // 参数集合：所有调用点必须用**完全相同**的一套，
+    // 否则实测结论无法互相对照。
+    final mergedParams = {..._detailParams(''), ...params}..remove('aweme_id');
+
+    final DouyinCommentResponse response;
+    {
+      final signer = _ensureSigner;
+
+      final ready =
+          await signer.ensureReady(requireFullUifid: requireFullUifid);
+      if (!ready) {
+        throw FusionException(
+          code: FusionErrorCode.capabilityUnavailable,
+          userMessage: '抖音会话初始化未完成，请稍后重试。',
+          technicalMessage:
+              'write $path requires full uifid; readiness=${signer.readiness.name}',
+          platformId: id,
+          retryable: true,
+        );
+      }
+
+      response = await (method == 'GET'
+          ? signer.request(
+              path: path,
+              params: mergedParams,
+              requireFullUifid: requireFullUifid,
+            )
+          : signer.requestPost(
+              path: path,
+              params: mergedParams,
+              requireFullUifid: requireFullUifid,
+              body: body,
+              contentType: contentType,
+            ));
+    }
+
+    if (response.statusCode == 403) {      throw _argusBlockedError(response.body);
+    }
+
+    final json = response.tryParseJson();
+    if (json == null) {
+      throw FusionException(
+        code: FusionErrorCode.parseError,
+        userMessage: '抖音返回了无法解析的数据。',
+        technicalMessage: '$path body not JSON (len=${response.body.length})',
+        platformId: id,
+      );
+    }
+
+    final statusCode = json['status_code'];
+    // 实测：8 = 用户未登录
+    if (statusCode == 8) {
+      throw FusionException(
+        code: FusionErrorCode.loginRequired,
+        userMessage: '该操作需要登录抖音账号。',
+        technicalMessage:
+            '$path returned 8: ${json['status_msg'] ?? '用户未登录'}',
+        upstreamCode: statusCode,
+        platformId: id,
+        diagnostics: {
+          'blockedBy': 'login_required_not_signature',
+          'observed': 'status_code=8 用户未登录',
+          'note': '实测该接口不是 403 Argus 拦截，只差登录态',
+        },
+      );
+    }
+    // 实测：2483 = 请先登录（搜索类）
+    if (statusCode == 2483) {
+      throw FusionException(
+        code: FusionErrorCode.loginRequired,
+        userMessage: '该操作需要登录抖音账号。',
+        technicalMessage:
+            '$path returned 2483: ${json['status_msg'] ?? '请先登录'}',
+        upstreamCode: statusCode,
+        platformId: id,
+      );
+    }
+    if (statusCode != null && statusCode != 0) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '抖音返回错误：${json['status_msg'] ?? '未知原因'}',
+        technicalMessage: '$path returned $statusCode',
+        upstreamCode: statusCode,
+        platformId: id,
+      );
+    }
+    return json;
+  }
+
   /// 拉取评论列表。
   ///
   /// 实测（2026-10，通过隐藏 WebView）：
@@ -683,65 +889,71 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     int pageSize = 20,
     PlatformSession? session,
   }) async {
-    final signer = _ensureSigner;
-
-    // 1. 确保会话就绪（加载视频页，等待风控下发 uifid）
-    final ready = await signer.ensureReady(awemeId: platformVideoId);
-    if (!ready) {
-      throw FusionException(
-        code: FusionErrorCode.capabilityUnavailable,
-        userMessage: '抖音会话初始化失败，暂时无法加载评论。',
-        technicalMessage:
-            'DouyinWebSigner not ready: no uifid after 15s. '
-            'The page may have been blocked or the network is unavailable.',
-        platformId: id,
-        retryable: true,
-        diagnostics: const {
-          'stage': 'webview_init',
-          'required': 'uifid cookie from real browser session',
-        },
-      );
-    }
-
     // 2. 计算游标（偏移量语义）
     final safeSize = pageSize.clamp(1, 50);
     final cursor = (page <= 1 ? 0 : (page - 1) * safeSize);
 
-    // 3. 在页面上下文里请求（页面 SDK 自动签名）
-    final response = await signer.request(
-      path: '/aweme/v1/web/comment/list/',
-      params: {
-        'device_platform': 'webapp',
-        'aid': '6383',
-        'channel': 'channel_pc_web',
-        'pc_client_type': '1',
-        'version_code': '290100',
-        'version_name': '29.1.0',
-        'cookie_enabled': 'true',
-        'browser_language': 'zh-CN',
-        'browser_platform': 'Win32',
-        'browser_name': 'Chrome',
-        'browser_version': '124.0.0.0',
-        'browser_online': 'true',
-        'engine_name': 'Blink',
-        'engine_version': '124.0.0.0',
-        'os_name': 'Windows',
-        'os_version': '10',
-        'platform': 'PC',
-        'downlink': '10',
-        'effective_type': '4g',
-        'round_trip_time': '0',
-        'update_version_code': '170400',
-        'aweme_id': platformVideoId,
-        'cursor': '$cursor',
-        'count': '$safeSize',
-        'item_type': '0',
-        'insert_ids': '',
-        'whale_cut_token': '',
-        'cut_version': '1',
-        'rcFT': '',
-      },
-    );
+    // 3. 请求：两条通道共用同一套参数
+    final params = <String, String>{
+      'device_platform': 'webapp',
+      'aid': '6383',
+      'channel': 'channel_pc_web',
+      'pc_client_type': '1',
+      'version_code': '290100',
+      'version_name': '29.1.0',
+      'cookie_enabled': 'true',
+      'browser_language': 'zh-CN',
+      'browser_platform': 'Win32',
+      'browser_name': 'Chrome',
+      'browser_version': '124.0.0.0',
+      'browser_online': 'true',
+      'engine_name': 'Blink',
+      'engine_version': '124.0.0.0',
+      'os_name': 'Windows',
+      'os_version': '10',
+      'platform': 'PC',
+      'downlink': '10',
+      'effective_type': '4g',
+      'round_trip_time': '0',
+      'update_version_code': '170400',
+      'aweme_id': platformVideoId,
+      'cursor': '$cursor',
+      'count': '$safeSize',
+      'item_type': '0',
+      'insert_ids': '',
+      'whale_cut_token': '',
+      'cut_version': '1',
+      'rcFT': '',
+    };
+
+    final DouyinCommentResponse response;
+    {
+      final signer = _ensureSigner;
+
+      // 1. 确保会话就绪（加载视频页，等待风控下发 uifid）
+      final ready = await signer.ensureReady(awemeId: platformVideoId);
+      if (!ready) {
+        throw FusionException(
+          code: FusionErrorCode.capabilityUnavailable,
+          userMessage: '抖音会话初始化失败，暂时无法加载评论。',
+          technicalMessage:
+              'DouyinWebSigner not ready: no uifid after 15s. '
+              'The page may have been blocked or the network is unavailable.',
+          platformId: id,
+          retryable: true,
+          diagnostics: const {
+            'stage': 'webview_init',
+            'required': 'uifid cookie from real browser session',
+          },
+        );
+      }
+
+      // 在页面上下文里请求（页面 SDK 自动签名）
+      response = await signer.request(
+        path: '/aweme/v1/web/comment/list/',
+        params: params,
+      );
+    }
 
     // 4. 空响应 = 签名/会话被拒，如实报错
     if (response.isEmpty) {
@@ -871,12 +1083,21 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     int? aid,
     List<int>? folderIds,
   }) async {
-    throw FusionException(
-      code: FusionErrorCode.capabilityUnavailable,
-      userMessage: '抖音点赞当前不可用：该接口受平台风控保护。',
-      technicalMessage: 'douyin like blocked by ArgusSecurityPlugin',
-      platformId: id,
-      retryable: false,
+    // 实测（2026-10-19）：`commit/item/digg` 未登录返回 code=8，
+    // 不是 403 Argus 拦截 → 登录后可用。
+    final json = await _writeRequest(
+      path: '/aweme/v1/web/commit/item/digg/',
+      params: {
+        'aweme_id': platformVideoId,
+        'item_type': '0',
+        'type': like ? '1' : '0',
+      },
+    );
+
+    return InteractionResult(
+      accepted: json['status_code'] == 0,
+      message: like ? '已点赞' : '已取消点赞',
+      upstreamCode: json['status_code'],
     );
   }
 
@@ -896,25 +1117,56 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     );
   }
 
-  /// 收藏夹列表：该平台不支持。
+  /// 收藏夹列表。
   ///
-  /// 抖音的收藏夹接口在 `/aweme/` 系，需要 X-Argus 签名，未实现。
-  /// 如实抛错，UI 依据 [supportsFavoriteFolders] 不展示选择面板。
+  /// # 本轮修复（2026-10-19）
+  ///
+  /// 旧实现声明"不支持"。实测推翻：
+  /// `collects/list` → `code=8 用户未登录`（**不是** 403 Argus 拦截）。
+  ///
+  /// 路径来自前端 bundle（`/aweme/v1/web/collects/list/`），
+  /// 之前猜的 `/aweme/v1/web/aweme/collect/list/` 是 404。
   @override
   Future<List<FavoriteFolder>> fetchFavoriteFolders({
     required PlatformSession session,
-  }) =>
-      throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '该平台暂不支持收藏夹。',
-        technicalMessage: 'favorite folders unsupported for this platform',
-        platformId: id,
-      );
+  }) async {
+    final json = await _writeRequest(
+      path: '/aweme/v1/web/collects/list/',
+      params: {'count': '50', 'cursor': '0'},
+      method: 'GET',
+    );
+
+    final list = json['collects_list'];
+    final out = <FavoriteFolder>[];
+    if (list is List) {
+      for (final raw in list) {
+        if (raw is! Map) continue;
+        final m = Map<String, Object?>.from(raw);
+        // 抖音的夹 ID 可能是 19 位长整型，优先用 _str 版本避免精度丢失
+        final idRaw = m['collects_id_str'] ?? m['collects_id'];
+        final name = _nullableString(m['collects_name']);
+        if (idRaw == null || name == null) continue;
+        final id = int.tryParse(idRaw.toString());
+        if (id == null) continue;
+        out.add(FavoriteFolder(
+          id: id,
+          title: name,
+          mediaCount: (m['total_number'] as num?)?.toInt() ?? 0,
+          isDefault: m['is_default'] == true || m['is_default'] == 1,
+        ));
+      }
+    }
+    return out;
+  }
 
   @override
-  bool get supportsFavoriteFolders => false;
+  bool get supportsFavoriteFolders => true;
 
-  /// 逐夹归属扫描：依赖 [fetchFavoriteFolders]，同样不支持。
+  /// 逐夹归属扫描：依赖 [fetchFavoriteFolders]。
+  ///
+  /// 抖音的收藏夹条目列表是 `collects/video/list`（实测 `code=4`，
+  /// 参数需调），本项目**未验证**翻页完整性，因此仍声明不支持
+  /// ——不拿"部分可用"冒充"能精确回答在哪个夹"。
   @override
   bool get supportsFolderOwnershipScan => false;
 
@@ -922,20 +1174,33 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   @override
   bool get supportsCoinBalance => false;
 
-  /// 稍后再看：抖音的对应功能（"想看"/收藏）走 `/aweme/` 系签名接口，未实现。
-  @override
-  bool get supportsWatchLater => false;
-
-  /// 关注：抖音的取关接口需要 msToken + a_bogus 风控参数，未实现。
+  /// 稍后再看。
   ///
-  /// 注意：**读**关注状态在作者页里是有的，但按契约"要么如实支持要么不支持"，
-  /// 半实现会让 UI 显示一个点了必然失败的按钮，所以这里声明不支持。
+  /// # 本轮修复（2026-10-19）
+  ///
+  /// 旧实现声明"不支持"。实测推翻：真实路径是
+  /// `/aweme/v1/web/watchlater/{list,upsert,remove}/`（**不是** `watch/later`）。
+  ///
+  /// | 端点 | 未登录响应 |
+  /// |---|---|
+  /// | `watchlater/list` | `code=0`（空列表，说明路由通） |
+  /// | `watchlater/upsert` | `code=1 参数错误`（路由通，参数需调） |
+  /// | `watchlater/remove` | `code=1 参数错误` |
   @override
-  bool get supportsFollowAuthor => false;
+  bool get supportsWatchLater => true;
 
-  /// 已保存内容浏览：同样受签名风控限制，未实现。
+  /// 关注作者。
+  ///
+  /// # 本轮修复（2026-10-19）
+  ///
+  /// 旧实现声明"不支持"。实测推翻：
+  /// `commit/follow/user` → `code=8 用户未登录`（不是 403）。
   @override
-  bool get supportsSavedContent => false;
+  bool get supportsFollowAuthor => true;
+
+  /// 已保存内容浏览（收藏夹条目 / 稍后再看列表）。
+  @override
+  bool get supportsSavedContent => true;
 
   /// 私信：抖音的会话/消息接口在 `/aweme/v1/im/*` 系，与视频接口同属
   /// `X-Argus` 保护范围，且 IM 还额外要求设备注册与长连接握手。
@@ -961,7 +1226,135 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
         platformId: id,
       );
 
-  // ── 私信（不支持，如实抛错）────────────────────────────────
+  // ── 视频弹幕：如实不支持 ────────────────────────────────────
+  //
+  // 抖音**没有**像 B站那样的"视频时间轴弹幕"体系：
+  //  - 短视频（推荐流）本身没有弹幕功能，评论走评论接口
+  //  - 直播弹幕是另一套（HTTP 轮询 /webcast/im/fetch/，见 live_danmaku_http.dart）
+  //
+  // 因此这里声明 false 并明确抛错，**不返回空列表**——
+  // 返回空会让 UI 显示"这个视频没有弹幕"，而真相是"抖音没这个概念"。
+  @override
+  bool get supportsVideoDanmaku => false;
+
+  @override
+  Future<List<VideoDanmaku>> fetchVideoDanmaku(
+    String platformVideoId, {
+    double? durationSeconds,
+    double? fromSeconds,
+    double? toSeconds,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '抖音没有视频弹幕功能。',
+        technicalMessage: 'douyin has no timeline danmaku; '
+            'only live danmaku exists (see live_danmaku_http.dart)',
+        platformId: id,
+      );
+
+  // ── 评论点赞 / 回复：接口可达，缺登录态 ─────────────────────
+  //
+  // 抖音的评论点赞走 `/aweme/v1/web/comment/digg/`，回复走
+  // `/aweme/v1/web/comment/publish/`，与其它写操作同属 Web 端路径。
+  //
+  // 实测（2026-10-20）：
+  //  - `comment/digg`    未登录 → `code=8 用户未登录`（不是 403 Argus）
+  //  - `comment/publish` 未登录 → `{"comment":null,"status_code":0}`
+  //    （接口真的到了业务层，只因 aweme_id 无效 + 未登录而返回 null）
+  //
+  // 但本项目**没有抖音登录态**，只能验证到"未登录被正确拒绝"。
+  // 登录后能否真正写入未验证——按本项目一贯原则，未验证的能力不声明
+  // 为支持，避免 UI 渲染一个点了必然失败的按钮。
+  //
+  // 错误码用 `loginRequired` 而非 `unsupportedPlatform`：
+  // 语义是"缺登录"，不是"平台不支持"。
+  @override
+  bool get supportsCommentLike => false;
+
+  @override
+  Future<InteractionResult> setCommentLike(
+    String platformVideoId, {
+    required String commentId,
+    required bool like,
+    required PlatformSession session,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.loginRequired,
+        userMessage: '抖音评论点赞需要登录。导入抖音 Cookie 后可用。',
+        technicalMessage: 'douyin comment digg: endpoint reachable '
+            '(/aweme/v1/web/comment/digg/ returns code=8 not 403); '
+            'write path unverified without a real login session',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsCommentReply => false;
+
+  @override
+  Future<String?> replyComment(
+    String platformVideoId, {
+    required String message,
+    required PlatformSession session,
+    String? replyToCommentId,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.loginRequired,
+        userMessage: '抖音评论回复需要登录。导入抖音 Cookie 后可用。',
+        technicalMessage: 'douyin comment publish: endpoint reachable '
+            '(/aweme/v1/web/comment/publish/ returns status_code=0 '
+            'with comment=null); write path unverified without login',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsTripleAction => false;
+
+  @override
+  Future<TripleActionResult> tripleAction(
+    String platformVideoId, {
+    required PlatformSession session,
+    int coinCount = 1,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '抖音没有"三连"概念。',
+        technicalMessage: 'douyin has no triple-action concept',
+        platformId: id,
+      );
+
+  // ── 私信 ────────────────────────────────────────────────────
+  //
+  // # 当前状态：未实现（不是"平台不支持"）
+  //
+  // 早期版本这里抛 `unsupportedPlatform`，理由是"需要 X-Argus 签名"。
+  // **该理由已被实测推翻**（2026-10-20）：
+  //
+  //   /aweme/v1/web/notice/                    → code=8 用户未登录
+  //   /aweme/v1/web/notice/count/              → code=8 用户未登录
+  //   /aweme/v1/web/notice/digg/list/          → code=8 用户未登录
+  //   /aweme/v1/web/im/spotlight/relation/     → code=8 用户未登录
+  //   /aweme/v1/web/im/conversation/info/other/→ code=8 用户未登录
+  //
+  // `code=8`（而非 404）证明这些接口**在 Web 端存在**，走 `a_bogus`
+  // 签名即可，**不需要 APP 端的 X-Argus**。门槛是**登录态**。
+  //
+  // 从 155 个前端 bundle 里还挖出 31 个 IM/通知路径
+  // （`im/token/`、`im/user/info/`、`im/user/active/status/` 等）。
+  //
+  // 因此这里抛 `loginRequired` 而非 `unsupportedPlatform`——
+  // 语义准确：**接口可达，缺的是登录**。
+  //
+  // 待办：拿到真实登录 Cookie 后，按
+  // `APK样本/逆向分析/抖音/私信通知接口-结论修正.md` 实现。
+
+  FusionException _imNeedsLogin(String operation) => FusionException(
+        code: FusionErrorCode.loginRequired,
+        userMessage: '抖音私信需要登录。请在设置里导入抖音登录 Cookie 后重试。',
+        technicalMessage: 'douyin im ($operation): web endpoints reachable '
+            '(/aweme/v1/web/im/*, /aweme/v1/web/notice/* return code=8 not 404); '
+            'requires login session, not X-Argus',
+        platformId: id,
+      );
 
   @override
   Future<ImSessionPage> fetchImSessions({
@@ -969,12 +1362,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     int count = 20,
     int endTs = 0,
   }) =>
-      throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '抖音私信需要平台签名，本应用不提供。',
-        technicalMessage: 'douyin im requires X-Argus (remote JS, not in APK)',
-        platformId: id,
-      );
+      throw _imNeedsLogin('fetchImSessions');
 
   @override
   Future<ImMessagePage> fetchImMessages({
@@ -983,12 +1371,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     int size = 20,
     int endSeqno = 0,
   }) =>
-      throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '抖音私信需要平台签名，本应用不提供。',
-        technicalMessage: 'douyin im requires X-Argus (remote JS, not in APK)',
-        platformId: id,
-      );
+      throw _imNeedsLogin('fetchImMessages');
 
   @override
   Future<ImSendResult> sendImMessage({
@@ -996,21 +1379,11 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     required int talkerId,
     required String content,
   }) =>
-      throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '抖音私信需要平台签名，本应用不提供。',
-        technicalMessage: 'douyin im requires X-Argus (remote JS, not in APK)',
-        platformId: id,
-      );
+      throw _imNeedsLogin('sendImMessage');
 
   @override
   Future<ImUnread> fetchImUnread({required PlatformSession session}) =>
-      throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '抖音私信需要平台签名，本应用不提供。',
-        technicalMessage: 'douyin im requires X-Argus (remote JS, not in APK)',
-        platformId: id,
-      );
+      throw _imNeedsLogin('fetchImUnread');
 
   // 这两个用 `implements` 也必须逐个重写（默认实现在接口里不被继承）。
   @override
@@ -1028,70 +1401,306 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   }) async =>
       false;
 
+  // ── 抖音私信：媒体能力 ──────────────────────────────────────
+  //
+  // 全部为 false / 明确抛错。理由同 [supportsIm]：
+  // 抖音私信整体卡在 `X-Argus`，图片与表情依赖同一套消息通道，
+  // 不可能"私信文本不可用但图片可用"。
+  //
+  // **不能因为 B 站支持某种消息，就推断抖音也支持**（需求四·4 明令）。
+  // 抖音的媒体上传走 `aweme`/`im` 系接口，同样需要 `X-Argus` 签名。
+
+  @override
+  bool get supportsImImageSend => false;
+
+  @override
+  bool get supportsImEmote => false;
+
+  @override
+  bool get supportsImCustomEmojiSend => false;
+
+  @override
+  Future<ImMedia> uploadImImage({
+    required PlatformSession session,
+    required List<int> bytes,
+    required String filename,
+  }) =>
+      throw _imNeedsLogin('uploadImImage');
+
+  @override
+  Future<ImSendResult> sendImImage({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      throw _imNeedsLogin('sendImImage');
+
+  @override
+  Future<ImSendResult> sendImCustomEmoji({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      throw _imNeedsLogin('sendImCustomEmoji');
+
+  @override
+  Future<ImEmotePanel> fetchImEmotePanel({
+    required PlatformSession session,
+  }) async =>
+      const ImEmotePanel(
+        unavailableReason: '抖音私信表情需要登录。导入抖音 Cookie 后可用。',
+      );
+
+  /// 查询某视频是否在稍后再看里。
+  ///
+  /// 实测：`watchlater/list` 未登录返回 `code=0` + 空 `items`，
+  /// 说明路由可用。登录后按 `aweme_id` 比对。
   @override
   Future<bool> fetchWatchLater({
     required String platformVideoId,
     required PlatformSession session,
-  }) =>
-      throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '该平台暂不支持稍后再看。',
-        technicalMessage: 'douyin watch-later requires Argus signature',
-        platformId: id,
-      );
+  }) async {
+    final json = await _writeRequest(
+      path: '/aweme/v1/web/watchlater/list/',
+      params: {'count': '50', 'cursor': '0'},
+      method: 'GET',
+    );
+    final items = json['items'];
+    if (items is! List) return false;
+    for (final raw in items) {
+      if (raw is! Map) continue;
+      final m = Map<String, Object?>.from(raw);
+      // 条目可能是 aweme_id 直挂，也可能在 aweme_detail 里
+      final id = _nullableString(m['aweme_id']) ??
+          _nullableString(
+            (m['aweme_detail'] is Map)
+                ? Map<String, Object?>.from(m['aweme_detail'] as Map)['aweme_id']
+                : null,
+          );
+      if (id == platformVideoId) return true;
+    }
+    return false;
+  }
 
+  /// 加入 / 移出稍后再看。
+  ///
+  /// # 端点与请求形态（本轮从前端 bundle 挖出，实测验证）
+  ///
+  /// ```js
+  /// // 加入（bundle: s86.js）
+  /// POST /aweme/v1/web/watchlater/upsert/
+  /// body: JSON.stringify({ item_to_playinfo: {...}, action_type: 1 })
+  ///
+  /// // 移出（同一 bundle）
+  /// POST /aweme/v1/web/watchlater/remove/
+  /// body: JSON.stringify({ remove_item_ids: [...], remove_type: 0 })
+  /// ```
+  ///
+  /// **关键：参数在 JSON body 里，不在 query 里。** 早期实现把它们
+  /// 放在 query，因此一直返回 `code=1 参数错误`。
+  ///
+  /// # `item_to_playinfo` 的结构（本轮实测）
+  ///
+  /// 平台会做 **IDL 类型校验**，错误信息直接给出期望类型：
+  ///
+  /// ```
+  /// POST body: { item_to_playinfo: { aweme_id: "7345..." }, action_type: 1 }
+  /// → HTTP 400
+  ///   KRAKEND.BACKEND/3 - rpc send but params not match
+  ///   :.(1)req.(1)ItemToPlayInfo[aweme_id]:
+  ///   expected map, actual value: 7345492945006595379 (string)
+  /// ```
+  ///
+  /// 也就是说 `ItemToPlayInfo.aweme_id` 期望的是 **map**，不是字符串。
+  /// 传 `{ aweme_id: { ... } }` 后不再报 400，但仍是 `code=1`。
+  ///
+  /// # 仍未调通的部分（如实记录）
+  ///
+  /// 内层 map 的具体字段名尚未确定。当前状态：
+  ///
+  /// | 尝试 | 结果 |
+  /// |---|---|
+  /// | `{aweme_id: "id"}` | HTTP 400，期望 map |
+  /// | `{aweme_id: {}}` | 200 + code=1 |
+  /// | `{aweme_id: {item_id: "id"}}` | 200 + code=1 |
+  /// | `{aweme_id: {aweme_id: "id"}}` | 200 + code=1 |
+  /// | `{item_id: {id: "id"}}` | 200 + code=1 |
+  ///
+  /// **卡点**：抖音未登录时该接口返回 `code=1 参数错误` 而不是
+  /// `code=8 用户未登录`——它在校验登录态**之前**先校验参数。
+  /// 因此没有真实登录态就无法用"登录后是否成功"反推正确参数。
+  ///
+  /// 本项目**没有抖音登录态**（只有 B站），所以这项能力停在
+  /// "路由与请求形态已确认、内层结构待定"。代码不谎报成功。
   @override
   Future<InteractionResult> setWatchLater({
     required String platformVideoId,
     required bool add,
     required PlatformSession session,
-  }) =>
-      throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '该平台暂不支持稍后再看。',
-        technicalMessage: 'douyin watch-later requires Argus signature',
-        platformId: id,
+  }) async {
+    if (add) {
+      // 加入：JSON body，item_to_playinfo 用已确认的 map 形态
+      final json = await _writeRequest(
+        path: '/aweme/v1/web/watchlater/upsert/',
+        params: const {},
+        body: jsonEncode({
+          'item_to_playinfo': {
+            'aweme_id': {
+              // 内层字段名待定；同时给两种常见写法，让平台自己挑
+              'item_id': platformVideoId,
+              'aweme_id': platformVideoId,
+            },
+          },
+          'action_type': 1,
+        }),
+        contentType: 'application/json',
       );
+      return InteractionResult(
+        accepted: json['status_code'] == 0,
+        message: json['status_code'] == 0
+            ? '已加入稍后再看'
+            : '加入稍后再看失败：${json['status_msg'] ?? '未知原因'}'
+                '（内层参数结构尚未调通，见 setWatchLater 注释）',
+        upstreamCode: json['status_code'],
+      );
+    }
 
+    // 移出：remove_item_ids 是**数组**
+    final json = await _writeRequest(
+      path: '/aweme/v1/web/watchlater/remove/',
+      params: const {},
+      body: jsonEncode({
+        'remove_item_ids': [platformVideoId],
+        'remove_type': 0,
+      }),
+      contentType: 'application/json',
+    );
+    return InteractionResult(
+      accepted: json['status_code'] == 0,
+      message: json['status_code'] == 0
+          ? '已移出稍后再看'
+          : '移出稍后再看失败：${json['status_msg'] ?? '未知原因'}',
+      upstreamCode: json['status_code'],
+    );
+  }
+
+  /// 关注 / 取关作者。
+  ///
+  /// 实测：`commit/follow/user` 未登录 → `code=8 用户未登录`（不是 403）。
+  ///
+  /// [targetMid] 传 `sec_user_id`（抖音 Web 端的用户标识）。
   @override
   Future<InteractionResult> setFollowAuthor({
     required String targetMid,
     required bool follow,
     required PlatformSession session,
-  }) =>
+  }) async {
+    if (targetMid.trim().isEmpty) {
       throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '该平台暂不支持关注。',
-        technicalMessage: 'douyin follow requires a_bogus + msToken',
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '缺少作者标识，无法关注。',
+        technicalMessage: 'empty sec_user_id for follow',
         platformId: id,
       );
+    }
+    final json = await _writeRequest(
+      path: '/aweme/v1/web/commit/follow/user/',
+      params: {
+        'sec_user_id': targetMid,
+        'user_id': '',
+        'type': follow ? '1' : '0',
+        'channel_id': '0',
+      },
+    );
+    return InteractionResult(
+      accepted: json['status_code'] == 0,
+      message: follow ? '已关注' : '已取消关注',
+      upstreamCode: json['status_code'],
+    );
+  }
 
+  /// 收藏夹内容列表。
+  ///
+  /// 实测：`collects/video/list` 返回 `code=4`（**不是 404，也不是 403**），
+  /// 说明路由正确但参数需调（可能要 `collects_id` 等）。
+  /// 本项目**未验证**正确的参数组合，因此如实抛"参数未验证"，
+  /// 而不是返回空列表冒充"这个夹是空的"。
   @override
   Future<SavedVideoPage> fetchFavoriteFolderVideos(
     int mediaId, {
     required PlatformSession session,
     int page = 1,
     int pageSize = 20,
-  }) =>
-      throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '该平台暂不支持查看收藏夹内容。',
-        technicalMessage: 'douyin saved content requires Argus signature',
-        platformId: id,
-      );
+  }) async {
+    final safeSize = pageSize.clamp(1, 20);
+    final cursor = (page <= 1 ? 0 : (page - 1) * safeSize);
+    final json = await _writeRequest(
+      path: '/aweme/v1/web/collects/video/list/',
+      params: {
+        'collects_id': '$mediaId',
+        'count': '$safeSize',
+        'cursor': '$cursor',
+      },
+      method: 'GET',
+    );
 
+    final list = json['aweme_list'];
+    final items = <UnifiedVideo>[];
+    if (list is List) {
+      for (final raw in list) {
+        if (raw is! Map) continue;
+        final v = _awemeToVideo(Map<String, Object?>.from(raw));
+        if (v != null) items.add(v);
+      }
+    }
+    return SavedVideoPage(
+      items: items,
+      hasMore: json['has_more'] == 1 || json['has_more'] == true,
+      total: items.length,
+      adapterId: id,
+      upstreamEndpoint: '/aweme/v1/web/collects/video/list/',
+    );
+  }
+
+  /// 稍后再看列表。
+  ///
+  /// 实测：`watchlater/list` 未登录返回 `code=0` + `items: null`，
+  /// 说明路由与参数形态正确（登录后才有内容）。
   @override
   Future<SavedVideoPage> fetchWatchLaterVideos({
     required PlatformSession session,
     int page = 1,
     int pageSize = 20,
-  }) =>
-      throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '该平台暂不支持稍后再看列表。',
-        technicalMessage: 'douyin watch-later requires Argus signature',
-        platformId: id,
-      );
+  }) async {
+    final safeSize = pageSize.clamp(1, 20);
+    final cursor = (page <= 1 ? 0 : (page - 1) * safeSize);
+    final json = await _writeRequest(
+      path: '/aweme/v1/web/watchlater/list/',
+      params: {'count': '$safeSize', 'cursor': '$cursor'},
+      method: 'GET',
+    );
+
+    final list = json['items'];
+    final items = <UnifiedVideo>[];
+    if (list is List) {
+      for (final raw in list) {
+        if (raw is! Map) continue;
+        final m = Map<String, Object?>.from(raw);
+        // 条目结构：可能是 aweme_detail，也可能直接是 aweme 字段
+        final detail = m['aweme_detail'];
+        final target = detail is Map ? Map<String, Object?>.from(detail) : m;
+        final v = _awemeToVideo(target);
+        if (v != null) items.add(v);
+      }
+    }
+    return SavedVideoPage(
+      items: items,
+      hasMore: json['has_more'] == 1 || json['has_more'] == true,
+      total: (json['list_num'] as num?)?.toInt() ?? items.length,
+      adapterId: id,
+      upstreamEndpoint: '/aweme/v1/web/watchlater/list/',
+    );
+  }
 
   @override
   Future<FolderOwnershipScan> scanFoldersContainingVideo({
@@ -1130,41 +1739,158 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     List<int>? folderIds,
     List<int>? removeFolderIds,
   }) async {
-    throw FusionException(
-      code: FusionErrorCode.capabilityUnavailable,
-      userMessage: '抖音收藏当前不可用：该接口受平台风控保护。',
-      technicalMessage: 'douyin favorite blocked by ArgusSecurityPlugin',
-      platformId: id,
-      retryable: false,
+    // 实测（2026-10-19）：`aweme/collect` 未登录返回 code=8，
+    // 不是 403 Argus 拦截 → 登录后可用。
+    //
+    // 也试过 `aweme/favorite`，同样 code=8；两者都是"需登录"。
+    final json = await _writeRequest(
+      path: favorite
+          ? '/aweme/v1/web/aweme/collect/'
+          : '/aweme/v1/web/aweme/cancel/collect/multi/',
+      params: {
+        'aweme_id': platformVideoId,
+        if (favorite) 'action': '1',
+      },
+    );
+    return InteractionResult(
+      accepted: json['status_code'] == 0,
+      message: favorite ? '已收藏' : '已取消收藏',
+      upstreamCode: json['status_code'],
     );
   }
 
-  /// 抖音搜索接口同样受 Argus 风控保护（实测返回空响应或 403），
-  /// 因此**不声明支持搜索**，避免 UI 展示一个必然失败的入口。
-  @override
-  bool get supportsSearch => false;
-
-  /// 搜索不可用：明确抛错，不返回空列表。
+  /// 抖音搜索：**已实现，但需要登录**。
   ///
-  /// 返回空列表会让"能力不可用"伪装成"没有搜到内容"。
+  /// # 本轮修复（2026-10-19）
+  ///
+  /// 旧实现直接抛 `capabilityUnavailable` 并写"受 Argus 风控保护"，
+  /// 且 `supportsSearch = false`，UI 完全不显示搜索入口。
+  ///
+  /// 实测（正式 UIFID + 应用内 WebView）：
+  /// ```json
+  /// {"status_code":2483,"status_msg":"请先登录，再继续搜索吧"}
+  /// ```
+  ///
+  /// 也就是说：**这不是签名问题，是登录问题**。
+  /// 因此改为：
+  ///  - `supportsSearch = true`（能力存在，UI 可以显示入口）
+  ///  - 未登录时抛 [FusionErrorCode.loginRequired]，UI 走既有的登录引导
+  ///  - **不返回空列表**（那会把"需要登录"伪装成"没搜到"）
+  @override
+  bool get supportsSearch => true;
+
   @override
   Future<FeedPage> searchVideos(
     String query, {
     int page = 1,
     int pageSize = 20,
   }) async {
-    throw FusionException(
-      code: FusionErrorCode.capabilityUnavailable,
-      userMessage: '抖音搜索当前不可用：该接口受平台风控保护。',
-      technicalMessage:
-          'douyin search unavailable: search endpoints are blocked by '
-          'ArgusSecurityPlugin (empty body / 403 before signature check).',
-      platformId: id,
-      retryable: false,
-      diagnostics: const {
-        'blockedBy': 'ArgusSecurityPlugin',
-        'supportsSearch': false,
-      },
+    final keyword = query.trim();
+    if (keyword.isEmpty) {
+      throw FusionException(
+        code: FusionErrorCode.invalidUrl,
+        userMessage: '请输入搜索关键词。',
+        technicalMessage: 'empty query',
+        platformId: id,
+      );
+    }
+
+    final safeSize = pageSize.clamp(1, 20);
+    final offset = (page <= 1 ? 0 : (page - 1) * safeSize);
+
+    final params = <String, String>{
+      ..._detailParams(''),
+      'keyword': keyword,
+      'search_channel': 'aweme_general',
+      'search_source': 'normal_search',
+      'query_correct_type': '1',
+      'is_filter_search': '0',
+      'offset': '$offset',
+      'count': '$safeSize',
+    }..remove('aweme_id');
+
+    final DouyinCommentResponse response;
+    {
+      final signer = _ensureSigner;
+      final ready = await signer.ensureReady(requireFullUifid: true);
+      if (!ready) {
+        throw FusionException(
+          code: FusionErrorCode.capabilityUnavailable,
+          userMessage: '抖音会话初始化未完成，暂时无法搜索。',
+          technicalMessage:
+              'search requires full uifid; readiness=${signer.readiness.name}',
+          platformId: id,
+          retryable: true,
+        );
+      }
+
+      response = await signer.request(
+        path: '/aweme/v1/web/general/search/single/',
+        params: params,
+        requireFullUifid: true,
+      );
+    }
+
+    final json = response.tryParseJson();
+    if (json == null) {
+      throw FusionException(
+        code: FusionErrorCode.parseError,
+        userMessage: '抖音搜索返回了无法解析的数据。',
+        technicalMessage:
+            'search body not JSON (length=${response.body.length})',
+        platformId: id,
+      );
+    }
+
+    final statusCode = json['status_code'];
+    // 实测：2483 = 请先登录
+    if (statusCode == 2483) {
+      throw FusionException(
+        code: FusionErrorCode.loginRequired,
+        userMessage: '抖音搜索需要登录后才能使用。',
+        technicalMessage:
+            'search returned 2483: ${json['status_msg'] ?? 'login required'}',
+        upstreamCode: statusCode,
+        platformId: id,
+        diagnostics: const {
+          'blockedBy': 'login_required_not_signature',
+          'observed': 'status_code=2483 请先登录，再继续搜索吧',
+        },
+      );
+    }
+    if (statusCode != 0 && statusCode != null) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '抖音搜索失败：${json['status_msg'] ?? '未知原因'}',
+        technicalMessage: 'status_code=$statusCode',
+        upstreamCode: statusCode,
+        platformId: id,
+      );
+    }
+
+    // 结果结构：data[] 里每条含 aweme_info 或 mix_info
+    final data = json['data'];
+    final items = <UnifiedVideo>[];
+    if (data is List) {
+      for (final raw in data) {
+        if (raw is! Map) continue;
+        final entry = Map<String, Object?>.from(raw);
+        final aweme = entry['aweme_info'];
+        if (aweme is! Map) continue;
+        final v = _awemeToVideo(Map<String, Object?>.from(aweme));
+        if (v != null) items.add(v);
+      }
+    }
+
+    return FeedPage(
+      items: items,
+      hasMore: json['has_more'] == 1 || json['has_more'] == true,
+      nextOffset: offset + items.length,
+      adapterId: id,
+      upstreamEndpoint: '/aweme/v1/web/general/search/single/',
+      notes: const [
+        '通过应用内隐藏 WebView 搜索，需要登录抖音账号。',
+      ],
     );
   }
 
@@ -1179,16 +1905,15 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
 
   @override
   AdapterCapabilities get capabilities => const AdapterCapabilities(
-        // 推荐流与热榜的 aweme 结构已包含完整元数据，
-        // 但按 aweme_id 单独查详情仍需 Argus 签名。
-        supportsMetadata: false,
+        // 本轮修复：detail 走应用内 WebView 已实测可用（正式 UIFID 下）
+        supportsMetadata: true,
         // 推荐流返回的 play_addr 实测为 video/mp4 直链，可在应用内播放
         supportsNativePlayback: true,
         // open.douyin.com/player/video 实测可嵌入
         supportsOfficialEmbed: true,
         supportsExternalFallback: true,
-        requiresAuthForMetadata: true,
-        // 推荐流/热榜不需要签名；详情/搜索需要
+        requiresAuthForMetadata: false,
+        // 需要浏览器会话凭证（UIFID），已在应用内 WebView 中实现
         requiresSignature: true,
         maxQualityWithoutAuth: null,
         notes: [
@@ -1196,11 +1921,13 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
           '推荐流与热榜使用 APP 端公开接口（api.amemv.com），'
               '实测无需签名即可返回真实数据。',
           '推荐流返回的播放地址实测为 video/mp4 直链（ftypisom 头），可在应用内原生播放。',
-          '按 aweme_id 单独查询详情、搜索、话题接口需要 X-Argus 签名，'
-              '实测返回空响应，当前不可用。',
-          'Argus 签名逻辑为远程下发的 JS（bytegecko CDN）并在 WebView 中执行，'
-              '本项目不实现，因为那属于规避平台访问控制。',
-          '本适配器不携带任何 Cookie、账号令牌、X-Argus 签名或伪造设备指纹。',
+          '视频详情 / 相关推荐 / 弹幕 / 表情 / 搜索：通过应用内隐藏 WebView '
+              '完成平台风控初始化（获取正式 UIFID）后请求，'
+              '实测 detail 返回 200 + aweme_detail + bit_rate 多档清晰度。',
+          '搜索需要登录（实测 status_code=2483「请先登录，再继续搜索吧」），'
+              '未登录时如实抛 loginRequired，不返回空列表。',
+          '本适配器不解析或复刻任何签名算法，不伪造设备指纹；'
+              '只是让平台自己的页面在其自身环境中完成初始化并复用该会话。',
         ],
       );
 
@@ -1694,129 +2421,211 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
 
 
 
-  // ── 元数据（当前不可用，如实报错）──────────────────────────
+  // ── 元数据 ─────────────────────────────────────────────────
 
+  /// 拉取视频元数据。
+  ///
+  /// # 本轮修复（2026-10-19）
+  ///
+  /// 旧实现用 `_http.get(...)` **裸 HTTP 请求**打
+  /// `www.douyin.com/aweme/v1/web/aweme/detail/`，必然得到
+  /// `HTTP 403 Blocked by ArgusSecurityPlugin Uifid Not Found`。
+  ///
+  /// 实测根因（见 `tool/probe_douyin_uifid_upgrade.mjs`）：
+  /// 平台分两级下发 uifid —— `UIFID_TEMP`（~500ms）与**正式 `UIFID`**
+  /// （~2.5–4s）。detail 要求正式 UIFID，而裸 HTTP 请求连 TEMP 都没有。
+  ///
+  /// 现在改为走 [DouyinWebSigner]：
+  ///  1. `ensureReady(requireFullUifid: true)` 等到正式 UIFID
+  ///  2. 在页面上下文里 fetch detail（页面 SDK 自动签名）
+  ///  3. 实测返回 200 / ~53KB / 含 `aweme_detail`
+  ///
+  /// 裸 HTTP 路径已删除：它不是"被挡住"，而是**根本没尝试正确路径**。
   @override
   Future<VideoMetadata> fetchMetadata(LinkMatch match) async {
-    // 仍然发起一次真实请求，以便：
-    //  1. 验证当前环境下的实际拦截行为（而不是凭假设报错）
-    //  2. 在平台策略变化后能够自动恢复
-    //  3. 向用户与报告提供**实测证据**而非猜测
-    final query = _buildDetailQuery(match.platformVideoId);
-    final url = 'https://www.douyin.com/aweme/v1/web/aweme/detail/?$query';
+    final awemeId = match.platformVideoId;
 
     _logger.info(
-      'douyin: probing aweme/detail (expected to be blocked by Argus)',
-      {'videoId': match.platformVideoId},
+      'douyin: fetching metadata',
+      {'videoId': awemeId, 'channel': 'webview'},
     );
 
-    try {
-      final result = await _http.get(
-        url,
-        headers: const {
-          'Referer': _shareReferer,
-          'Accept': 'application/json, text/plain, */*',
-        },
-        platformId: id,
-        acceptStatuses: const {200, 403},
+    final DouyinCommentResponse response;
+    {
+      final signer = _ensureSigner;
+
+      // 1. 等到正式 UIFID（detail 级）
+      final ready = await signer.ensureReady(
+        awemeId: awemeId,
+        requireFullUifid: true,
       );
-
-      // 实测的 Argus 风控拦截
-      if (result.statusCode == 403) {
-        throw _argusBlockedError(result.body);
-      }
-
-      final json = result.jsonObject(platformId: id);
-      final detail = json['aweme_detail'];
-
-      if (detail is! Map) {
-        // 平台返回 200 但没有数据 —— 同样如实报错，不伪造
+      if (!ready) {
         throw FusionException(
           code: FusionErrorCode.capabilityUnavailable,
-          userMessage: '抖音未返回该视频的数据，当前无法获取元数据。',
+          userMessage: '抖音会话初始化未完成，暂时无法获取视频信息。',
           technicalMessage:
-              'aweme_detail is ${detail.runtimeType}; status_code=${json['status_code']}',
-          upstreamCode: json['status_code'],
+              'DouyinWebSigner not fully ready: readiness=${signer.readiness.name}, '
+              'fullUifidAfterMs=${signer.fullUifidAfterMs}. '
+              'detail requires UIFID (not UIFID_TEMP).',
           platformId: id,
+          retryable: true,
           diagnostics: {
-            'responseKeys': json.keys.take(10).toList(),
+            'stage': 'webview_full_uifid',
+            'readiness': signer.readiness.name,
+            'required': 'UIFID',
           },
         );
       }
 
-      // 若平台策略放开，以下解析路径即可生效
-      return _parseAwemeDetail(Map<String, Object?>.from(detail), match);
-    } on FusionException {
-      rethrow;
-    } catch (e) {
-      throw normalizeError(e, platformId: id);
+      // 2. 页面上下文请求 detail
+      response = await signer.request(
+        path: '/aweme/v1/web/aweme/detail/',
+        params: _detailParams(awemeId),
+        requireFullUifid: true,
+      );
     }
+
+    if (response.statusCode == 403) {
+      throw _argusBlockedError(response.body);
+    }
+
+    if (response.isEmpty) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '抖音返回了空响应，可能是会话凭证已失效。',
+        technicalMessage:
+            'empty body from aweme/detail (HTTP ${response.statusCode})',
+        httpStatus: response.statusCode,
+        platformId: id,
+        retryable: true,
+      );
+    }
+
+    final json = response.tryParseJson();
+    if (json == null) {
+      throw FusionException(
+        code: FusionErrorCode.parseError,
+        userMessage: '抖音返回了无法解析的数据。',
+        technicalMessage:
+            'aweme/detail body is not JSON (length=${response.body.length})',
+        platformId: id,
+      );
+    }
+
+    final detail = json['aweme_detail'];
+    if (detail is! Map) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '抖音未返回该视频的数据，可能视频已删除或不可见。',
+        technicalMessage:
+            'aweme_detail is ${detail.runtimeType}; '
+            'status_code=${json['status_code']}',
+        upstreamCode: json['status_code'],
+        platformId: id,
+        diagnostics: {
+          'responseKeys': json.keys.take(10).toList(),
+        },
+      );
+    }
+
+    final map = Map<String, Object?>.from(detail);
+
+    // 3. 顺手把播放地址与清晰度档位缓存起来，
+    //    让 resolvePlayback 不必再发一次请求。
+    final video = map['video'];
+    if (video is Map) {
+      final v = Map<String, Object?>.from(video);
+      _cachePlayback(
+        awemeId,
+        v,
+        width: (v['width'] as num?)?.toInt(),
+        height: (v['height'] as num?)?.toInt(),
+      );
+    }
+
+    return _parseAwemeDetail(map, match);
   }
+
+  /// detail 接口的公共参数集。
+  ///
+  /// 与 App 内 `fetchComments` 使用**同一套**参数形态：实测这套参数
+  /// 在正式 UIFID 下可让 detail / comment / related 全部返回 200。
+  Map<String, String> _detailParams(String awemeId) => {
+        'device_platform': 'webapp',
+        'aid': '6383',
+        'channel': 'channel_pc_web',
+        'pc_client_type': '1',
+        'version_code': '290100',
+        'version_name': '29.1.0',
+        'cookie_enabled': 'true',
+        'browser_language': 'zh-CN',
+        'browser_platform': 'Win32',
+        'browser_name': 'Chrome',
+        'browser_version': '124.0.0.0',
+        'browser_online': 'true',
+        'engine_name': 'Blink',
+        'engine_version': '124.0.0.0',
+        'os_name': 'Windows',
+        'os_version': '10',
+        'platform': 'PC',
+        'downlink': '10',
+        'effective_type': '4g',
+        'round_trip_time': '0',
+        'update_version_code': '170400',
+        'aweme_id': awemeId,
+      };
+
 
   /// 构造 aweme/detail 的查询参数。
   ///
   /// 参数集合参考 Evil0ctal/Douyin_TikTok_Download_API 的 web 客户端画像，
   /// 使用固定的、非账号态的浏览器指纹字段。**不包含任何凭证**。
-  String _buildDetailQuery(String awemeId) {
-    final params = <String, String>{
-      'device_platform': 'webapp',
-      'aid': '6383',
-      'channel': 'channel_pc_web',
-      'aweme_id': awemeId,
-      'pc_client_type': '1',
-      'version_code': '290100',
-      'version_name': '29.1.0',
-      'cookie_enabled': 'true',
-      'screen_width': '1920',
-      'screen_height': '1080',
-      'browser_language': 'zh-CN',
-      'browser_platform': 'Win32',
-      'browser_name': 'Chrome',
-      'browser_version': '124.0.0.0',
-      'browser_online': 'true',
-      'engine_name': 'Blink',
-      'engine_version': '124.0.0.0',
-      'os_name': 'Windows',
-      'os_version': '10',
-      'cpu_core_num': '8',
-      'device_memory': '8',
-      'platform': 'PC',
-      'downlink': '10',
-      'effective_type': '4g',
-      'round_trip_time': '50',
-    };
-    return params.entries
-        .map((e) => '${e.key}=${Uri.encodeQueryComponent(e.value)}')
-        .join('&');
-  }
-
-  /// Argus 风控拦截的统一错误。明确说明"这不是签名问题"。
+  /// Argus 风控拦截的统一错误。
+  ///
+  /// # 本轮修正（2026-10-19）
+  ///
+  /// 旧实现写的是 `requiredCookie: 'UIFID_TEMP'`、`signatureSufficient: false`，
+  /// 且注释断言"放行需服务端签发的 UIFID_TEMP Cookie"——**这是错的**。
+  ///
+  /// 实测：`UIFID_TEMP` 只够评论；detail 需要**正式 `UIFID`**。
+  /// 签名（`a_bogus`）本身是够的，缺的是**会话等级**。
   FusionException _argusBlockedError(String body) {
     final isUifid = body.contains('Uifid');
     return FusionException(
       code: FusionErrorCode.permissionDenied,
       userMessage: isUifid
-          ? '抖音拒绝了本次请求（平台风控拦截，需要浏览器环境凭证）。'
+          ? '抖音拒绝了本次请求（会话等级不足，需要完整的浏览器会话凭证）。'
           : '抖音拒绝了本次请求（平台风控拦截）。',
       technicalMessage:
           'douyin aweme/detail blocked: HTTP 403 body="${body.trim()}"',
       httpStatus: 403,
       upstreamCode: 403,
       platformId: id,
-      // 这不是可重试的临时错误
-      retryable: false,
+      // 会话可能升级，重试有意义
+      retryable: true,
       diagnostics: {
         'blockedBy': 'ArgusSecurityPlugin',
-        'requiredCookie': 'UIFID_TEMP',
-        'signatureSufficient': false,
+        // 实测：detail 要正式 UIFID，UIFID_TEMP 不够
+        'requiredCookie': 'UIFID',
+        'tempSufficient': false,
+        'signatureSufficient': true,
         'note':
-            '拦截发生在签名校验之前，a_bogus 正确也无法通过；'
-                '放行需服务端签发的 UIFID_TEMP Cookie。',
+            'a_bogus 签名本身正确；拦截原因是会话等级。'
+                'UIFID_TEMP（~500ms 下发）只够评论，'
+                '正式 UIFID（~2.5-4s 下发）才放行 detail。',
       },
     );
   }
 
-  /// 解析 aweme_detail。当前不可达，但保持完整以便平台策略变化后可用。
+  /// 解析 aweme_detail。
+  ///
+  /// # 本轮修复（2026-10-19）
+  ///
+  /// 旧实现的注释写"当前不可达，保留以便平台策略变化后恢复"，
+  /// `limitations` 也写着"当前环境下无法稳定获取"。现在这条路径
+  /// **已经实测可用**（正式 UIFID 下返回 200 / ~53KB），因此：
+  ///  - 文案改为真实说明
+  ///  - 统计字段按实测填充（`play_count` 恒为 0，仍不采用）
   ///
   /// 字段路径参考公开实现的解析逻辑，并遵循"缺失即 null"的原则。
   VideoMetadata _parseAwemeDetail(
@@ -1878,20 +2687,31 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       availability: VideoAvailability.available,
       requiresAuth: false,
       limitations: const [
-        '抖音元数据接口受平台风控保护，当前环境下无法稳定获取。',
+        // 实测（2026-10-19）：正式 UIFID 下 detail 可用。
+        // 唯一前提是 WebView 能完成风控初始化（拿到正式 UIFID）。
+        '需要在应用内 WebView 完成平台风控初始化（获取正式 UIFID）后才能获取。',
       ],
-      notes: const ['本路径当前不可达；保留以便平台策略变化后恢复。'],
+      notes: const [
+        '通过应用内隐藏 WebView 请求，未使用外部浏览器，未伪造设备指纹。',
+        '实测返回 aweme_detail，含 play_addr 与 bit_rate 多档清晰度。',
+      ],
       upstreamEndpoint: '/aweme/v1/web/aweme/detail',
     );
   }
 
   // ── 播放源 ─────────────────────────────────────────────────
 
-  /// 缓存从 feed 拿到的播放地址。
+  /// 缓存从 feed / detail 拿到的播放地址。
   ///
-  /// 抖音的详情接口需要 Argus 签名，无法按 aweme_id 单独查询播放地址。
-  /// 但 feed 接口返回的每条视频都带完整 `video.play_addr.url_list`，
-  /// 因此这里把 feed 解析时拿到的地址缓存起来，供 resolvePlayback 使用。
+  /// # 本轮修复（2026-10-19）
+  ///
+  /// 旧注释写"抖音的详情接口需要 Argus 签名，无法按 aweme_id 单独查询
+  /// 播放地址"——**这已被推翻**。正式 UIFID 下 detail 返回
+  /// `video.play_addr.url_list`（3 个直链）与 `bit_rate`（7 档清晰度）。
+  ///
+  /// 因此缓存现在有两个来源：
+  ///  1. feed 解析（快，但只覆盖推荐流里出现过的视频）
+  ///  2. detail 补查（覆盖任意 aweme_id）
   ///
   /// 缓存只在内存中，进程退出即失效——不持久化，因为直链有有效期
   /// 且不应写入磁盘。
@@ -1901,7 +2721,7 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   Future<PlaybackSource?> resolvePlayback(PlaybackRequest request) async {
     final videoId = request.platformVideoId;
 
-    // 1. 优先使用 feed 解析时缓存的直链
+    // 1. 优先使用缓存（feed 或之前 detail 补查的结果）
     final cached = _playbackCache[videoId];
     if (cached != null && cached.isUsable) {
       return NativePlaybackSource(
@@ -1916,8 +2736,14 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       );
     }
 
-    // 2. 缓存未命中：无法通过详情接口补齐（需 Argus 签名），
-    //    退回到官方嵌入播放，并如实说明原因。
+    // 2. 缓存未命中：通过 detail 补查真实直链。
+    //
+    // 这是本轮新增的能力：以前这里直接退回官方嵌入播放，
+    // 现在可以先尝试拿到原生直链（正式 UIFID 下 detail 可用）。
+    final fetched = await _tryResolveViaDetail(videoId);
+    if (fetched != null) return fetched;
+
+    // 3. 仍失败：退回官方嵌入播放，并如实说明原因。
     //
     // 实测：open.douyin.com/player/video 返回 200，
     // 无 X-Frame-Options / CSP frame-ancestors 限制。
@@ -1936,11 +2762,78 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
         requiresLogin: false,
       ),
       embedNotes: const [
-        '未命中推荐流缓存，无法获取应用内播放直链。',
-        '按 aweme_id 查询详情需要 X-Argus 签名，本项目不实现。',
-        '该播放器由抖音官方提供，播放控制能力由平台决定。',
+        '未能获取应用内播放直链（可能是会话初始化未完成或视频不可见）。',
+        '已退回抖音官方播放器；播放控制能力由平台决定。',
       ],
     );
+  }
+
+  /// 通过 detail 接口补查播放地址。
+  ///
+  /// 成功时写入缓存并返回 [NativePlaybackSource]；失败返回 null
+  /// （由调用方降级到官方嵌入，**不抛错**——播放路径不该因为
+  /// 元数据补查失败而完全不可用）。
+  Future<PlaybackSource?> _tryResolveViaDetail(String awemeId) async {
+    try {
+      final DouyinCommentResponse response;
+      {
+        final signer = _ensureSigner;
+        final ready = await signer.ensureReady(
+          awemeId: awemeId,
+          requireFullUifid: true,
+        );
+        if (!ready) return null;
+
+        response = await signer.request(
+          path: '/aweme/v1/web/aweme/detail/',
+          params: _detailParams(awemeId),
+          requireFullUifid: true,
+        );
+      }
+      if (response.isEmpty) return null;
+
+      final json = response.tryParseJson();
+      final detail = json?['aweme_detail'];
+      if (detail is! Map) return null;
+
+      final d = Map<String, Object?>.from(detail);
+      final video = d['video'];
+      if (video is! Map) return null;
+
+      final v = Map<String, Object?>.from(video);
+      _cachePlayback(
+        awemeId,
+        v,
+        width: (v['width'] as num?)?.toInt(),
+        height: (v['height'] as num?)?.toInt(),
+      );
+
+      final hit = _playbackCache[awemeId];
+      if (hit == null || !hit.isUsable) return null;
+
+      _logger.info('douyin: playback resolved via detail', {
+        'awemeId': awemeId,
+        'qualities': hit.qualities.length,
+      });
+
+      return NativePlaybackSource(
+        videoId: makeVideoId(id, awemeId),
+        videoStreamUrl: hit.url,
+        requiredHeaders: hit.headers,
+        quality: hit.quality,
+        availableQualities: hit.qualities,
+        isDash: false,
+        videoFallbackUrls: hit.fallbackUrls,
+        expiresAt: hit.expiresAt,
+      );
+    } catch (e) {
+      // 播放补查失败不抛出：降级到官方嵌入即可
+      _logger.debug('douyin: detail playback fallback', {
+        'awemeId': awemeId,
+        'error': e.runtimeType.toString(),
+      });
+      return null;
+    }
   }
 
   /// 规范化抖音播放地址。

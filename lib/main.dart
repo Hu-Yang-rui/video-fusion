@@ -123,6 +123,10 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
   void _buildDependencies() {
     final logger = FusionLogger(minLevel: LogLevel.info);
     final http = FusionHttpClient(logger: logger);
+    final secureStore = FlutterSecureStore();
+
+    // 注：抖音"本地签名库"通道已封存（`archive/douyin-native-signer/`）。
+    // 当前抖音的唯一通道是应用内隐藏 WebView，不需要额外装配。
 
     _registry = PlatformRegistry(adapters: [
       BilibiliAdapter(http: http, logger: logger),
@@ -137,7 +141,7 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
       logger: logger,
     );
 
-    _vault = CredentialVault(storage: FlutterSecureStore(), logger: logger);
+    _vault = CredentialVault(storage: secureStore, logger: logger);
     _feedController = FeedController(service: _service, logger: logger);
     _interactions = InteractionRegistry(service: _service, vault: _vault);
     _imStore = ImStore(service: _service, vault: _vault);

@@ -56,6 +56,29 @@ class Redactor {
     'x-secsdk-web-signature',
     'x-secsdk-csrf-token',
     'webid',
+    // 抖音 APP 端签名头（X-Argus 系）
+    //
+    // 这些头有时效性且可用于重放：泄漏一个就等于泄漏一段可用的访问凭证。
+    // 因此按请求头名整体屏蔽，而不是逐段打码。
+    'x-gorgon',
+    'x-argus',
+    'x-khronos',
+    'x-ladon',
+    'x-ss-stub',
+    'x-tt-trace-id',
+    // 设备身份标识：与签名绑定，单独泄漏即可用于关联同一设备的历史请求。
+    'device_id',
+    'install_id',
+    'iid',
+    'cdid',
+    'openudid',
+    'clientudid',
+    'oaid',
+    'gaid',
+    'android_id',
+    'serial_number',
+    // 本地签名库的 license
+    'license',
     // B 站登录态相关
     'sessdata',
     'bili_jct',
@@ -92,6 +115,18 @@ class Redactor {
     'upsig',
     'oi',
     'uipk',
+    // 抖音 APP 端签名与设备身份（查询串里也可能出现）
+    'x-gorgon',
+    'x-argus',
+    'x-khronos',
+    'x-ladon',
+    'x-ss-stub',
+    'device_id',
+    'install_id',
+    'iid',
+    'cdid',
+    'oaid',
+    'license',
   };
 
   /// 记录 URL 时使用：仅保留 origin + path，丢弃整个查询串。

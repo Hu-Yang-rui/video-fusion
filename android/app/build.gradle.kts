@@ -9,6 +9,15 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
+    // 本地签名库垫片（metasec_shim）已封存到
+    // archive/douyin-native-signer-v2/。原因见该目录 README：
+    // 那条路需要 arm64 真机 + app-bound license + 设备身份自洽，
+    // 且功能提升接近零（Web 端已覆盖详情/评论/推荐/热榜/直播/弹幕，
+    // 私信与通知也已确认走 Web 端可达，只缺登录态）。
+    //
+    // 重新启用时把 externalNativeBuild { cmake { ... } } 加回来，
+    // 并把 archive/douyin-native-signer-v2/cpp/ 拷回 src/main/cpp/。
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -27,6 +36,17 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // # 不强制单 ABI（实测结论）
+        //
+        // 曾尝试只打 arm64 让模拟器走翻译层，失败：
+        // x86_64 模拟器的 zygote 是 x86_64，App 进程必然是 x86_64，
+        // 而 libflutter.so 只在 lib/arm64-v8a/ 里 → 启动即
+        // UnsatisfiedLinkError: library "libflutter.so" not found。
+        //
+        // 结论：翻译层不会把 x86_64 进程的 dlopen 重定向到 arm64 目录。
+        // 因此保持多 ABI，metasec 的跨 ABI 加载由 Dart 侧
+        // 「从 APK 提取 so + 完整路径 dlopen」解决（见 metasec_loader.dart）。
     }
 
     buildTypes {

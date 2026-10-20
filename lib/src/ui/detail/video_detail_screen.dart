@@ -145,12 +145,38 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
     }
   }
 
+  /// 是否正在解析播放地址（**防重入**）。
+  ///
+  /// # 为什么必须有这个守卫
+  ///
+  /// `_resolveAndLoad` 有两个调用方：`initState` 与"重试"按钮。
+  /// 没有守卫时，用户在解析途中连点重试会：
+  ///   1. 每次调用都 `FusionPlayerController()` 新建一个实例
+  ///   2. `_player = player` 直接覆盖上一个，**旧实例永不 dispose**
+  ///   3. `_sub` 被覆盖而不 cancel，**旧订阅仍在推 setState**
+  ///   4. 两个 libmpv 实例同时持有音频输出 → 声音叠加
+  ///
+  /// 这是"快速连续点击导致播放器重复创建"的根因，属于确定性缺陷，
+  /// 不是玄学卡顿。
+  bool _resolveInFlight = false;
+
   Future<void> _resolveAndLoad() async {
+    if (_resolveInFlight) return;
+    _resolveInFlight = true;
+
     setState(() {
       _resolving = true;
       _error = null;
     });
 
+    try {
+      await _doResolveAndLoad();
+    } finally {
+      _resolveInFlight = false;
+    }
+  }
+
+  Future<void> _doResolveAndLoad() async {
     final outcome = await widget.service.resolvePlayback(widget.video);
 
     if (!mounted) return;
@@ -178,6 +204,11 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
       return;
     }
 
+    // 重试路径：先把上一个播放器与订阅彻底拆掉再建新的。
+    // 顺序很重要——先 cancel 订阅（否则 dispose 过程中仍会收到事件），
+    // 再 dispose 播放器，最后才换引用。
+    _teardownPlayer();
+
     final player = FusionPlayerController();
     _player = player;
     _sub = player.stream.listen((s) {
@@ -187,6 +218,11 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
     });
 
     await player.load(source);
+    if (!mounted) {
+      // 解析途中页面已销毁：不能把 controller 挂到一个已卸载的 State 上
+      _teardownPlayer();
+      return;
+    }
     _videoController = VideoController(
       player.rawPlayer,
       configuration: player.videoConfiguration,
@@ -207,6 +243,19 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
       });
       _scheduleHideControls();
     }
+  }
+
+  /// 拆掉当前播放器与订阅（幂等）。
+  ///
+  /// 与 `dispose()` 的区别：这里只清播放相关状态，不动互动控制器。
+  /// 重试 / 重新解析前必须调用，否则旧 libmpv 实例会继续占着音频输出。
+  void _teardownPlayer() {
+    _sub?.cancel();
+    _sub = null;
+    _player?.dispose();
+    _player = null;
+    _videoController = null;
+    _snapshot = PlayerSnapshot.initial;
   }
 
   void _scheduleHideControls() {

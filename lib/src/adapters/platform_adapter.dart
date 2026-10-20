@@ -15,6 +15,7 @@ import '../models/interaction.dart';
 import '../models/live.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
+import '../models/video_danmaku.dart';
 
 /// 链接识别结果。
 class LinkMatch {
@@ -631,6 +632,115 @@ abstract class PlatformAdapter {
     );
   }
 
+  /// 是否支持读取视频内弹幕（不是直播弹幕）。
+  ///
+  /// 与 [fetchLiveDanmakuEndpoint]（直播间的实时弹幕流）是两回事：
+  /// 这里指的是**点播视频时间轴上的弹幕**，用于在播放器上叠加显示。
+  ///
+  /// 默认 false。只有真正实现并验证过弹幕接口的适配器才返回 true，
+  /// 避免 UI 展示一个点了必然失败的弹幕开关。
+  bool get supportsVideoDanmaku => false;
+
+  /// 拉取视频内弹幕。
+  ///
+  /// [platformVideoId] 是平台视频 ID（B站为 BV 号）。
+  ///
+  /// [durationSeconds] 用于计算需要拉几段：平台通常按固定时长切段
+  /// （B站 6 分钟一段），不给时长就只能拉到第一段。调用方从
+  /// [VideoMetadata.durationSeconds] 拿。
+  ///
+  /// [fromSeconds] / [toSeconds] 可选，用于只取某个时间区间的弹幕
+  /// （例如播放器只预加载接下来 60 秒）。为 null 表示全量。
+  ///
+  /// 返回按 [VideoDanmaku.progressMs] 升序排列。
+  ///
+  /// 不支持时抛 [FusionException]（unsupportedPlatform），
+  /// **不返回空列表**——那会把"能力不存在"伪装成"这个视频没有弹幕"。
+  Future<List<VideoDanmaku>> fetchVideoDanmaku(
+    String platformVideoId, {
+    double? durationSeconds,
+    double? fromSeconds,
+    double? toSeconds,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持视频弹幕。',
+      technicalMessage: 'Adapter $id does not implement fetchVideoDanmaku',
+      platformId: id,
+    );
+  }
+
+  /// 是否支持给**评论**点赞（不是给视频点赞）。
+  bool get supportsCommentLike => false;
+
+  /// 给评论点赞 / 取消点赞。
+  ///
+  /// [commentId] 是平台评论 ID（B站 `rpid`）。
+  /// [platformVideoId] 用于定位评论所属的视频（B站接口要求 `oid`）。
+  ///
+  /// 未登录必须抛 `loginRequired`，不得静默失败。
+  Future<InteractionResult> setCommentLike(
+    String platformVideoId, {
+    required String commentId,
+    required bool like,
+    required PlatformSession session,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持评论点赞。',
+      technicalMessage: 'Adapter $id does not implement setCommentLike',
+      platformId: id,
+    );
+  }
+
+  /// 是否支持回复评论。
+  bool get supportsCommentReply => false;
+
+  /// 回复一条评论（发一条新评论，或回复到某条评论下）。
+  ///
+  /// [replyToCommentId] 为 null 表示发**顶层评论**；非 null 表示回复
+  /// 到该评论下（B站二级评论）。
+  ///
+  /// 返回新评论的 ID（平台不给时返回 null）。
+  ///
+  /// 未登录必须抛 `loginRequired`。
+  Future<String?> replyComment(
+    String platformVideoId, {
+    required String message,
+    required PlatformSession session,
+    String? replyToCommentId,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持回复评论。',
+      technicalMessage: 'Adapter $id does not implement replyComment',
+      platformId: id,
+    );
+  }
+
+  /// 是否支持"一键三连"（点赞 + 投币 + 收藏 一次完成）。
+  bool get supportsTripleAction => false;
+
+  /// 一键三连。
+  ///
+  /// 语义：对同一个视频**同时**点赞、投币、收藏。
+  ///
+  /// 返回值必须如实反映**每一项**的结果，不能因为其中两项成功就报成功。
+  /// 某一项被平台拒绝（例如投币被风控）时，要在 [TripleActionResult]
+  /// 里标出是哪一项、原因是什么。
+  Future<TripleActionResult> tripleAction(
+    String platformVideoId, {
+    required PlatformSession session,
+    int coinCount = 1,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持一键三连。',
+      technicalMessage: 'Adapter $id does not implement tripleAction',
+      platformId: id,
+    );
+  }
+
   /// 获取弹幕服务器连接参数。
   Future<LiveDanmakuEndpoint> fetchLiveDanmakuEndpoint(int roomId) {
     throw FusionException(
@@ -735,6 +845,80 @@ abstract class PlatformAdapter {
     required int ackSeqno,
   }) async =>
       false;
+
+  // ── 私信：媒体能力 ──────────────────────────────────────────
+  //
+  // 与上面的"能力开关 + 默认抛"保持一致：不支持的平台不会出现
+  // 点进去必然失败的按钮。
+
+  /// 是否支持在私信里发送图片。
+  ///
+  /// **语义**：适配器实现了上传 + 图片消息构造。
+  /// 与"是否已用真实登录态验证跑通"是两件事，验证状态写在文档里。
+  bool get supportsImImageSend => false;
+
+  /// 是否支持读取表情面板。
+  bool get supportsImEmote => false;
+
+  /// 是否支持**发送**自定义表情消息。
+  ///
+  /// 与 [supportsImEmote]（读取）分开：很多平台允许接收并渲染表情，
+  /// 但发送自定义表情要求该表情已在用户收藏里，未验证前不该给入口。
+  bool get supportsImCustomEmojiSend => false;
+
+  /// 上传一张图片，返回可用于构造消息的媒体信息。
+  ///
+  /// 失败抛 `FusionException`（或适配器私有异常，由 service 归一化）。
+  /// **不得返回本地路径或伪造地址**。
+  Future<ImMedia> uploadImImage({
+    required PlatformSession session,
+    required List<int> bytes,
+    required String filename,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持发送图片。',
+      technicalMessage: 'Adapter $id does not implement uploadImImage',
+      platformId: id,
+    );
+  }
+
+  /// 发送一条图片消息。
+  Future<ImSendResult> sendImImage({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持发送图片。',
+      technicalMessage: 'Adapter $id does not implement sendImImage',
+      platformId: id,
+    );
+  }
+
+  /// 发送一条自定义表情消息。
+  Future<ImSendResult> sendImCustomEmoji({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持发送自定义表情。',
+      technicalMessage: 'Adapter $id does not implement sendImCustomEmoji',
+      platformId: id,
+    );
+  }
+
+  /// 拉取表情面板。
+  ///
+  /// 失败**不抛异常**，返回 `loaded: false` 的面板并带原因 ——
+  /// 表情加载不出来不该让聊天页报错。
+  Future<ImEmotePanel> fetchImEmotePanel({
+    required PlatformSession session,
+  }) async =>
+      const ImEmotePanel(unavailableReason: '该平台不支持表情面板。');
 }
 
 /// 适配器能力声明。用于报告与 UI 如实展示"已实现 / 受限"。

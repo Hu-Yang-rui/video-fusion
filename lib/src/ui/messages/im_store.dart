@@ -449,7 +449,217 @@ class ImStore extends ChangeNotifier {
     final chat = chatOf(failed.receiverId);
     chat.removeLocal(failed.msgKey);
     notifyListeners();
+    // 图片消息走图片通道，不能当成文本重发
+    if (failed.type == ImMessageType.image) {
+      final path = failed.localPreviewPath;
+      if (path == null) {
+        // 没有本地文件了（重启/缓存清理）：如实失败，不假装重发
+        chat.addLocal(failed.copyWith(
+          msgKey: failed.msgKey,
+          sendState: ImSendState.failed,
+          localError: '本地图片已不可用，请重新选择图片发送。',
+        ));
+        notifyListeners();
+        return false;
+      }
+      return sendImage(failed.receiverId, filePath: path);
+    }
     return sendText(failed.receiverId, failed.text ?? '');
+  }
+
+  // ── 发送图片 ────────────────────────────────────────────────
+  //
+  // 流程（需求一·2）：
+  //  1. 本地校验（格式/大小）——不合格直接拒绝，不浪费一次上传
+  //  2. 插入"sending"气泡（带本地预览路径）
+  //  3. 上传 → 拿到服务端 image_url
+  //  4. 用真实 URL 构造图片消息发送
+  //  5. 服务端确认 → 替换气泡为 sent；任一步失败 → failed 可重试
+  //
+  // **不假装成功**：上传失败不会发消息；发送失败不会显示图片已送达。
+
+  /// 当前上传进度（0..1），按本地消息 key 索引。
+  ///
+  /// 只有"上传中"这一阶段有进度；发送消息本身是单次请求，没有中间进度。
+  final Map<String, double> _uploadProgress = {};
+
+  double? uploadProgressOf(String localKey) => _uploadProgress[localKey];
+
+  /// 发送一张本地图片。
+  ///
+  /// [filePath] 是设备上的文件路径。**只用于上传与本地预览**，
+  /// 绝不作为远端地址塞进消息体。
+  Future<bool> sendImage(int talkerId, {required String filePath}) async {
+    final s = _session;
+    if (s == null) return false;
+    if (!_service.supportsImImageSendFor(platformId)) return false;
+
+    // 读文件（IO 错误由 service 归一化）
+    List<int> bytes;
+    try {
+      bytes = await _service.readLocalImage(filePath);
+    } on FusionException catch (e) {
+      _pushTransientError(e.userMessage);
+      return false;
+    } catch (e) {
+      _pushTransientError('读取图片失败，请重新选择。');
+      return false;
+    }
+
+    final filename = filePath.split(RegExp(r'[\\/]')).last;
+
+    final chat = chatOf(talkerId);
+    final localKey = 'local-img-${DateTime.now().microsecondsSinceEpoch}';
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+    chat.addLocal(ImMessage(
+      msgKey: localKey,
+      senderUid: myUid,
+      receiverId: talkerId,
+      receiverType: 1,
+      msgType: 2,
+      timestamp: now,
+      content: '',
+      sendState: ImSendState.sending,
+      localPreviewPath: filePath,
+    ));
+    _uploadProgress[localKey] = 0;
+    notifyListeners();
+
+    // 1) 上传
+    ImMedia media;
+    try {
+      media = await _service.uploadImImage(
+        platformId,
+        session: s,
+        bytes: bytes,
+        filename: filename,
+      );
+      _uploadProgress[localKey] = 1;
+      notifyListeners();
+    } on FusionException catch (e) {
+      chat.failLocal(localKey, e.userMessage);
+      _uploadProgress.remove(localKey);
+      if (e.code == FusionErrorCode.loginRequired) _session = null;
+      notifyListeners();
+      return false;
+    } catch (e) {
+      chat.failLocal(localKey, '图片上传失败，请重试。');
+      _uploadProgress.remove(localKey);
+      notifyListeners();
+      return false;
+    }
+
+    // 2) 发送图片消息
+    try {
+      final result = await _service.sendImImage(
+        platformId,
+        session: s,
+        talkerId: talkerId,
+        media: media,
+      );
+      _uploadProgress.remove(localKey);
+      if (result.accepted && result.msgKey != null) {
+        chat.confirmLocal(
+          localKey,
+          ImMessage(
+            msgKey: result.msgKey!,
+            senderUid: myUid,
+            receiverId: talkerId,
+            receiverType: 1,
+            msgType: 2,
+            timestamp: now,
+            content: result.msgContent ?? '',
+            sendState: ImSendState.sent,
+            media: media,
+            // 保留本地预览路径：远端图加载前先显示本地图，避免闪空
+            localPreviewPath: filePath,
+          ),
+        );
+        _bumpSessionPreview(talkerId, '[图片]', now);
+        notifyListeners();
+        return true;
+      }
+      chat.failLocal(localKey, result.message ?? '图片发送失败');
+      notifyListeners();
+      return false;
+    } on FusionException catch (e) {
+      _uploadProgress.remove(localKey);
+      chat.failLocal(localKey, e.userMessage);
+      if (e.code == FusionErrorCode.loginRequired) _session = null;
+      notifyListeners();
+      return false;
+    } catch (e) {
+      _uploadProgress.remove(localKey);
+      chat.failLocal(localKey, '图片发送失败，请重试。');
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// 发送一个表情（以表情短代码作为文本消息发出）。
+  ///
+  /// # 为什么是文本短代码而不是表情图片消息
+  ///
+  /// 平台的 `msg_type=6`（`FAV_EMOJI`）语义是**"收藏的表情"**，
+  /// 发送未收藏的表情很可能被拒（本项目未验证）。
+  /// 而把 `[doge]` 作为普通文本发出去，接收端一定会按表情渲染——
+  /// 这是 B 站私信里表情的实际传递方式，且不依赖收藏关系。
+  ///
+  /// 因此这里选择"文本短代码"这条**确定可用**的路径，
+  /// 而不是拼一个未经验证的自定义表情消息。
+  Future<bool> sendEmote(int talkerId, String shortcode) async {
+    final code = shortcode.trim();
+    if (code.isEmpty) return false;
+    return sendText(talkerId, code);
+  }
+
+  /// 拉取表情面板。
+  Future<ImEmotePanel> loadEmotePanel() async {
+    final s = _session;
+    if (s == null) {
+      return const ImEmotePanel(unavailableReason: '需要登录后才能使用表情。');
+    }
+    if (_emotePanel != null && _emotePanel!.loaded) return _emotePanel!;
+    if (_emoteLoading) return _emotePanel ?? const ImEmotePanel();
+
+    _emoteLoading = true;
+    notifyListeners();
+    try {
+      final panel = await _service.fetchImEmotePanel(platformId, session: s);
+      _emotePanel = panel;
+      return panel;
+    } finally {
+      _emoteLoading = false;
+      notifyListeners();
+    }
+  }
+
+  ImEmotePanel? _emotePanel;
+  ImEmotePanel? get emotePanel => _emotePanel;
+
+  bool _emoteLoading = false;
+  bool get emoteLoading => _emoteLoading;
+
+  /// 该平台是否支持发送图片（供聊天页决定是否渲染图片入口）。
+  bool get supportsImageSend => _service.supportsImImageSendFor(platformId);
+
+  /// 该平台是否支持表情面板。
+  bool get supportsEmote => _service.supportsImEmoteFor(platformId);
+
+  /// 一次性错误提示（供 UI 弹 SnackBar）。
+  String? _transientError;
+  String? get transientError => _transientError;
+
+  void clearTransientError() {
+    if (_transientError == null) return;
+    _transientError = null;
+    notifyListeners();
+  }
+
+  void _pushTransientError(String message) {
+    _transientError = message;
+    notifyListeners();
   }
 
   void _bumpSessionPreview(int talkerId, String text, int ts) {

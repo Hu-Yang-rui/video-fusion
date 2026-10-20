@@ -1,4 +1,4 @@
-/// B 站直播间：播放 + 实时弹幕。
+﻿/// B 站直播间：播放 + 实时弹幕。
 ///
 /// # 与普通视频播放的边界
 ///
@@ -19,6 +19,8 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../adapters/bilibili_live_interaction.dart';
+import '../../adapters/douyin/live_interaction.dart';
+import '../../adapters/douyin/web_signer.dart';
 import '../../adapters/platform_adapter.dart';
 import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
@@ -100,6 +102,23 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
   //  - 抖音只有 digg/chat 路径存在，且需设备侧签名 → 不渲染按钮
 
   late final BilibiliLiveInteraction _interaction;
+
+  /// 抖音直播互动（懒创建，复用同一个 WebView 签名桥）。
+  ///
+  /// # 本轮新增（2026-10-19）
+  ///
+  /// 旧实现里抖音直播互动被硬编码为"需设备签名，未实现"。
+  /// 实测推翻：`webcast/room/like` 与 `webcast/room/chat` 未登录返回
+  /// `20003 User doesn't login`（**不是** 403 签名拦截）。
+  ///
+  /// 因此接入 [DouyinLiveInteraction]。**登录后能否真正发出未验证**
+  /// （本项目没有抖音登录态），代码不谎报成功。
+  DouyinLiveInteraction? _douyinInteraction;
+
+  DouyinLiveInteraction get _ensureDouyinInteraction =>
+      _douyinInteraction ??= DouyinLiveInteraction(
+        signer: DouyinWebSigner(logger: appLogger),
+      );
 
   /// 当前平台的登录会话。null = 未登录。
   PlatformSession? _session;
@@ -294,6 +313,163 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
     try {
       await p.dispose();
     } catch (_) {}
+  }
+
+  // ── 清晰度切换（需求二）────────────────────────────────────
+  //
+  // # 核心约束：切换必须"换流不换页"
+  //
+  // 做法是复用**同一个 Player 实例**，只对它 `open()` 新地址：
+  //  - 不重建播放器 → 不闪黑、不重新初始化解码器
+  //  - 不 setState 整页 → 弹幕、聊天、房间信息都不受影响
+  //  - 不重新拉房间信息 → 少一次请求，也不打断弹幕连接
+  //
+  // # 失败必须回滚
+  //
+  // 如果新流打不开，立刻 `open()` 回原地址。**不能让播放器停在
+  // 永久加载状态**——那比"没切成功"更糟。
+
+  /// 可选清晰度列表（来自平台真实下发的 `availableQualities`）。
+  List<LiveStream> get _qualityOptions => _stream?.availableQualities ?? const [];
+
+  /// 是否有多个清晰度可切。
+  bool get _hasQualityChoice => _qualityOptions.length > 1;
+
+  /// 当前清晰度值。
+  int? get _currentQuality => _stream?.qualityValue;
+
+  /// 是否正在切换（防连点）。
+  bool _switchingQuality = false;
+  bool get switchingQuality => _switchingQuality;
+
+  /// 切换到指定清晰度的流。
+  ///
+  /// [target] 必须是 [LiveStream.availableQualities] 里的一个实例。
+  Future<void> _switchQuality(LiveStream target) async {
+    final player = _player;
+    final previous = _stream;
+    if (player == null || previous == null) return;
+    if (_switchingQuality) return;
+    if (target.qualityValue == previous.qualityValue) return;
+
+    setState(() => _switchingQuality = true);
+
+    try {
+      // 直接对同一实例 open 新地址。`play: true` 让它切完立刻续播。
+      await player.open(
+        Media(target.url, httpHeaders: _streamHeaders(target)),
+        play: true,
+      );
+      if (!mounted) return;
+      setState(() {
+        _stream = target;
+        _switchingQuality = false;
+        // 切换成功，清掉之前的流错误（如果有）
+        _qualityError = null;
+      });
+    } catch (e) {
+      // 回滚：把原流重新打开，保证用户还有画面
+      var recovered = false;
+      try {
+        await player.open(
+          Media(previous.url, httpHeaders: _streamHeaders(previous)),
+          play: true,
+        );
+        recovered = true;
+      } catch (_) {
+        recovered = false;
+      }
+      if (!mounted) return;
+      setState(() {
+        _switchingQuality = false;
+        _qualityError = recovered
+            ? '切换到「${target.qualityLabel}」失败，已恢复原画质。'
+            : '切换清晰度失败，且原画面恢复失败，请退出重进。';
+      });
+      if (_qualityError != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_qualityError!),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
+  }
+
+  /// 清晰度切换失败提示（供状态栏显示，避免只闪一次 SnackBar 就没了）。
+  String? _qualityError;
+
+  /// 弹出清晰度选择菜单。
+  ///
+  /// **只列出平台实际下发的档位**（[LiveStream.availableQualities]）。
+  /// 平台只给一档时整个入口不渲染，而不是显示一堆点了没反应的选项。
+  Future<void> _showQualitySheet() async {
+    if (!_hasQualityChoice) return;
+    final options = _qualityOptions;
+    final current = _currentQuality;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(AppleRadius.lg),
+        ),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: AppleSpace.sm),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: AppleSpace.lg),
+              child: Row(
+                children: [
+                  Text(
+                    '清晰度',
+                    style: AppleType.subheadlineEmphasized
+                        .copyWith(color: Colors.white),
+                  ),
+                  const Spacer(),
+                  Text(
+                    '共 ${options.length} 档',
+                    style: AppleType.caption2.copyWith(color: Colors.white38),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: AppleSpace.sm),
+            for (final o in options)
+              ListTile(
+                dense: true,
+                title: Text(
+                  o.qualityLabel,
+                  style: AppleType.body.copyWith(
+                    color: o.qualityValue == current
+                        ? const Color(0xFF0A84FF)
+                        : Colors.white,
+                  ),
+                ),
+                subtitle: Text(
+                  // 只显示用户能理解的信息，不暴露 qn 数字
+                  o.isHls ? 'HLS' : 'FLV',
+                  style: AppleType.caption2.copyWith(color: Colors.white30),
+                ),
+                trailing: o.qualityValue == current
+                    ? const Icon(Icons.check_rounded,
+                        size: 18, color: Color(0xFF0A84FF))
+                    : null,
+                onTap: () {
+                  Navigator.of(sheetCtx).pop();
+                  _switchQuality(o);
+                },
+              ),
+            const SizedBox(height: AppleSpace.sm),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _startDanmaku() async {
@@ -686,14 +862,53 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
               '人气 ${_fmt(info.online!)}',
               style: AppleType.caption2.copyWith(color: Colors.white54),
             ),
-          // 只显示清晰度，不显示协议名（HLS/FLV 是技术细节，
-          // 普通观众只关心"画质怎么样"）。
+          // 清晰度：有多档时变成可点入口（需求二·2「设置入口」）。
+          // 只有一档时保持纯文本——不做一个点了没反应的按钮。
           if (_stream != null) ...[
             const SizedBox(width: AppleSpace.sm),
-            Text(
-              _stream!.qualityLabel,
-              style: AppleType.caption2.copyWith(color: Colors.white38),
-            ),
+            if (_hasQualityChoice)
+              GestureDetector(
+                onTap: _switchingQuality ? null : _showQualitySheet,
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  // 44pt 最小触控目标：这里只有文字，用内边距补足高度
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 4,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_switchingQuality)
+                        const SizedBox(
+                          width: 9,
+                          height: 9,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.4,
+                            color: Colors.white54,
+                          ),
+                        )
+                      else
+                        Text(
+                          _stream!.qualityLabel,
+                          style: AppleType.caption2
+                              .copyWith(color: Colors.white54),
+                        ),
+                      const SizedBox(width: 2),
+                      const Icon(
+                        Icons.unfold_more_rounded,
+                        size: 11,
+                        color: Colors.white38,
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else
+              Text(
+                _stream!.qualityLabel,
+                style: AppleType.caption2.copyWith(color: Colors.white38),
+              ),
           ],
           // 播放推进状态：直播没有进度条，用户无法区分"卡住在缓冲"
           // 与"已经停播"。这里把他看得见的东西说出来。
@@ -899,8 +1114,29 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
     if (_likeBusy) return;
 
     if (isDouyin) {
-      // 抖音 digg 路径存在但需设备侧签名，未实现
-      _toast('抖音直播点赞需要设备签名，暂未实现');
+      // 抖音直播点赞：实测 Web 端 `webcast/room/like` 未登录返回
+      // `20003 User doesn't login`（不是 403 签名拦截），因此可实现。
+      if (!loggedIn) {
+        _toast('请先登录抖音账号');
+        return;
+      }
+      setState(() => _likeBusy = true);
+      try {
+        final r = await _ensureDouyinInteraction.like(
+          roomKey: widget.roomKey,
+          session: _session,
+        );
+        if (!mounted) return;
+        if (r.ok) {
+          setState(() => _likeCount += 1);
+        } else {
+          _toast(r.message);
+        }
+      } on FusionException catch (e) {
+        if (mounted) _toast(e.userMessage);
+      } finally {
+        if (mounted) setState(() => _likeBusy = false);
+      }
       return;
     }
 
@@ -967,12 +1203,31 @@ class _LiveRoomScreenState extends State<LiveRoomScreen> {
     if (text.isEmpty) return;
 
     if (_session == null) {
-      _toast('请先登录哔哩哔哩账号');
+      _toast(
+        widget.adapter.id == 'douyin' ? '请先登录抖音账号' : '请先登录哔哩哔哩账号',
+      );
       return;
     }
 
     setState(() => _danmakuBusy = true);
     try {
+      // 抖音：实测 `webcast/room/chat` 未登录返回 20003（不是 403），可实现
+      if (widget.adapter.id == 'douyin') {
+        final r = await _ensureDouyinInteraction.sendDanmaku(
+          roomKey: widget.roomKey,
+          content: text,
+          session: _session,
+        );
+        if (!mounted) return;
+        if (r.ok) {
+          _danmakuCtrl.clear();
+          _toast('已发送');
+        } else {
+          _toast(r.message);
+        }
+        return;
+      }
+
       final r = await _interaction.sendDanmaku(
         roomId: _numericRoomId,
         message: text,

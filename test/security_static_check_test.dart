@@ -64,6 +64,29 @@ final List<({String name, RegExp pattern, String reason})> _forbidden = [
     ),
     reason: '不得硬编码 API 密钥或访问令牌',
   ),
+  (
+    name: '签名头字面量',
+    pattern: RegExp(
+      r'''["']X-(Gorgon|Argus|Khronos|Ladon)["']\s*:\s*["'][^"']{16,}["']''',
+      caseSensitive: false,
+    ),
+    reason: '抖音签名头有时效且可重放，不得硬编码取值',
+  ),
+  (
+    name: '设备身份硬编码',
+    pattern: RegExp(
+      r'''(device_id|install_id|oaid|android_id|cdid)\s*[=:]\s*["'][0-9A-Fa-f\-]{8,}["']''',
+    ),
+    reason: '设备身份必须运行时生成并存加密存储，不得硬编码',
+  ),
+  (
+    name: '签名库 license 硬编码',
+    pattern: RegExp(
+      r'''license\s*[=:]\s*["'][^"']{16,}["']''',
+      caseSensitive: false,
+    ),
+    reason: '本地签名库的 license 与设备绑定，必须由用户导入并存加密存储',
+  ),
 ];
 
 /// 允许的例外：脱敏工具自身的模式定义与文档注释。
@@ -250,5 +273,79 @@ void main() {
       isTrue,
       reason: '不加密的实现必须如实声明 isEncrypted=false，不得误导用户',
     );
+  });
+
+  // ── 本地签名库（路线 D）的额外约束 ──────────────────────────
+
+  test('签名库 so 不得被 git 跟踪', () {
+    // 第三方 APK 里的 .so 属再分发受限二进制，绝不入库。
+    // 这条断言防止有人误用 `git add -f` 把 jniLibs 提交上去。
+    final result = Process.runSync(
+      'git',
+      ['ls-files', 'android/app/src/main/jniLibs'],
+      stdoutEncoding: const SystemEncoding(),
+    );
+    if (result.exitCode != 0) {
+      // 没有 git（比如打包环境）时跳过，不误报
+      return;
+    }
+    final tracked = '${result.stdout}'.trim();
+    expect(
+      tracked.isEmpty,
+      isTrue,
+      reason: 'jniLibs 下的 .so 不得入库，实际被跟踪的文件：\n$tracked',
+    );
+  });
+
+  test('设备身份必须经 SecureStore 持久化，不得写普通文件', () {
+    // 该文件已封存到 archive/（见其 README）。封存后仍要守住同样的约束——
+    // 万一将来重新启用，这条检查必须已经在位。
+    // v1 与 v2 两代封存都要检查。
+    final candidates = [
+      File('archive/douyin-native-signer/metasec_signer.dart'),
+      File('archive/douyin-native-signer-v2/metasec_signer.dart'),
+    ];
+    final existing = candidates.where((f) => f.existsSync()).toList();
+    if (existing.isEmpty) {
+      // 归档目录被清理时跳过（不是失败）
+      return;
+    }
+    final content = existing.first.readAsStringSync();
+
+    // 签名器本身不落盘任何东西：license 由调用方传入
+    expect(
+      RegExp(r'File\([^)]*\)\.writeAs').hasMatch(content),
+      isFalse,
+      reason: '签名器不得把 license 或设备信息写进普通文件',
+    );
+    expect(
+      content.contains('SharedPreferences'),
+      isFalse,
+      reason: '凭证类数据不得进未加密的 SharedPreferences',
+    );
+  });
+
+  test('签名器不得把签名值写进日志', () {
+    // v1 与 v2 两代封存都要检查。
+    final candidates = [
+      File('archive/douyin-native-signer/metasec_signer.dart'),
+      File('archive/douyin-native-signer-v2/metasec_signer.dart'),
+    ];
+    final existing = candidates.where((f) => f.existsSync()).toList();
+    if (existing.isEmpty) return;
+    final content = existing.first.readAsStringSync();
+
+    // 允许记录"头名 + 长度"，不允许记录取值。
+    // 检查方式：所有 logger 调用里不得出现 headers 整体。
+    for (final line in content.split('\n')) {
+      final trimmed = line.trimLeft();
+      if (trimmed.startsWith('//') || trimmed.startsWith('///')) continue;
+      if (!line.contains('_logger.')) continue;
+      expect(
+        line.contains('headers:') || line.contains("'headers':"),
+        isFalse,
+        reason: '日志里不得整体输出签名头（会泄漏取值）：$line',
+      );
+    }
   });
 }

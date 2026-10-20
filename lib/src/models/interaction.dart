@@ -236,6 +236,78 @@ class InteractionState {
       );
 }
 
+/// 平台风控拦截的细节。
+///
+/// # 为什么单独建模而不是塞进错误文案
+///
+/// 风控拦截和普通失败的区别在于**用户能做什么**：
+///  - 余额不足 → 攒够再来
+///  - 参数错误 → 修代码
+///  - 风控要求人机验证 → **去网页端做一次验证**，重试无用
+///
+/// 如果把三者揉成"操作失败"，用户只会反复点重试然后被拦得更狠。
+/// 因此把平台给的判据（要哪级验证码、哪个场景触发）如实带出来。
+///
+/// # 实测样本（B站 `coin/add`，2026-10-19）
+///
+/// ```json
+/// {"code":-401,"message":"非法访问",
+///  "data":{"ga_data":{
+///    "decisions":["verify_captcha_level3"],
+///    "risk_level":1,
+///    "decision_ctx":{"scene":"video_coin",
+///                    "verify_exempt_by_decision":"1",
+///                    "v_voucher":"voucher_...",
+///                    "grisk_id":"..."}}}}
+/// ```
+class PlatformRiskControl {
+  const PlatformRiskControl({
+    required this.decisions,
+    this.riskLevel,
+    this.scene,
+    this.exemptByDecision = false,
+  });
+
+  /// 平台要求做的事，例如 `verify_captcha_level3`（三级验证码）。
+  final List<String> decisions;
+
+  /// 风险等级（平台口径，数字越小越低）。
+  final int? riskLevel;
+
+  /// 触发场景，例如 `video_coin` / `video_like`。
+  final String? scene;
+
+  /// 该账号是否本身在白名单里（只是本次临时被拦）。
+  ///
+  /// 为 true 时"过一会儿再试"可能就过了；为 false 说明是硬拦截。
+  final bool exemptByDecision;
+
+  /// 是否需要人机验证。
+  bool get requiresCaptcha =>
+      decisions.any((d) => d.contains('captcha') || d.contains('verify'));
+
+  /// 面向用户的一句话说明。
+  String get userHint {
+    if (requiresCaptcha) {
+      return '平台要求完成人机验证后才能继续，请到网页端操作一次再回来。';
+    }
+    if (exemptByDecision) {
+      return '本次操作被平台临时拦截，请稍后重试。';
+    }
+    return '平台风控拦截了本次操作。';
+  }
+
+  /// 脱敏摘要（**不含** `v_voucher` / `grisk_id` 这类一次性凭据）。
+  Map<String, Object?> get safeSummary => {
+        'decisions': decisions,
+        if (riskLevel != null) 'riskLevel': riskLevel,
+        if (scene != null) 'scene': scene,
+        'exemptByDecision': exemptByDecision,
+      };
+
+  Map<String, Object?> toJson() => safeSummary;
+}
+
 /// 一次互动写操作的结果。
 ///
 /// 平台返回的是"操作是否被接受"，而不是新的计数。
@@ -245,9 +317,111 @@ class InteractionResult {
     required this.accepted,
     this.message,
     this.upstreamCode,
+    this.riskControl,
   });
 
   final bool accepted;
   final String? message;
   final Object? upstreamCode;
+
+  /// 被风控拦截时的细节（未拦截为 null）。
+  ///
+  /// UI 据此区分"去验证一下就能过"与"这个操作本身不行"。
+  final PlatformRiskControl? riskControl;
+}
+
+/// 一键三连里单项的结果。
+class TripleActionStep {
+  const TripleActionStep({
+    required this.name,
+    required this.ok,
+    this.message,
+    this.upstreamCode,
+  });
+
+  /// 步骤名（`like` / `coin` / `favorite`）。
+  final String name;
+
+  final bool ok;
+
+  /// 失败原因（成功时为 null）。
+  final String? message;
+
+  /// 平台原始业务码。
+  final Object? upstreamCode;
+
+  Map<String, Object?> toJson() => {
+        'name': name,
+        'ok': ok,
+        if (message != null) 'message': message,
+        if (upstreamCode != null) 'upstreamCode': upstreamCode,
+      };
+}
+
+/// 一键三连的结果。
+///
+/// # 为什么不是单个布尔
+///
+/// 三连是**三个独立请求**，任何一项都可能单独失败，而且失败原因不同：
+///
+///  - 点赞：一般不会被拦
+///  - 投币：可能被风控（实测 B站返回 `-401 非法访问` +
+///    `verify_captcha_level3`）或余额不足（`-104`）
+///  - 收藏：没带 `add_media_ids` 会返回 `2001000 参数错误`
+///
+/// 如果只回一个 `accepted`，用户看到"三连成功"但硬币没投上，
+/// 那就是谎报。因此这里逐项给出结果。
+class TripleActionResult {
+  const TripleActionResult({required this.steps});
+
+  final List<TripleActionStep> steps;
+
+  /// 三项是否**全部**成功。
+  bool get allOk => steps.isNotEmpty && steps.every((s) => s.ok);
+
+  /// 至少一项成功。
+  bool get anyOk => steps.any((s) => s.ok);
+
+  /// 失败的步骤。
+  List<TripleActionStep> get failed =>
+      steps.where((s) => !s.ok).toList(growable: false);
+
+  /// 按名字取一步的结果。
+  TripleActionStep? stepOf(String name) {
+    for (final s in steps) {
+      if (s.name == name) return s;
+    }
+    return null;
+  }
+
+  /// 面向用户的一句话总结。
+  ///
+  /// 全成功说"已三连"；部分成功要说清哪几项没成，**不能笼统说成功**。
+  String get summary {
+    if (steps.isEmpty) return '三连未执行。';
+    if (allOk) return '已三连（点赞 · 投币 · 收藏）。';
+
+    final okNames = steps.where((s) => s.ok).map(_label).toList();
+    final failNames = failed.map(_label).toList();
+    if (okNames.isEmpty) {
+      return '三连失败：${failed.map((s) => '${_label(s)}（${s.message ?? '未知原因'}）').join('；')}';
+    }
+    return '部分成功：已完成${okNames.join('、')}；'
+        '未完成${failNames.map((n) => n).join('、')}'
+        '（${failed.map((s) => s.message ?? '未知原因').join('；')}）';
+  }
+
+  static String _label(TripleActionStep s) => switch (s.name) {
+        'like' => '点赞',
+        'coin' => '投币',
+        'favorite' => '收藏',
+        _ => s.name,
+      };
+
+  Map<String, Object?> toJson() => {
+        'allOk': allOk,
+        'anyOk': anyOk,
+        'summary': summary,
+        'steps': steps.map((s) => s.toJson()).toList(),
+      };
 }

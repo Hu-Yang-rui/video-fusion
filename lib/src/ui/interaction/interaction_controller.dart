@@ -21,6 +21,7 @@ import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
 import '../../core/video_service.dart';
 import '../../models/interaction.dart';
+import '../../models/translation.dart';
 import '../../models/unified_video.dart';
 
 /// 评论 IP 属地的可得性。
@@ -200,6 +201,114 @@ class InteractionController extends ChangeNotifier {
 
   bool _commentsLoadedOnce = false;
   bool get commentsLoadedOnce => _commentsLoadedOnce;
+
+  // ── 评论翻译 ────────────────────────────────────────────────
+  //
+  // 状态按评论 ID 存放，**不写回 VideoComment**：
+  //  - 评论是不可变值对象，且来自平台；翻译是本地会话状态
+  //  - 同一评论可以切换语言、可以隐藏/显示译文
+  //  - 翻译失败不能污染评论模型
+  //
+  // 缓存与去重由 TranslationService 负责，这里只管 UI 状态。
+
+  final Map<String, CommentTranslation> _translations = {};
+
+  /// 取某条评论的翻译状态（没有则返回 idle 态）。
+  CommentTranslation translationOf(String commentId) =>
+      _translations[commentId] ?? CommentTranslation(commentId: commentId);
+
+  /// 该平台是否有可用的翻译能力。
+  ///
+  /// 抖音目前没有官方评论翻译接口，也没有已授权的通用翻译服务，
+  /// 因此返回 false —— UI 据此**不渲染翻译入口**，
+  /// 而不是给一个点了必然失败的按钮。
+  bool get supportsTranslation => video.platformId == 'bilibili';
+
+  /// 翻译能力的不可用原因（供 UI 在必要时说明）。
+  String? get translationUnavailableReason => supportsTranslation
+      ? null
+      : '该平台没有可用的官方评论翻译接口。';
+
+  /// 目标语言。
+  TranslationLanguage _translationLanguage = TranslationLanguage.zhHans;
+  TranslationLanguage get translationLanguage => _translationLanguage;
+
+  /// 切换目标语言。已翻译的条目会保留原结果（不自动重译），
+  /// 用户重新点翻译时按新语言取。
+  void setTranslationLanguage(TranslationLanguage language) {
+    if (_translationLanguage == language) return;
+    _translationLanguage = language;
+    notifyListeners();
+  }
+
+  /// 切换某条评论译文的显示 / 隐藏。
+  ///
+  /// 原文始终保留，这只是控制第二段文本是否可见。
+  void toggleTranslationVisibility(String commentId) {
+    final current = translationOf(commentId);
+    if (current.state != CommentTranslationState.done) return;
+    _translations[commentId] = current.copyWith(visible: !current.visible);
+    notifyListeners();
+  }
+
+  /// 请求翻译某条评论。
+  ///
+  /// 幂等：已成功的不重复请求（直接展开）；失败的可重试。
+  Future<void> translateComment(String commentId) async {
+    if (!supportsTranslation) return;
+
+    final existing = translationOf(commentId);
+    // 已有译文：只切换显示，不重复请求（需求四·1「优先复用有效缓存」）
+    if (existing.state == CommentTranslationState.done) {
+      _translations[commentId] = existing.copyWith(visible: !existing.visible);
+      notifyListeners();
+      return;
+    }
+    if (existing.state == CommentTranslationState.loading) return;
+
+    final comment = _comments.firstWhere(
+      (c) => c.id == commentId,
+      orElse: () => _missingComment,
+    );
+    if (identical(comment, _missingComment)) return;
+
+    _translations[commentId] =
+        existing.copyWith(state: CommentTranslationState.loading, visible: true);
+    notifyListeners();
+
+    final result = await _service.translateComment(
+      platformId: video.platformId,
+      commentId: commentId,
+      text: comment.message,
+      session: _session,
+      language: _translationLanguage,
+    );
+
+    // 期间评论列表被刷新 / 该条已消失：丢弃结果
+    if (!_comments.any((c) => c.id == commentId)) {
+      _translations.remove(commentId);
+      notifyListeners();
+      return;
+    }
+
+    _translations[commentId] = CommentTranslation(
+      commentId: commentId,
+      state: result.ok
+          ? CommentTranslationState.done
+          : CommentTranslationState.failed,
+      result: result,
+      visible: true,
+    );
+    notifyListeners();
+  }
+
+  /// 「找不到该评论」时的哨兵对象（避免用 null 到处判空）。
+  static const VideoComment _missingComment = VideoComment(
+    id: '__missing__',
+    authorName: '',
+    message: '',
+    createdAt: '',
+  );
 
   // ── IP 属地可得性 ───────────────────────────────────────────
 

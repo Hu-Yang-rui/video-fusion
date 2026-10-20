@@ -21,6 +21,7 @@ import '../../adapters/platform_adapter.dart';
 import '../../design/apple_tokens.dart';
 import '../../design/components/apple_layout.dart';
 import '../../models/interaction.dart';
+import '../../models/translation.dart';
 import 'interaction_controller.dart';
 
 /// 短视频右侧栏的互动按钮。
@@ -1076,6 +1077,11 @@ class _CommentSheetState extends State<CommentSheet> {
           return _CommentTile(
             key: ValueKey<String>(comment.id),
             comment: comment,
+            translation: ctrl.translationOf(comment.id),
+            supportsTranslation: ctrl.supportsTranslation,
+            onTranslate: ctrl.supportsTranslation
+                ? () => ctrl.translateComment(comment.id)
+                : null,
           );
         },
       ),
@@ -1098,10 +1104,24 @@ class _CommentSheetState extends State<CommentSheet> {
 ///  - 头像首字母在构造时算一次，避免每帧调用 `characters.first`
 ///    （字形簇分析，比取首个 code unit 贵得多）。
 class _CommentTile extends StatelessWidget {
-  _CommentTile({super.key, required this.comment})
-      : _avatarInitial = _initialOf(comment.authorName);
+  _CommentTile({
+    super.key,
+    required this.comment,
+    this.translation,
+    this.supportsTranslation = false,
+    this.onTranslate,
+  }) : _avatarInitial = _initialOf(comment.authorName);
 
   final VideoComment comment;
+
+  /// 该评论的翻译状态（没有则为 null）。
+  final CommentTranslation? translation;
+
+  /// 该平台是否支持翻译（不支持时整段翻译 UI 不渲染）。
+  final bool supportsTranslation;
+
+  /// 点击翻译 / 展开收起。
+  final VoidCallback? onTranslate;
 
   /// 昵称首字（构造时计算一次）。
   final String _avatarInitial;
@@ -1204,6 +1224,20 @@ class _CommentTile extends StatelessWidget {
                     height: 1.45,
                   ),
                 ),
+                // 译文：与原文并列显示，原文永不替换。
+                if (translation != null &&
+                    translation!.state == CommentTranslationState.done &&
+                    translation!.visible &&
+                    translation!.text != null)
+                  _TranslatedText(text: translation!.text!),
+                if (translation != null &&
+                    translation!.state == CommentTranslationState.failed &&
+                    translation!.visible &&
+                    translation!.errorMessage != null)
+                  _TranslationError(
+                    message: translation!.errorMessage!,
+                    onRetry: onTranslate,
+                  ),
                 const SizedBox(height: 6),
                 Row(
                   children: [
@@ -1213,6 +1247,17 @@ class _CommentTile extends StatelessWidget {
                         color: c.tertiaryLabel,
                       ),
                     ),
+                    // 翻译入口：与时间同层级，不做成显眼按钮。
+                    // 平台不支持翻译时整段不渲染（不给点了必然失败的按钮）。
+                    if (supportsTranslation && onTranslate != null) ...[
+                      const SizedBox(width: AppleSpace.md),
+                      _TranslateAction(
+                        state: translation?.state ??
+                            CommentTranslationState.idle,
+                        visible: translation?.visible ?? false,
+                        onTap: onTranslate!,
+                      ),
+                    ],
                     // IP 属地：与时间同权重，不额外加底色或徽标。
                     // 仅在平台确实返回时显示，缺失时整段不渲染。
                     if (comment.ipLocation != null) ...[
@@ -1269,6 +1314,146 @@ class _CommentTile extends StatelessWidget {
     if (diff.inHours > 0) return '${diff.inHours} 小时前';
     if (diff.inMinutes > 0) return '${diff.inMinutes} 分钟前';
     return '刚刚';
+  }
+}
+
+/// 译文块。
+///
+/// 视觉上必须与原文**清晰区分**但不喧宾夺主：
+///  - 左侧一条细竖线（引用感，非卡片）
+///  - 文字用 secondaryLabel，比原文弱一级
+///  - 不加重底色、不加圆角卡片（与项目"无卡片式"约束一致）
+class _TranslatedText extends StatelessWidget {
+  const _TranslatedText({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 5),
+      child: Container(
+        padding: const EdgeInsets.only(left: AppleSpace.sm),
+        decoration: BoxDecoration(
+          border: Border(
+            left: BorderSide(color: c.separator, width: 2),
+          ),
+        ),
+        child: Text(
+          text,
+          style: AppleType.footnote.copyWith(
+            color: c.secondaryLabel,
+            height: 1.45,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 翻译失败提示（可重试）。
+class _TranslationError extends StatelessWidget {
+  const _TranslationError({required this.message, this.onRetry});
+
+  final String message;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Text(
+              message,
+              style: AppleType.caption1.copyWith(color: c.orange, height: 1.4),
+            ),
+          ),
+          if (onRetry != null)
+            GestureDetector(
+              onTap: onRetry,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.only(left: AppleSpace.sm),
+                child: Text(
+                  '重试',
+                  style: AppleType.caption1.copyWith(
+                    color: c.blue,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 翻译入口（文字链，随状态变化）。
+class _TranslateAction extends StatelessWidget {
+  const _TranslateAction({
+    required this.state,
+    required this.visible,
+    required this.onTap,
+  });
+
+  final CommentTranslationState state;
+
+  /// 译文当前是否展开。
+  final bool visible;
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+
+    if (state == CommentTranslationState.loading) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 10,
+            height: 10,
+            child: CircularProgressIndicator(strokeWidth: 1.5, color: c.blue),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            '翻译中',
+            style: AppleType.caption2.copyWith(color: c.tertiaryLabel),
+          ),
+        ],
+      );
+    }
+
+    final label = switch (state) {
+      CommentTranslationState.done => visible ? '收起翻译' : '显示翻译',
+      CommentTranslationState.failed => '翻译失败',
+      _ => '翻译',
+    };
+
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        // 扩大点击热区到接近 44pt 的最小触控目标高度
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 2),
+        child: Text(
+          label,
+          style: AppleType.caption2.copyWith(
+            color: state == CommentTranslationState.failed
+                ? c.orange
+                : c.blue,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
   }
 }
 

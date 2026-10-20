@@ -1,4 +1,4 @@
-﻿/// B站私信（IM）HTTP 客户端。
+/// B站私信（IM）HTTP 客户端。
 ///
 /// # 为什么单独一个客户端
 ///
@@ -265,6 +265,7 @@ class BilibiliImClient {
     if (msgKey == null) return null;
     final msgType = _toInt(m['msg_type']) ?? 0;
     final content = _str(m['content']) ?? '';
+    final text = extractText(msgType, content);
 
     return ImMessage(
       msgKey: msgKey,
@@ -280,8 +281,66 @@ class BilibiliImClient {
       notifyCode: _toInt(m['notify_code']),
       msgSource: _toInt(m['msg_source']),
       rawType: msgType,
-      text: extractText(msgType, content),
+      text: text,
+      media: extractMedia(msgType, content),
+      emojiShortcodes: extractEmojiShortcodes(text),
     );
+  }
+
+  /// 从 content JSON 里解析图片 / 表情 / 视频封面资产。
+  ///
+  /// 实测结构（见 [ImMedia] 文档）。解析失败返回 null（不抛）。
+  ///
+  /// # 为什么不用 `media ?? 占位`
+  ///
+  /// 返回 null 的语义是"这条消息确实没有媒体"或"平台没给可用的 URL"，
+  /// 两种情况 UI 都显示"图片无法显示"，而不是渲染一个空框。
+  /// **不会**用本地缓存图或随机图冒充。
+  static ImMedia? extractMedia(int msgType, String content) {
+    if (content.isEmpty) return null;
+    final type = ImMessageType.fromRaw(msgType);
+    if (!type.isImageBearing) return null;
+
+    Object? decoded;
+    try {
+      decoded = _jsonDecode(content);
+    } catch (_) {
+      return null;
+    }
+    if (decoded is! Map) return null;
+    final map = Map<String, Object?>.from(decoded);
+
+    // 图片/表情用 `url`；视频消息的封面用 `img`。
+    final url = _firstNonEmpty([
+      map['url'],
+      map['img'],
+      map['cover'],
+      map['cover_url'],
+    ]);
+    if (url == null) return null;
+
+    // 动图变体：只有平台确实下发才用。
+    final animated = _firstNonEmpty([
+      map['gif_url'],
+      map['webp_url'],
+      map['animation_url'],
+    ]);
+
+    return ImMedia(
+      url: url,
+      width: _toInt(map['width']) ?? _toInt(map['img_width']),
+      height: _toInt(map['height']) ?? _toInt(map['img_height']),
+      sizeBytes: _toInt(map['size']) ?? _toInt(map['img_size']),
+      animatedUrl: animated,
+      mimeType: _str(map['mime_type']),
+    );
+  }
+
+  static String? _firstNonEmpty(List<Object?> candidates) {
+    for (final c in candidates) {
+      if (c is String && c.trim().isNotEmpty) return c;
+    }
+    return null;
   }
 
   /// 从 content JSON 里取可读文本。
@@ -289,10 +348,17 @@ class BilibiliImClient {
   /// 实测结构：
   ///  - `1`/`18` → `{"content":"..."}`
   ///  - `10` → `{"title":..,"text":..,"jump_text":..,...}`
-  ///  - `2` → 图片，没有文本
+  ///  - `5`（撤回）→ 可能是 `{"content":"..."}` 或空；统一给撤回提示
+  ///  - `2`（图片）/ `6`（自定义表情）/ `17`（视频）→ 没有文本
   ///
   /// 解析失败返回 null（不抛）。这是 static 且纯函数，便于单测。
   static String? extractText(int msgType, String content) {
+    final type = ImMessageType.fromRaw(msgType);
+    if (type == ImMessageType.withdraw) {
+      // 撤回消息的正文是平台文案，但常为空；给一句稳定的本地文案
+      // 比显示空白好，且**不伪造具体是谁撤回的**。
+      return '这条消息已被撤回';
+    }
     if (content.isEmpty) return null;
     Object? decoded;
     try {
@@ -302,7 +368,7 @@ class BilibiliImClient {
     }
     if (decoded is! Map) return null;
     final map = Map<String, Object?>.from(decoded);
-    switch (ImMessageType.fromRaw(msgType)) {
+    switch (type) {
       case ImMessageType.text:
         final c = map['content'];
         return c is String && c.trim().isNotEmpty ? c : null;
@@ -313,7 +379,13 @@ class BilibiliImClient {
         final title = map['title'];
         if (title is String && title.trim().isNotEmpty) return title;
         return null;
+      case ImMessageType.shareCard:
+        final t = map['title'] ?? map['text'];
+        return t is String && t.trim().isNotEmpty ? t : null;
       case ImMessageType.image:
+      case ImMessageType.customEmoji:
+      case ImMessageType.video:
+      case ImMessageType.withdraw:
       case ImMessageType.unknown:
         return null;
     }
@@ -338,15 +410,88 @@ class BilibiliImClient {
     required String content,
     int msgType = 1,
   }) async {
-    const endpoint = '/web_im/v1/web_im/send_msg';
-    final trimmed = content.trim();
-    if (trimmed.isEmpty) {
-      // 本地就拦住：平台的 -400 文案是"请求错误"，对用户毫无信息量
-      return const ImSendResult(
-        accepted: false,
-        message: '消息内容不能为空。',
+    // 文本消息的 content 是 {"content": "..."}。
+    // 图片/表情消息的 content 结构完全不同（见 sendMediaMessage），
+    // 所以这条路径只处理文本，避免"改个 msg_type 就当图片发"的错误做法。
+    if (msgType != 1) {
+      throw FusionException(
+        code: FusionErrorCode.internalError,
+        userMessage: '发送失败：消息类型与内容不匹配。',
+        technicalMessage: 'sendMessage() only supports msg_type=1, '
+            'got $msgType; use sendMediaMessage() for media',
+        platformId: platformId,
       );
     }
+    return _send(
+      session: session,
+      talkerId: talkerId,
+      msgType: msgType,
+      contentJson: _jsonEncode({'content': content.trim()}),
+    );
+  }
+
+  /// 发送图片消息（`msg_type=2`）。
+  ///
+  /// [media] 必须来自 [BilibiliImUploadClient.uploadImage] 的真实返回。
+  /// **不接受本地路径**：本地路径不是远端地址，直接塞进消息体是错的。
+  Future<ImSendResult> sendImageMessage({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      _send(
+        session: session,
+        talkerId: talkerId,
+        msgType: 2,
+        contentJson: _jsonEncode({
+          'url': media.url,
+          if (media.width != null) 'width': media.width,
+          if (media.height != null) 'height': media.height,
+          if (media.sizeBytes != null) 'size': media.sizeBytes,
+          'imageType': 1,
+          'original': 1,
+        }),
+      );
+
+  /// 发送自定义表情（`msg_type=6`，`FAV_EMOJI`）。
+  ///
+  /// # 与图片的差别
+  ///
+  /// 表情也是图片形态，但 `msg_type` 不同（6 vs 2），
+  /// 接收端据此决定渲染尺寸与语义。
+  ///
+  /// # 实测边界
+  ///
+  /// 平台对"自定义表情"的发送**可能要求该表情已在你的收藏里**
+  /// （`FAV_EMOJI` 的语义是"收藏的表情"）。本项目没有验证这一点，
+  /// 因此这里只提供协议能力，UI 侧目前**不暴露"发送自定义表情"按钮**，
+  /// 只做接收侧渲染。这一点在报告里如实标注。
+  Future<ImSendResult> sendCustomEmojiMessage({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      _send(
+        session: session,
+        talkerId: talkerId,
+        msgType: 6,
+        contentJson: _jsonEncode({
+          'url': media.url,
+          if (media.width != null) 'width': media.width,
+          if (media.height != null) 'height': media.height,
+          if (media.sizeBytes != null) 'size': media.sizeBytes,
+          'imageType': 1,
+        }),
+      );
+
+  /// 发送的公共实现：拼表单、判成功、映射错误。
+  Future<ImSendResult> _send({
+    required PlatformSession session,
+    required int talkerId,
+    required int msgType,
+    required String contentJson,
+  }) async {
+    const endpoint = '/web_im/v1/web_im/send_msg';
 
     final body = <String, String>{
       'msg[sender_uid]': session.userId,
@@ -354,7 +499,7 @@ class BilibiliImClient {
       'msg[receiver_type]': '1',
       'msg[msg_type]': '$msgType',
       'msg[msg_status]': '0',
-      'msg[content]': _jsonEncode({'content': trimmed}),
+      'msg[content]': contentJson,
       'msg[timestamp]': '${DateTime.now().millisecondsSinceEpoch ~/ 1000}',
       'msg[dev_id]': '0',
       'csrf': _csrf(session),
@@ -381,6 +526,7 @@ class BilibiliImClient {
       if (key == null) {
         _logger.warn('im send: code=0 but no msg_key', {
           'endpoint': endpoint,
+          'msg_type': msgType,
         });
         return ImSendResult(
           accepted: false,

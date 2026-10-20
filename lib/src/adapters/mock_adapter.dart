@@ -21,6 +21,7 @@ import '../models/interaction.dart';
 import '../models/live.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
+import '../models/video_danmaku.dart';
 import 'platform_adapter.dart';
 
 class MockAdapter implements PlatformAdapter {
@@ -287,6 +288,65 @@ class MockAdapter implements PlatformAdapter {
   }) async =>
       false;
 
+  // ── 私信媒体能力（mock 全部不支持）──────────────────────────
+  //
+  // mock 适配器用于测试与离线演示，不提供真实上传通道。
+  // 这里保持"明确不可用"，避免测试里出现假的成功路径。
+
+  @override
+  bool get supportsImImageSend => false;
+
+  @override
+  bool get supportsImEmote => false;
+
+  @override
+  bool get supportsImCustomEmojiSend => false;
+
+  @override
+  Future<ImMedia> uploadImImage({
+    required PlatformSession session,
+    required List<int> bytes,
+    required String filename,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '演示适配器不支持发送图片。',
+        technicalMessage: 'MockAdapter does not implement uploadImImage',
+        platformId: id,
+      );
+
+  @override
+  Future<ImSendResult> sendImImage({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '演示适配器不支持发送图片。',
+        technicalMessage: 'MockAdapter does not implement sendImImage',
+        platformId: id,
+      );
+
+  @override
+  Future<ImSendResult> sendImCustomEmoji({
+    required PlatformSession session,
+    required int talkerId,
+    required ImMedia media,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '演示适配器不支持发送自定义表情。',
+        technicalMessage: 'MockAdapter does not implement sendImCustomEmoji',
+        platformId: id,
+      );
+
+  @override
+  Future<ImEmotePanel> fetchImEmotePanel({
+    required PlatformSession session,
+  }) async =>
+      const ImEmotePanel(unavailableReason: '演示适配器不支持表情面板。');
+
   @override
   Future<FolderOwnershipScan> scanFoldersContainingVideo({
     required String platformVideoId,
@@ -306,6 +366,82 @@ class MockAdapter implements PlatformAdapter {
         code: FusionErrorCode.unsupportedPlatform,
         userMessage: '该平台暂不支持硬币余额。',
         technicalMessage: 'MockAdapter does not implement fetchCoinBalance',
+        platformId: id,
+      );
+
+  // ── 视频弹幕 / 评论互动 / 三连：Mock 也不提供 ───────────────
+  //
+  // 刻意不返回假数据。MockAdapter 的定位是"验证平台扩展性的本地样本"，
+  // 它应该演示**真实平台的数据形状**，而不是给 UI 一个"这些能力都存在"
+  // 的错觉——那会让页面架构测试误以为这些入口都该渲染。
+  //
+  // 需要测这些能力时用真实的 B站适配器（配 cookie），
+  // 或用专门的 fake（见 test/ 下的 FakeImAdapter 一类）。
+
+  @override
+  bool get supportsVideoDanmaku => false;
+
+  @override
+  Future<List<VideoDanmaku>> fetchVideoDanmaku(
+    String platformVideoId, {
+    double? durationSeconds,
+    double? fromSeconds,
+    double? toSeconds,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持视频弹幕。',
+        technicalMessage: 'MockAdapter does not implement fetchVideoDanmaku',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsCommentLike => false;
+
+  @override
+  Future<InteractionResult> setCommentLike(
+    String platformVideoId, {
+    required String commentId,
+    required bool like,
+    required PlatformSession session,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持评论点赞。',
+        technicalMessage: 'MockAdapter does not implement setCommentLike',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsCommentReply => false;
+
+  @override
+  Future<String?> replyComment(
+    String platformVideoId, {
+    required String message,
+    required PlatformSession session,
+    String? replyToCommentId,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持回复评论。',
+        technicalMessage: 'MockAdapter does not implement replyComment',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsTripleAction => false;
+
+  @override
+  Future<TripleActionResult> tripleAction(
+    String platformVideoId, {
+    required PlatformSession session,
+    int coinCount = 1,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持一键三连。',
+        technicalMessage: 'MockAdapter does not implement tripleAction',
         platformId: id,
       );
 
