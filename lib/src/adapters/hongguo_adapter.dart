@@ -1,31 +1,7 @@
 /// 红果短剧平台适配器。
 ///
-/// # 数据来源（已实测）
-///
-/// 全部走**官网 Web 端** `hongguoduanju.com`，服务端渲染，
-/// 零签名、零登录、零 Cookie。
-///
-/// | 能力 | 接口 | 状态 |
-/// |---|---|---|
-/// | 剧集列表 | `GET /` → `homeSections[].video_list[]` | ✅ 实测 36 部 |
-/// | 剧集详情 + 分集 | `GET /player/{series_id}` → `vid_list` | ✅ 实测 76 集 |
-/// | 播放直链 | `GET /video/public/{vid}/360p.mp4` | ✅ 实测 206 + ftyp |
-/// | 搜索 | — | ❌ 未找到真实搜索接口 |
-/// | 收藏 / 稍后看 / 互动 | — | ❌ 官网无公开接口 |
-///
-/// # 产品定位
-///
-/// **红果是短剧，不是社交平台。** 没有点赞、投币、三连、私信这些概念，
-/// 硬塞进来只会让 UI 出现一堆点了没反应的按钮。
-///
-/// 因此本适配器只实现「浏览 → 选集 → 播放」这条主线，
-/// 其余能力由 `PlatformAdapter` 的默认实现统一抛 `unsupportedPlatform`，
-/// UI 依据 `supports*` 声明自动隐藏入口。
-///
-/// # 为什么不用 APP 端接口
-///
-/// APP 端有 `libmetasec_ml.so`（Argus 签名）+ 登录 + CDN 时效签名三层锁，
-/// 且短剧播放路径在 dex 里**没有明文**。官网已经把 MP4 直链摊在 HTML 里。
+/// 支持剧集列表、详情、分集、播放（360p~1080p）。
+/// 搜索、评论、点赞、投币、收藏、私信、直播均不支持。
 library;
 
 import '../core/errors.dart';
@@ -34,6 +10,7 @@ import '../core/logger.dart';
 import '../models/feed.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
+import 'hongguo/media_client.dart';
 import 'hongguo/parser.dart';
 import 'hongguo/playback_id.dart';
 import 'platform_adapter.dart';
@@ -53,6 +30,24 @@ class HongguoAdapter extends PlatformAdapter {
   final String _origin;
 
   final HongguoParser _parser = const HongguoParser();
+
+  /// 播放信息客户端（延迟创建，复用同一个 HTTP 客户端）。
+  HongguoMediaClient? _media;
+  HongguoMediaClient get _mediaClient =>
+      _media ??= HongguoMediaClient(http: _http, logger: _logger);
+
+  /// 尝试取完整清晰度；失败返回 null。
+  Future<HongguoEpisodeMedia?> _tryFetchMainSource(String vid) async {
+    try {
+      return await _mediaClient.fetchEpisodeMedia(vid);
+    } catch (e) {
+      _logger.warn('hongguo: main source failed, falling back to 360p', {
+        'vid': vid,
+        'error': '$e'.split('\n').first,
+      });
+      return null;
+    }
+  }
 
   /// 官网需要普通浏览器 UA。
   static const _webUa =
@@ -312,10 +307,48 @@ class HongguoAdapter extends PlatformAdapter {
       );
     }
 
+    // 优先取完整清晰度；失败则降级到官网 360p。
+    final media = await _tryFetchMainSource(ep.vid);
+    if (media != null && !media.isEmpty) {
+      final wanted = request.preferQuality;
+      final picked = wanted != null
+          ? media.pickByHeight(wanted)
+          : media.highest;
+
+      if (picked != null) {
+        return NativePlaybackSource(
+          videoId: videoId,
+          videoStreamUrl: picked.url,
+          requiredHeaders: const {},
+          quality: PlaybackQuality(
+            platformQualityId: picked.qualityType,
+            label: picked.label,
+            width: picked.width,
+            height: picked.height,
+            bandwidth: picked.bitrate,
+          ),
+          availableQualities: media.qualities
+              .map((q) => PlaybackQuality(
+                    platformQualityId: q.qualityType,
+                    label: q.label,
+                    width: q.width,
+                    height: q.height,
+                    bandwidth: q.bitrate,
+                  ))
+              .toList(),
+          videoFallbackUrls: [
+            if (picked.backupUrl != null) picked.backupUrl!,
+          ],
+          isDash: false,
+          expiresAt: media.expireAt.toUtc().toIso8601String(),
+        );
+      }
+    }
+
+    // 兜底：官网 360p
     return NativePlaybackSource(
       videoId: videoId,
       videoStreamUrl: ep.playUrl,
-      // 官网 MP4 直链需要 Referer，否则可能 403
       requiredHeaders: {
         'Referer': '$_origin/',
         'User-Agent': _webUa,
@@ -325,7 +358,6 @@ class HongguoAdapter extends PlatformAdapter {
         label: '360p',
         height: 360,
       ),
-      // 只列实测存在的档位
       availableQualities: const [
         PlaybackQuality(platformQualityId: null, label: '360p', height: 360),
       ],

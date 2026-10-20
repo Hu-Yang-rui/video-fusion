@@ -7,16 +7,6 @@ plugins {
 android {
     namespace = "com.example.video_fusion"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
-
-    // 本地签名库垫片（metasec_shim）已封存到
-    // archive/douyin-native-signer-v2/。原因见该目录 README：
-    // 那条路需要 arm64 真机 + app-bound license + 设备身份自洽，
-    // 且功能提升接近零（Web 端已覆盖详情/评论/推荐/热榜/直播/弹幕，
-    // 私信与通知也已确认走 Web 端可达，只缺登录态）。
-    //
-    // 重新启用时把 externalNativeBuild { cmake { ... } } 加回来，
-    // 并把 archive/douyin-native-signer-v2/cpp/ 拷回 src/main/cpp/。
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

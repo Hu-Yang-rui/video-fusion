@@ -97,10 +97,9 @@ void main() {
       expect(a.supportsSearch, isFalse);
     });
 
-    test('播放能力声明为原生播放，最高 360p', () {
+    test('播放能力声明为原生播放', () {
       final a = buildAdapter();
       expect(a.capabilities.supportsNativePlayback, isTrue);
-      expect(a.capabilities.maxQualityWithoutAuth, '360p');
     });
   });
 
@@ -208,7 +207,7 @@ void main() {
   });
 
   group('红果适配器：播放', () {
-    test('解析出 360p 直链，带 Referer', () async {
+    test('解析出可播放直链', () async {
       if (readFixture('hongguo_player.html') == null) return;
       final a = buildAdapter();
       final source = await a.resolvePlayback(
@@ -223,13 +222,11 @@ void main() {
       expect(source, isNotNull);
       expect(source, isA<NativePlaybackSource>());
       final native = source as NativePlaybackSource;
-      expect(native.videoStreamUrl, contains('/video/public/'));
-      expect(native.videoStreamUrl, endsWith('/360p.mp4'));
-      expect(native.requiredHeaders['Referer'], isNotNull);
-      expect(native.quality?.label, '360p');
-      // 不硬编码不存在的清晰度
-      expect(native.availableQualities.length, 1);
-      expect(native.availableQualities.first.label, '360p');
+      // 直链来自 CDN 或官网兜底源，必须是 http(s)
+      expect(native.videoStreamUrl, startsWith('http'));
+      // CDN 直链不带 .mp4 后缀，靠 mime_type=video_mp4 参数区分
+      expect(native.videoStreamUrl, contains('qznovelvod.com'));
+      expect(native.quality, isNotNull);
     });
 
     test('指定集数（{seriesId}#{index}）', () async {
@@ -244,8 +241,7 @@ void main() {
       );
       expect(source, isNotNull);
       final native = source as NativePlaybackSource;
-      // 第 3 集
-      expect(native.videoStreamUrl, contains('/video/public/'));
+      expect(native.videoStreamUrl, startsWith('http'));
     });
   });
 

@@ -48,6 +48,7 @@ dependencies:
   flutter_inappwebview: 6.2.0-beta.3
   image_picker: ^1.2.4
 
+
   # 已移除的直接依赖：jni / jni_flutter / ffi / jni_util
   #
   # 它们原本只服务于「本地签名库（libmetasec_ml.so）」那条路，
