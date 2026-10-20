@@ -227,7 +227,7 @@ class InteractionController extends ChangeNotifier {
   /// 翻译能力的不可用原因（供 UI 在必要时说明）。
   String? get translationUnavailableReason => supportsTranslation
       ? null
-      : '该平台没有可用的官方评论翻译接口。';
+      : '该平台的翻译接口需要登录态，当前不可用。';
 
   /// 目标语言。
   TranslationLanguage _translationLanguage = TranslationLanguage.zhHans;
