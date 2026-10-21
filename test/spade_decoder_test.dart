@@ -1,7 +1,6 @@
 /// spade / kid 解码器测试。
 ///
-/// AES 部分用 NIST 标准测试向量验证（FIPS-197 附录 C.1），
-/// 其余用结构与性质测试。
+/// 对照向量由 Python 参考实现生成（与平台客户端行为一致）。
 library;
 
 import 'dart:convert';
@@ -15,8 +14,6 @@ void main() {
 
   group('自定义 base64 解码', () {
     test('urlsafe 的 - 和 _ 能正确还原', () {
-      // 标准 base64 的 "+/" 在 urlsafe 里是 "-_"
-      // "Pz8/" (标准) ↔ "Pz8_" (urlsafe) → 都是 [0x3f,0x3f,0x3f]
       final std = dec.decodeSpadeBase64('Pz8/');
       final url = dec.decodeSpadeBase64('Pz8_');
       expect(url, std);
@@ -24,7 +21,6 @@ void main() {
     });
 
     test('缺少填充会自动补 =', () {
-      // "QQ" 需要补成 "QQ=="，解出 'A'
       final out = dec.decodeSpadeBase64('QQ');
       expect(utf8.decode(out), 'A');
     });
@@ -35,146 +31,119 @@ void main() {
     });
 
     test('前后空白被忽略', () {
-      final a = dec.decodeSpadeBase64('QQ==');
-      final b = dec.decodeSpadeBase64('  QQ==  ');
-      expect(a, b);
+      expect(dec.decodeSpadeBase64('QQ=='), dec.decodeSpadeBase64('  QQ==  '));
     });
   });
 
-  group('AES-128-CBC 解密（NIST FIPS-197 向量）', () {
-    test('单块解密正确', () {
-      // FIPS-197 附录 B/C.1:
-      // key = 000102030405060708090a0b0c0d0e0f
-      // plaintext = 00112233445566778899aabbccddeeff
-      // ciphertext = 69c4e0d86a7b0430d8cdb78070b4c55a
-      final key = Uint8List.fromList(
-        List.generate(16, (i) => i),
-      );
-      final cipher = _hex('69c4e0d86a7b0430d8cdb78070b4c55a');
-      final iv = Uint8List(16); // 全零 IV
+  group('unwrapV1 对照向量（Python 参考实现生成）', () {
+    // 真实抓到的 spade_a
+    const realSpade =
+        'orwswGK5L8VlihjNULYsy1CDK8RWiyrDV7gs8meLKsd7jTOPjw';
+    // Python: _hg_unwrap_v1(base64decode(realSpade), 0)
+    //   → 'cf7c6e29f00ddec2d0e8d0ddc22a4374'
+    const expectedKey = 'cf7c6e29f00ddec2d0e8d0ddc22a4374';
 
-      final out = dec.decryptSpadeUrl(
-        // 构造一个合法的 spade 载荷：A8 01 00 + 1 字节 + 密文
-        // 这里直接测 AES 层：用 decryptSpadeUrl 无法绕过头部校验，
-        // 因此改为验证「头部校验能正确拒绝」
-        spade: _b64([0x00, 0x01, 0x00, 0x00, ...cipher]),
-        seed: key,
-        salt: const [],
-      );
-      // 头部不是 A8 01 00，应返回 null
-      expect(out, isNull);
-    });
-
-    test('头部 A8 01 00 通过校验后进入解密', () {
-      final cipher = _hex('69c4e0d86a7b0430d8cdb78070b4c55a');
-      final payload = [0xA8, 0x01, 0x00, 0x00, ...cipher];
-      // 不崩即可（解密结果不保证是合法 UTF-8）
-      final out = dec.decryptSpadeUrl(
-        spade: _b64(payload),
-        seed: List.generate(16, (i) => i),
-        salt: const [],
-      );
-      // 要么解出字符串，要么因填充无效返回 null，都不能抛异常
-      expect(() => out, returnsNormally);
-    });
-
-    test('头部不符返回 null', () {
-      final payload = [0xFF, 0xFF, 0xFF, 0x00, ...List.filled(16, 0)];
+    test('真实 spade 解出 32 字符 hex', () {
+      final raw = dec.decodeSpadeBase64(realSpade);
+      // 长度与 Python 一致
+      expect(raw.length, 37);
       expect(
-        dec.decryptSpadeUrl(spade: _b64(payload), seed: const [], salt: const []),
-        isNull,
+        raw.sublist(0, 4),
+        [0xa2, 0xbc, 0x2c, 0xc0],
+        reason: '解码后的头部字节必须与 Python 一致',
       );
+
+      final key = dec.unwrapV1(raw);
+      expect(key, expectedKey);
     });
 
-    test('密文长度不是 16 倍数返回 null', () {
-      final payload = [0xA8, 0x01, 0x00, 0x00, 1, 2, 3];
-      expect(
-        dec.decryptSpadeUrl(
-          spade: _b64(payload),
-          seed: List.filled(16, 0),
-          salt: const [],
-        ),
-        isNull,
-      );
-    });
-  });
-
-  group('端到端解密（Node AES 对照向量）', () {
-    // seed = 000102...0f，salt 为空
-    // 派生 key = SHA512(seed||salt)[0:16]
-    // 派生 iv  = SHA512(seed||salt)[16:32]
-    test('能从 spade_a 解出明文 URL', () {
-      const seed = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-      ];
-      const spade =
-          'qAEAACHEjGZalnXVZx45pMz-TIUR9vfT-21yP0iYH1P0-8M5Wl3vtmT3nfMTKPPk'
-          'bcESbdwuXllfHO2Iy8YM_pN8qSA';
-
-      final url = dec.decryptSpadeUrl(
-        spade: spade,
-        seed: seed,
-        salt: const [],
-      );
-
-      expect(
-        url,
-        'https://v9-zt.douyinvod.com/abc/def/1080p.mp4?sign=xyz',
-        reason: 'AES-CBC 解密结果必须与 Node 标准实现一致',
-      );
+    test('spadeToKey 端到端', () {
+      expect(dec.spadeToKey(realSpade), expectedKey);
     });
 
-    test('seed 变化导致解不出原 URL', () {
-      final seed = List<int>.filled(16, 0xAA);
-      final url = dec.decryptSpadeUrl(
-        spade: 'qAEAACHEjGZalnXVZx45pMz-TIUR9vfT-21yP0iYH1P0-8M5Wl3vtmT3nfMTKPPk'
-            'bcESbdwuXllfHO2Iy8YM_pN8qSA',
-        seed: seed,
-        salt: const [],
-      );
-      expect(
-        url,
-        isNot('https://v9-zt.douyinvod.com/abc/def/1080p.mp4?sign=xyz'),
-      );
+    test('短片段解出非 32 字符 → spadeToKey 返回 null', () {
+      // 这个是不完整片段，unwrap 能出 10 字符但不是合法 hex 密钥
+      const short = 'obwv9FaNGMZliCvPVoQb';
+      final raw = dec.decodeSpadeBase64(short);
+      expect(raw.length, 15);
+      // Python: _hg_unwrap_v1 → 'd2bc74e870'
+      expect(dec.unwrapV1(raw), 'd2bc74e870');
+      // 长度不是 32 → 拒绝
+      expect(dec.spadeToKey(short), isNull);
+    });
+
+    test('长度不足 3 返回 null', () {
+      expect(dec.unwrapV1(Uint8List.fromList([1, 2])), isNull);
+    });
+
+    test('空输入返回 null', () {
+      expect(dec.unwrapV1(Uint8List(0)), isNull);
+      expect(dec.spadeToKey(''), isNull);
+    });
+
+    test('随机数据不崩（返回 null 或字符串）', () {
+      for (var len = 3; len < 60; len += 7) {
+        final data = Uint8List.fromList(
+          List.generate(len, (i) => (i * 37 + 11) & 0xFF),
+        );
+        expect(() => dec.unwrapV1(data), returnsNormally);
+      }
     });
   });
 
   group('kid 派生密钥', () {
-    test('长度不足返回 null', () {
+    test('合法 32 字符 hex 能解出 16 字节', () {
+      const kid = '6a7d65cff8818b6cb21ccf310002ebeb';
+      final key = dec.deriveContentKey(kid);
+      expect(key, isNotNull);
+      expect(key!.length, 16);
+      // 前 4 字节应等于 hex 前 8 字符
+      expect(key.sublist(0, 4), [0x6a, 0x7d, 0x65, 0xcf]);
+    });
+
+    test('非 hex 返回 null', () {
+      expect(dec.deriveContentKey('zzzz'), isNull);
       expect(dec.deriveContentKey(''), isNull);
-      expect(dec.deriveContentKey(_b64([1, 2])), isNull);
+      expect(dec.deriveContentKey('6a7d65cff8818b6cb21ccf310002ebez'), isNull);
     });
 
-    test('有效长度不足 0x21 返回 null', () {
-      // 构造一个长度刚好让 len < 0x21 的载荷
-      final payload = List.filled(20, 0x10);
-      expect(dec.deriveContentKey(_b64(payload)), isNull);
+    test('长度不对返回 null', () {
+      expect(dec.deriveContentKey('6a7d65cf'), isNull);
+      expect(
+        dec.deriveContentKey('6a7d65cff8818b6cb21ccf310002ebebaa'),
+        isNull,
+      );
+    });
+  });
+
+  group('AES-128-CBC 解密（NIST FIPS-197 向量）', () {
+    test('单块解密与标准一致', () {
+      final key = List.generate(16, (i) => i);
+      final iv = List.filled(16, 0);
+      final cipher = _hex('69c4e0d86a7b0430d8cdb78070b4c55a');
+
+      final out = SpadeDecoder.aesCbcDecrypt(key, iv, cipher);
+      expect(out, isNotNull);
+      expect(
+        out!.sublist(0, 16),
+        _hex('00112233445566778899aabbccddeeff'),
+        reason: 'FIPS-197 附录 C.1 标准向量',
+      );
     });
 
-    test('派生出的是 16 字节', () {
-      // 构造一个能让算法走完的载荷：
-      // len = raw.len - (raw[2]^raw[1]^raw[0]) + 0x2F
-      // 取 raw.len = 80，前 3 字节异或 = 0x0F → len = 80 - 15 + 47 = 112
-      // 但 len 上限是 raw.len-1 = 79，仍 >= 0x21(33)，可通过
-      final payload = List<int>.filled(80, 0x41);
-      payload[0] = 0x05;
-      payload[1] = 0x05;
-      payload[2] = 0x05; // 0x05^0x05^0x05 = 0x05
-      final key = dec.deriveContentKey(_b64(payload));
-      // 解出的 hex 段可能含非 hex 字符，此时返回 null 也算合理
-      if (key != null) {
-        expect(key.length, 16);
-      }
+    test('密钥长度非法返回 null', () {
+      expect(SpadeDecoder.aesCbcDecrypt([1, 2, 3], List.filled(16, 0), List.filled(16, 0)), isNull);
+    });
+
+    test('IV 长度非法返回 null', () {
+      expect(SpadeDecoder.aesCbcDecrypt(List.filled(16, 0), [1, 2], List.filled(16, 0)), isNull);
+    });
+
+    test('密文长度非 16 倍数返回 null', () {
+      expect(SpadeDecoder.aesCbcDecrypt(List.filled(16, 0), List.filled(16, 0), List.filled(15, 0)), isNull);
     });
   });
 }
-
-String _b64(List<int> bytes) => base64
-    .encode(bytes)
-    .replaceAll('+', '-')
-    .replaceAll('/', '_')
-    .replaceAll('=', '');
 
 Uint8List _hex(String s) {
   final out = Uint8List(s.length ~/ 2);

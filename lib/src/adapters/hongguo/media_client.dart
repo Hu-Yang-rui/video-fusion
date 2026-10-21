@@ -1,18 +1,26 @@
 /// 红果短剧播放信息客户端。
 ///
 /// 按 video_id 拉取单集的全部清晰度直链（360p / 480p / 540p / 720p / 1080p）。
+///
+/// # 链路
+///
+/// 分两步：
+///
+///  1. `POST /novel/player/video_model/v1/` → 拿 `data.video_model`
+///     （一个 JSON 字符串，内含 `fallback_api` 与 `video_list`）
+///  2. `GET {fallback_api}` → 拿 `video_info.data.video_list`
+///     （真正的多档位直链）
+///
+/// 第 1 步需要六个签名头；第 2 步的 URL 自带鉴权，直接请求即可。
 library;
 
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:crypto/crypto.dart';
-
-import 'byte_signer.dart';
-
 import '../../core/errors.dart';
 import '../../core/http_client.dart';
 import '../../core/logger.dart';
+import 'hongguo_signer.dart';
 
 /// 一个清晰度档位。
 class HongguoQuality {
@@ -49,7 +57,7 @@ class HongguoQuality {
   /// 文件大小（字节）。
   final int fileSize;
 
-  /// 平台档位码（1=1080p, 10=720p, 20=540p, 30=480p, 40=360p）。
+  /// 平台档位码。
   final int qualityType;
 
   /// UI 短标签。
@@ -128,24 +136,20 @@ class HongguoMediaClient {
   final FusionLogger _logger;
 
   static const String _host = 'https://api5-normal-sinfonlineb.fqnovel.com';
-
-  // 播放模型端点。
-  //
-  // 注意是 multi_video_model，不是 video_model —— 后者不存在，
-  // 网关会对它直接返回 200 + 空 body（看起来像"被风控"，实际是打错路径）。
-  // 正确端点对未签名请求会返回明确的业务错误码（110001），
-  // 这个差异是判断端点是否存在的可靠依据。
-  static const String _videoModelPath = '/novel/player/multi_video_model/v1/';
+  static const String _videoModelPath = '/novel/player/video_model/v1/';
 
   /// 请求所需的客户端参数。
+  ///
+  /// 版本号与 UA 必须与签名器内部使用的保持一致：
+  /// 签名会把 `version_name` 写进 `x-medusa` 的 proto，
+  /// 而 query 里也会带一份，两者不一致会被服务端丢弃。
   static const Map<String, String> _guestParams = {
+    'ac': 'wifi',
+    'channel': 'update_64',
     'aid': '8662',
     'app_name': 'novelread',
-    'version_code': '73532',
-    'version_name': '7.3.5.32',
-    'manifest_version_code': '73532',
-    'update_version_code': '73532',
-    'channel': 'update_64',
+    'version_code': '71332',
+    'version_name': '7.1.3.32',
     'device_platform': 'android',
     'os': 'android',
     'ssmix': 'a',
@@ -154,103 +158,81 @@ class HongguoMediaClient {
     'language': 'zh',
     'os_api': '36',
     'os_version': '16',
+    'manifest_version_code': '71332',
     'resolution': '1280*2772',
     'dpi': '520',
-    'ac': 'wifi',
+    'update_version_code': '71332',
+    'host_abi': 'arm64-v8a',
+    'dragon_device_type': 'phone',
+    'pv_player': '71332',
+    'compliance_status': '0',
+    'need_personal_recommend': '1',
+    'player_so_load': '1',
+    'is_android_pad_screen': '0',
   };
 
-  static const String _userAgent =
-      'com.phoenix.read/73532 (Linux; U; Android 16; zh_CN; 25053RT47C; '
+  static const String _videoUserAgent =
+      'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; '
       'Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 '
       'QuicVersion:c67e9834 2025-09-08)';
 
-  /// 客户端标识。首次使用时生成，之后固定。
-  String? _deviceId;
-  String? _installId;
   final _random = Random.secure();
 
-  /// 生成 19 位数字 ID。
-  String _newId() {
-    final base = BigInt.from(10).pow(18);
-    final span = BigInt.from(8) * BigInt.from(10).pow(18);
-    final r =
-        BigInt.from(_random.nextInt(1 << 32)) *
-        BigInt.from(_random.nextInt(1 << 32)) %
-        span;
-    return (base + r).toString();
-  }
-
-  void _ensureIdentity() {
-    _deviceId ??= _newId();
-    _installId ??= _newId();
+  /// 生成 16 位数字身份。
+  ///
+  /// 必须每次请求重新生成：同一对 `iid`/`device_id` 复用会被服务端
+  /// 静默封锁（返回 HTTP 200 + 空 body），表现为「请求成功但没数据」。
+  String _newIdentity() {
+    final sb = StringBuffer();
+    for (var i = 0; i < 16; i++) {
+      sb.write(i == 0 ? 1 + _random.nextInt(9) : _random.nextInt(10));
+    }
+    return sb.toString();
   }
 
   /// 拉取一集的播放信息（含全部清晰度）。
   Future<HongguoEpisodeMedia> fetchEpisodeMedia(String videoId) async {
-    _ensureIdentity();
+    final model = await _fetchVideoModel(videoId);
+    return _fetchFromFallback(model, videoId);
+  }
 
-    final query = <String, String>{
-      ..._guestParams,
-      'device_id': _deviceId!,
-      'iid': _installId!,
-    };
-    final qs = query.entries
-        .map(
-          (e) =>
-              '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}',
-        )
-        .join('&');
-    final url = '$_host$_videoModelPath?$qs';
-
+  /// 第一步：取 `video_model`。
+  Future<Map<String, Object?>> _fetchVideoModel(String videoId) async {
     final body = jsonEncode({
+      'biz_param': {
+        'detail_page_version': 0,
+        'device_level': 3,
+        'disable_digg_stat': false,
+        'need_all_video_definition': true,
+        'need_mp4_align': false,
+        'use_os_player': false,
+        'use_server_dns': false,
+        'video_platform': 1024,
+      },
       'video_id': videoId,
-      'content_type': 1,
-      'biz_param': {'need_all_video_definition': true, 'video_platform': 3},
     });
+    final bodyBytes = utf8.encode(body);
 
-    // 签名头。
-    //
-    // X-Gorgon 算法已完整还原（见 byte_signer.dart，12 项对照测试通过），
-    // 但服务端仍判定为无效请求：实测带 Gorgon 反而从「明确错误码」
-    // 退化为「空 body」（被整体丢弃），比不带更差。
-    //
-    // 说明完整校验还依赖别的东西（可能是 X-Argus 的真值，
-    // 或 body 结构与服务端期望不一致）。在搞清之前不带签名，
-    // 保持「拿到明确错误码」这个可诊断的状态。
-    //
-    // 开关：确认签名可用后置 true。
-    const useSignature = false;
-    final signHeaders = useSignature
-        ? ByteDanceSigner(random: _random)
-              .sign(url: url, body: utf8.encode(body))
-        : <String, String>{
-            'x-ss-stub': md5
-                .convert(utf8.encode(body))
-                .toString()
-                .toUpperCase(),
-          };
-
-    // 服务端会随机返回空 body（实测约 25% 概率，与设备、vid 都无关），
-    // 重试即可。实测平均 2.7 次成功，留 8 次余量。
-    const maxAttempts = 8;
-    String? lastRaw;
+    const maxAttempts = 4;
+    Object? lastError;
     for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      // 每次全新设备身份
+      final device = <String, String>{
+        ..._guestParams,
+        'iid': _newIdentity(),
+        'device_id': _newIdentity(),
+      };
+
+      final signed = HongguoSigner(random: _random)
+          .sign('$_host$_videoModelPath', device, body: bodyBytes);
+
       final res = await _http.post(
-        url,
+        signed.url,
         body: body,
-        headers: {
-          'user-agent': _userAgent,
-          'accept': 'application/json',
-          'x-xs-from-web': '0',
-          'sdk-version': '2',
-          'content-type': 'application/json; charset=utf-8',
-          ...signHeaders,
-        },
+        headers: signed.headers,
         platformId: 'hongguo',
         timeout: const Duration(seconds: 25),
       );
-
-      lastRaw = res.body;
 
       if (res.statusCode == 404) {
         throw FusionException(
@@ -271,70 +253,250 @@ class HongguoMediaClient {
         );
       }
 
-      // 空 body 视为暂时失败，重试。
       if (res.body.trim().isEmpty) {
+        // 空 body 有两种成因：身份被限流，或服务端偶发。
+        // 换身份重试；仍为空再报错。
         _logger.debug('hongguo media: empty body, retry', {
           'attempt': attempt,
           'videoId': videoId,
         });
+        lastError = 'empty body';
         if (attempt < maxAttempts) {
-          await Future<void>.delayed(Duration(milliseconds: 250 * attempt));
+          await Future<void>.delayed(Duration(milliseconds: 300 * attempt));
           continue;
         }
-        throw FusionException(
-          code: FusionErrorCode.upstreamError,
-          userMessage: '红果播放信息暂时取不到，请稍后重试。',
-          technicalMessage:
-              'empty body after $maxAttempts attempts (videoId=$videoId)',
-          platformId: 'hongguo',
-          retryable: true,
-        );
+        break;
       }
 
-      // 业务错误码优先识别。
-      //
-      // 真接口对未签名请求返回 {"Code":110001,"Message":"未知异常"}，
-      // 这是「端点存在、但请求没通过校验」的明确信号——
-      // 与空 body（端点不存在）是两种完全不同的情况，不能混为一谈。
-      final bizCode = _bizErrorCode(res.body);
-      if (bizCode != null) {
+      final code = _bizErrorCode(res.body);
+      if (code != null) {
         throw FusionException(
           code: FusionErrorCode.upstreamError,
-          userMessage: '红果播放接口拒绝了本次请求，暂时只能使用公开源。',
+          userMessage: '红果播放接口拒绝了本次请求。',
           technicalMessage:
-              'business error $bizCode '
-              '(${_bizErrorMessage(res.body)}) for $_videoModelPath; '
-              'endpoint exists but request rejected '
-              '(videoId=$videoId)',
+              'business error $code (${_bizErrorMessage(res.body)}) '
+              'for $_videoModelPath (videoId=$videoId)',
           platformId: 'hongguo',
           retryable: false,
         );
       }
 
-      final parsed = _parse(res.body, videoId);
+      final parsed = _parseModel(res.body);
       if (parsed != null) return parsed;
 
+      lastError = 'unparseable body (len=${res.body.length})';
       if (attempt < maxAttempts) {
-        await Future<void>.delayed(Duration(milliseconds: 250 * attempt));
+        await Future<void>.delayed(Duration(milliseconds: 300 * attempt));
       }
     }
 
     throw FusionException(
-      code: FusionErrorCode.parseError,
-      userMessage: '红果播放信息解析失败。',
+      code: FusionErrorCode.upstreamError,
+      userMessage: '红果播放信息暂时取不到，请稍后重试。',
       technicalMessage:
-          'could not parse after $maxAttempts attempts '
-          '(videoId=$videoId, lastLen=${lastRaw?.length ?? 0})',
+          'video_model failed after $maxAttempts attempts '
+          '(videoId=$videoId, last=$lastError)',
       platformId: 'hongguo',
       retryable: true,
     );
   }
 
-  /// 取业务错误码；无错误或解析失败返回 null。
+  /// 第二步：请求 `fallback_api` 取真实多档位直链。
+  Future<HongguoEpisodeMedia> _fetchFromFallback(
+    Map<String, Object?> model,
+    String videoId,
+  ) async {
+    final fallback = _extractFallback(model);
+    if (fallback == null || !fallback.startsWith('http')) {
+      throw FusionException(
+        code: FusionErrorCode.parseError,
+        userMessage: '红果播放地址格式异常。',
+        technicalMessage:
+            'fallback_api missing or malformed (videoId=$videoId)',
+        platformId: 'hongguo',
+        retryable: false,
+      );
+    }
+
+    final res = await _http.get(
+      fallback,
+      headers: {'user-agent': _videoUserAgent, 'accept': 'application/json'},
+      platformId: 'hongguo',
+      timeout: const Duration(seconds: 25),
+    );
+
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw FusionException(
+        code: FusionErrorCode.networkError,
+        userMessage: '红果播放资源加载失败（HTTP ${res.statusCode}）。',
+        technicalMessage: 'HTTP ${res.statusCode} for fallback_api',
+        platformId: 'hongguo',
+        retryable: res.statusCode >= 500,
+      );
+    }
+
+    final media = _parseFallback(res.body, model, videoId);
+    if (media == null) {
+      throw FusionException(
+        code: FusionErrorCode.parseError,
+        userMessage: '红果播放信息解析失败。',
+        technicalMessage:
+            'fallback_api unparseable (len=${res.body.length}, '
+            'videoId=$videoId)',
+        platformId: 'hongguo',
+        retryable: true,
+      );
+    }
+    return media;
+  }
+
+  /// 从 `video_model` 里取 `fallback_api`。
   ///
-  /// 兼容两种响应形态：
-  ///   {"Code":110001,"Message":"...","BaseResp":{...}}
-  ///   {"code":100001,"message":"参数错误"}
+  /// 该字段可能是字符串、对象（含同名键）或数组，三种形态都见过。
+  String? _extractFallback(Map<String, Object?> model) {
+    final raw = model['fallback_api'];
+    if (raw is String) return raw;
+    if (raw is Map) {
+      final inner =
+          raw['fallback_api'] ?? (raw.isEmpty ? null : raw.values.first);
+      return inner is String ? inner : null;
+    }
+    if (raw is List && raw.isNotEmpty) {
+      final first = raw.first;
+      return first is String ? first : null;
+    }
+    return null;
+  }
+
+  /// 解析第一步响应，返回 `video_model` 对象。
+  Map<String, Object?>? _parseModel(String raw) {
+    Map<String, Object?>? root;
+    try {
+      root = jsonDecode(raw) as Map<String, Object?>;
+    } catch (_) {
+      return null;
+    }
+
+    final code = root['code'] ?? root['Code'];
+    if (code is! int || code != 0) {
+      _logger.debug('hongguo media: non-zero code', {
+        'code': code,
+        'message': root['message'] ?? root['Message'],
+      });
+      return null;
+    }
+
+    final data = root['data'];
+    if (data is! Map) return null;
+
+    Object? model = data['video_model'];
+    if (model is String) {
+      if (model.isEmpty) return null;
+      try {
+        model = jsonDecode(model);
+      } catch (_) {
+        return null;
+      }
+    }
+    if (model is! Map) return null;
+
+    return <String, Object?>{
+      ...model.cast<String, Object?>(),
+      // 把外层的高度/过期时间带进来，供解析兜底
+      '_video_height': data['video_height'],
+      '_expire_time': data['expire_time'],
+    };
+  }
+
+  /// 解析第二步响应。
+  HongguoEpisodeMedia? _parseFallback(
+    String raw,
+    Map<String, Object?> model,
+    String videoId,
+  ) {
+    Map<String, Object?>? root;
+    try {
+      root = jsonDecode(raw) as Map<String, Object?>;
+    } catch (_) {
+      return null;
+    }
+
+    final info = (root['video_info'] as Map?)?['data'] as Map?;
+    if (info == null) return null;
+
+    final list = info['video_list'];
+    final items = list is Map
+        ? list.values.toList()
+        : (list is List ? list : null);
+    if (items == null || items.isEmpty) return null;
+
+    final qualities = <HongguoQuality>[];
+    for (final item in items) {
+      if (item is! Map) continue;
+
+      final url = (item['main_url'] as String?) ?? '';
+      if (url.isEmpty) continue;
+
+      // ByteVC2 声明自己为 bvc2 且不带 avcC/hvcC，播放器只识别到音轨；
+      // 只有 ByteVC1（HEVC）能播。
+      final codec = (item['codec_type'] as String?) ?? '';
+      if (codec == 'bytevc2' || codec == 'bvc2') continue;
+
+      // 档位标签可能落在 definition / quality_desc / height / vheight / quality
+      final labelRaw =
+          (item['definition'] as String?) ??
+          (item['quality_desc'] as String?) ??
+          (item['height']?.toString()) ??
+          (item['vheight']?.toString()) ??
+          (item['quality']?.toString()) ??
+          '';
+      final match = RegExp(r'\d{3,4}').firstMatch(labelRaw);
+      final labelHeight = match == null ? 0 : int.parse(match.group(0)!);
+      final definition = labelHeight > 0 ? '${labelHeight}p' : labelRaw;
+
+      qualities.add(
+        HongguoQuality(
+          definition: definition,
+          width:
+              (item['vwidth'] as num?)?.toInt() ??
+              (item['width'] as num?)?.toInt() ??
+              0,
+          height:
+              (item['vheight'] as num?)?.toInt() ??
+              (item['height'] as num?)?.toInt() ??
+              labelHeight,
+          bitrate: (item['bitrate'] as num?)?.toInt() ?? 0,
+          url: url,
+          backupUrl: item['backup_url'] as String?,
+          codec: codec,
+          fileSize: (item['size'] as num?)?.toInt() ?? 0,
+          qualityType: (item['quality_type'] as num?)?.toInt() ?? 0,
+        ),
+      );
+    }
+
+    if (qualities.isEmpty) return null;
+
+    qualities.sort((a, b) => a.height.compareTo(b.height));
+
+    final expireEpoch =
+        (info['expire_time'] as num?)?.toInt() ??
+        (model['_expire_time'] as num?)?.toInt() ??
+        (model['url_expire'] as num?)?.toInt();
+    final expireAt = expireEpoch != null
+        ? DateTime.fromMillisecondsSinceEpoch(expireEpoch * 1000)
+        : DateTime.now().add(const Duration(hours: 1));
+
+    return HongguoEpisodeMedia(
+      videoId: videoId,
+      durationSeconds: ((model['video_duration'] as num?)?.toDouble()) ?? 0,
+      qualities: qualities,
+      expireAt: expireAt,
+      videoHeight: (model['_video_height'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  /// 取业务错误码；无错误或解析失败返回 null。
   int? _bizErrorCode(String raw) {
     Map<String, Object?>? root;
     try {
@@ -355,98 +517,4 @@ class HongguoMediaClient {
       return '';
     }
   }
-
-  HongguoEpisodeMedia? _parse(String raw, String videoId) {
-    Map<String, Object?>? root;
-    try {
-      root = jsonDecode(raw) as Map<String, Object?>;
-    } catch (_) {
-      return null;
-    }
-
-    // 字段名大小写两种都要认：旧接口给 code，新接口（multi_video_model）
-    // 给 Code + BaseResp。只认一种会把正常响应判成失败。
-    final code = root['code'] ?? root['Code'];
-    if (code is! int || code != 0) {
-      _logger.debug('hongguo media: non-zero code', {
-        'code': code,
-        'message': root['message'],
-      });
-      return null;
-    }
-
-    final data = root['data'];
-    if (data is! Map) return null;
-
-    // video_model 可能是 JSON 字符串，也可能是对象。
-    Object? model = data['video_model'];
-    if (model is String) {
-      if (model.isEmpty) return null;
-      try {
-        model = jsonDecode(model);
-      } catch (_) {
-        return null;
-      }
-    }
-    if (model is! Map) return null;
-
-    final list = model['video_list'];
-    final items = list is List
-        ? list
-        : (list is Map ? list.values.toList() : null);
-    if (items == null || items.isEmpty) return null;
-
-    final qualities = <HongguoQuality>[];
-    for (final item in items) {
-      if (item is! Map) continue;
-      final meta = item['video_meta'];
-      if (meta is! Map) continue;
-
-      final url = (item['main_url'] as String?) ?? '';
-      if (url.isEmpty) continue;
-
-      qualities.add(
-        HongguoQuality(
-          definition: (meta['definition'] as String?) ?? '?',
-          width: (meta['vwidth'] as num?)?.toInt() ?? 0,
-          height: (meta['vheight'] as num?)?.toInt() ?? 0,
-          bitrate: (meta['bitrate'] as num?)?.toInt() ?? 0,
-          url: url,
-          backupUrl: item['backup_url'] as String?,
-          codec: (meta['codec_type'] as String?) ?? '',
-          fileSize: (meta['size'] as num?)?.toInt() ?? 0,
-          qualityType: (item['quality_type'] as num?)?.toInt() ?? 0,
-        ),
-      );
-    }
-
-    if (qualities.isEmpty) return null;
-
-    qualities.sort((a, b) => a.height.compareTo(b.height));
-
-    final expireEpoch =
-        (data['expire_time'] as num?)?.toInt() ??
-        (model['url_expire'] as num?)?.toInt();
-    final expireAt = expireEpoch != null
-        ? DateTime.fromMillisecondsSinceEpoch(expireEpoch * 1000)
-        : DateTime.now().add(const Duration(hours: 1));
-
-    return HongguoEpisodeMedia(
-      videoId: videoId,
-      durationSeconds: ((model['video_duration'] as num?)?.toDouble()) ?? 0,
-      qualities: qualities,
-      expireAt: expireAt,
-      videoHeight: (data['video_height'] as num?)?.toInt() ?? 0,
-    );
-  }
-
-  /// 当前客户端标识（脱敏，供诊断）。
-  Map<String, String> get identityForDiagnostics => {
-    'deviceId': _deviceId == null
-        ? '(未生成)'
-        : '${_deviceId!.substring(0, 4)}…${_deviceId!.substring(15)}',
-    'installId': _installId == null
-        ? '(未生成)'
-        : '${_installId!.substring(0, 4)}…${_installId!.substring(15)}',
-  };
 }

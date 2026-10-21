@@ -4,21 +4,22 @@
 ///
 /// 接口返回的播放条目里可能带两组加密字段：
 ///
-///  - `spade_a`：加密后的播放地址
+///  - `spade_a`：加密的播放地址（或内容密钥）
 ///  - `kid`：派生 AES 内容密钥的种子
 ///
-/// 两者都是自定义 base64 编码的二进制块，解码后按固定算法还原。
+/// 两者都是自定义编码的二进制块，解码后按固定算法还原。
 ///
 /// # 算法性质
 ///
-/// 纯数学运算：字符替换、XOR、popcount、十六进制解析。
+/// 纯数学运算：异或、popcount、十六进制解析、AES-CBC。
 /// 不依赖设备指纹、不依赖服务端下发的密钥、不需要原生库。
 ///
 /// # 覆盖范围
 ///
 ///  - [decodeSpadeBase64]：urlsafe → 标准 base64 + 补填充
-///  - [deriveContentKey]：从 `kid` 派生 16 字节 AES 密钥
-///  - [decryptSpadeUrl]：从 `spade_a` 解出明文地址
+///  - [unwrapV1]：spade 载荷解包（核心算法）
+///  - [spadeToKey]：从 `spade_a` 解出 32 字符 hex 密钥
+///  - [decryptSpadeUrl]：AES-CBC 解密出明文地址
 library;
 
 import 'dart:convert';
@@ -48,87 +49,123 @@ class SpadeDecoder {
     return Uint8List.fromList(base64.decode(s));
   }
 
-  /// 从 `kid` 派生 16 字节内容密钥。
+  /// spade 载荷解包（V1）。
+  ///
+  /// [spade] 是原始字节（已从 base64 解出）。
+  /// [flag] 决定符号位方向；平台用的是 `false`（默认）。
+  ///
+  /// 返回解包后的明文串（通常是 32 字符十六进制）。
   ///
   /// 步骤：
-  ///  1. base64 解码得到 raw
-  ///  2. 用前 3 字节异或算出有效区长度
-  ///  3. 逐字节解混淆：`(base ^ cur) - popcount(i) - 0x15`
-  ///     （base 在相邻两字节之间交替取前值）
-  ///  4. 取解出结果的 `[1..33)` 作为 32 字符十六进制串
-  ///  5. 两两解析成 16 字节密钥
-  Uint8List? deriveContentKey(String kid) {
-    final raw = decodeSpadeBase64(kid);
-    if (raw.length < 3) return null;
+  ///  1. 前 3 字节异或得到 `bVar5`，`bVar5 - 0x30` 是尾部标记长度
+  ///  2. 有效区长度 = `len - bVar5 + 0x2F`
+  ///  3. 校验尾部标记不是 `app_v2` / `web_v2`
+  ///  4. 逐字节解混淆：双变量轮换 + popcount 偏移
+  ///  5. 首字节是长度指示，去掉首尾得到明文
+  String? unwrapV1(Uint8List spade, {bool flag = false}) {
+    final L = spade.length;
+    if (L < 3) return null;
 
-    var len = raw.length - (raw[2] ^ raw[1] ^ raw[0]) + 0x2F;
-    if (len > raw.length - 1) len = raw.length - 1;
-    if (len < 0x21) return null;
+    final bVar5 = spade[0] ^ spade[1] ^ spade[2];
+    final iVar9 = bVar5 - 0x30;
+    if (iVar9 < 1) return null;
 
-    final buf = Uint8List.fromList(raw.sublist(1, 1 + len));
+    final uVar1 = (L - bVar5) + 0x2F;
+    if (uVar1 < 1 || 1 + uVar1 > L) return null;
 
-    var prev = 0xFFFFFFF6;
-    var prevPrev = 0x55;
-    for (var i = 0; i < buf.length; i++) {
-      final cur = buf[i];
-      int base;
-      if (i & 1 != 0) {
-        base = prevPrev;
-        prevPrev = cur;
-      } else {
-        base = prev;
-        prev = cur;
-      }
-      final pc = _popcount(i);
-      buf[i] = ((base ^ cur) - pc - 0x15) & 0xFF;
+    final dest = Uint8List.fromList(spade.sublist(1, 1 + uVar1));
+
+    // 尾部标记校验
+    final s1 = Uint8List(iVar9);
+    final b16Tail = spade[L - iVar9 - 2];
+    final b14Tail = spade[L - iVar9 - 1];
+    for (var i = 0; i < iVar9; i++) {
+      s1[i] = (b14Tail ^ b16Tail ^ spade[i + (L - iVar9)]) & 0xFF;
+    }
+    if (_strncmp0(s1, utf8.encode('app_v2'), iVar9) ||
+        _strncmp0(s1, utf8.encode('web_v2'), iVar9)) {
+      return null;
     }
 
-    // 需要至少 1 + 32 字节
-    if (buf.length < 0x21) return null;
-    final hexStr = String.fromCharCodes(buf.sublist(1, 1 + 0x20));
+    // 逐字节解混淆
+    var b14 = 0x55;
+    var b16 = 0xFA;
+    for (var i = 0; i < uVar1; i++) {
+      final b6 = dest[i];
+      final u18 = _popcount(i);
+      var b3 = b6;
+      var b7 = b14;
+      if (i & 1 != 0) {
+        b3 = b16;
+        b7 = b6;
+        b16 = b14;
+      }
+      final cVar4 = flag ? (u18 + 0x15) : _s8(-0x15 - u18);
+      dest[i] = (cVar4 + (b16 ^ b6)) & 0xFF;
+      b14 = b7;
+      b16 = b3;
+    }
+
+    // 首字节是长度指示
+    final b0 = dest[0];
+    int u11;
+    if (b0 >= 0x30 && b0 <= 0x39) {
+      u11 = b0 - 0x30;
+    } else if (b0 >= 0x61 && b0 <= 0x7A) {
+      u11 = b0 - 0x57;
+    } else {
+      return null;
+    }
+
+    final iv9 = uVar1 - (u11 & 0xFF);
+    if (iv9 < 2) return null;
+
+    return latin1.decode(dest.sublist(1, iv9));
+  }
+
+  /// 从 `spade_a` 解出 32 字符 hex 密钥。
+  ///
+  /// [spadeA] 是接口给的原始 base64 串。
+  String? spadeToKey(String spadeA) {
+    final raw = decodeSpadeBase64(spadeA);
+    if (raw.length < 16) return null;
+
+    final key = unwrapV1(raw);
+    if (key == null || key.length != 32) return null;
+
+    // 校验是合法 hex
+    if (!RegExp(r'^[0-9a-fA-F]{32}$').hasMatch(key)) return null;
+    return key.toLowerCase();
+  }
+
+  /// 从 `kid` 派生 16 字节内容密钥。
+  ///
+  /// [kid] 是 32 字符 hex 串（接口原样给的就是 hex）。
+  Uint8List? deriveContentKey(String kid) {
+    final s = kid.trim();
+    if (!RegExp(r'^[0-9a-fA-F]{32}$').hasMatch(s)) return null;
 
     final key = Uint8List(16);
     for (var i = 0; i < 16; i++) {
-      final hi = _hexVal(hexStr.codeUnitAt(i * 2));
-      final lo = _hexVal(hexStr.codeUnitAt(i * 2 + 1));
-      if (hi < 0 || lo < 0) return null;
-      key[i] = (hi << 4) | lo;
+      key[i] = int.parse(s.substring(i * 2, i * 2 + 2), radix: 16);
     }
     return key;
   }
 
-  /// 从 `spade_a` 解出明文播放地址。
+  /// 用 AES-CBC 解密 spade 载荷得到明文地址。
   ///
-  /// [spade] 是接口给的 `spade_a` 字段。
-  /// [seed] 是 `kid` 字段解码后的字节（作为 SHA-512 的输入之一）。
-  ///
-  /// 结构：
-  ///  - 前 4 字节是头，校验 `A8 01 00`
-  ///  - 其余是 AES-CBC 密文
-  ///  - 密钥 = `SHA512(seed || salt)` 的前 16 字节
-  ///  - IV  = 同一摘要的 `[16..32)`
+  /// [spade] 原始 base64；[key] 16 字节；[iv] 16 字节。
   String? decryptSpadeUrl({
     required String spade,
-    required List<int> seed,
-    required List<int> salt,
+    required List<int> key,
+    required List<int> iv,
   }) {
     final raw = decodeSpadeBase64(spade);
-    if (raw.length < 5) return null;
-    if (raw[0] != 0xA8 || raw[1] != 0x01 || raw[2] != 0x00) return null;
+    if (raw.isEmpty || raw.length % 16 != 0) return null;
 
-    final body = raw.sublist(4);
-    if (body.isEmpty || body.length % 16 != 0) return null;
-
-    final digest = crypto.sha512.convert([...seed, ...salt]).bytes;
-    if (digest.length < 32) return null;
-
-    final key = digest.sublist(0, 16);
-    final iv = digest.sublist(16, 32);
-
-    final plain = _aesCbcDecrypt(key, iv, body);
+    final plain = aesCbcDecrypt(key, iv, raw);
     if (plain == null) return null;
 
-    // 去掉尾部填充的 0
     var end = plain.length;
     while (end > 0 && plain[end - 1] == 0) {
       end--;
@@ -140,29 +177,40 @@ class SpadeDecoder {
 
   static int _popcount(int v) {
     var n = 0;
-    while (v > 0) {
-      n += v & 1;
-      v >>= 1;
+    var x = v & 0xFFFFFFFF;
+    while (x > 0) {
+      n += x & 1;
+      x >>= 1;
     }
     return n;
   }
 
-  static int _hexVal(int c) {
-    if (c >= 0x30 && c <= 0x39) return c - 0x30; // 0-9
-    if (c >= 0x61 && c <= 0x66) return c - 0x57; // a-f
-    if (c >= 0x41 && c <= 0x46) return c - 0x37; // A-F
-    return -1;
+  /// 取低 8 位的有符号值。
+  static int _s8(int v) {
+    final b = v & 0xFF;
+    return b >= 128 ? b - 256 : b;
   }
 
-  /// AES-CBC 解密（PKCS#7 或零填充都能处理，这里只去零）。
-  ///
-  /// Dart 的 `crypto` 包不提供 AES，这里用纯 Dart 实现。
-  static Uint8List? _aesCbcDecrypt(
+  static bool _strncmp0(List<int> a, List<int> b, int n) {
+    for (var k = 0; k < n; k++) {
+      final ca = k < a.length ? a[k] : 0;
+      final cb = k < b.length ? b[k] : 0;
+      if (ca != cb) return false;
+      if (ca == 0) return true;
+    }
+    return true;
+  }
+
+  /// AES-CBC 解密（纯 Dart 实现，`crypto` 包不提供 AES）。
+  static Uint8List? aesCbcDecrypt(
     List<int> key,
     List<int> iv,
     List<int> cipher,
   ) {
     if (cipher.length % 16 != 0) return null;
+    if (key.length != 16 && key.length != 24 && key.length != 32) return null;
+    if (iv.length != 16) return null;
+
     final aes = _Aes(key);
     final out = Uint8List(cipher.length);
     var prev = Uint8List.fromList(iv);
@@ -177,6 +225,10 @@ class SpadeDecoder {
     }
     return out;
   }
+
+  /// SHA-256 摘要（备用：某些路径用内容哈希派生密钥）。
+  static Uint8List sha256(List<int> data) =>
+      Uint8List.fromList(crypto.sha256.convert(data).bytes);
 }
 
 /// 最小 AES 实现（仅解密单个块）。
@@ -775,7 +827,6 @@ class _Aes {
   }
 
   static void _invShiftRows(Uint8List s) {
-    // 状态按列存放：s[c*4 + r]
     for (var r = 1; r < 4; r++) {
       final row = [s[r], s[4 + r], s[8 + r], s[12 + r]];
       for (var c = 0; c < 4; c++) {

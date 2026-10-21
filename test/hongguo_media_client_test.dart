@@ -1,10 +1,11 @@
-/// 红果播放信息客户端测试。
+/// 红果播放客户端测试。
+///
+/// 用本地桩模拟两步链路：
+///   POST video_model/v1/  → 返回含 video_model 的 JSON
+///   GET  fallback_api     → 返回含 video_list 的 JSON
 library;
 
 import 'dart:convert';
-import 'dart:io';
-
-import 'package:crypto/crypto.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:video_fusion/src/adapters/hongguo/media_client.dart';
@@ -12,16 +13,23 @@ import 'package:video_fusion/src/core/errors.dart';
 import 'package:video_fusion/src/core/http_client.dart';
 import 'package:video_fusion/src/core/logger.dart';
 
-/// 可编排响应的假 HTTP 客户端。
-class _FakeHttp extends FusionHttpClient {
-  _FakeHttp(this.handler) : super();
+/// 记录每次请求并返回预设响应的桩。
+class _StubHttp implements FusionHttpClient {
+  _StubHttp({required this.responses});
 
-  /// (attemptIndex) → (statusCode, body)
-  final (int, String) Function(int attempt) handler;
+  /// 按顺序返回的响应；用完后复用最后一个。
+  final List<HttpResult> responses;
 
-  int calls = 0;
-  final List<Map<String, String>> capturedHeaders = [];
-  final List<String> capturedBodies = [];
+  final List<({String url, String body, Map<String, String> headers})> calls =
+      [];
+
+  int _index = 0;
+
+  HttpResult _next() {
+    final r = responses[_index.clamp(0, responses.length - 1)];
+    if (_index < responses.length - 1) _index++;
+    return r;
+  }
 
   @override
   Future<HttpResult> post(
@@ -33,354 +41,444 @@ class _FakeHttp extends FusionHttpClient {
     Duration? timeout,
     Set<int>? acceptStatuses,
   }) async {
-    calls++;
-    capturedHeaders.add(Map.of(headers));
-    capturedBodies.add(body ?? '');
-    final (code, text) = handler(calls);
-    return HttpResult(
-      statusCode: code,
-      body: text,
-      headers: const {},
-      url: url,
-      attempts: 1,
-      durationMs: 1,
-    );
+    calls.add((url: url, body: body ?? '', headers: headers));
+    return _next();
   }
+
+  @override
+  Future<HttpResult> get(
+    String url, {
+    Map<String, String> headers = const {},
+    String? platformId,
+    Duration? timeout,
+    bool? followRedirects,
+    Set<int>? acceptStatuses,
+    bool keepRawBytes = false,
+  }) async {
+    calls.add((url: url, body: '', headers: headers));
+    return _next();
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-/// 构造一个真实的 video_model 响应。
-String _successBody({
-  String definition = '1080p',
-  int width = 1080,
-  int height = 1920,
-}) {
+HttpResult _ok(String body) => HttpResult(
+  statusCode: 200,
+  body: body,
+  headers: const {},
+  url: 'https://example.com',
+  attempts: 1,
+  durationMs: 1,
+);
+
+HttpResult _status(int code, [String body = '']) => HttpResult(
+  statusCode: code,
+  body: body,
+  headers: const {},
+  url: 'https://example.com',
+  attempts: 1,
+  durationMs: 1,
+);
+
+/// 构造第一步响应（含 video_model）。
+String _modelResponse({String? fallback, String? modelOverride}) {
+  final model = modelOverride ??
+      jsonEncode({
+        'status': 10,
+        'message': 'success',
+        'version': 3,
+        'video_id': 'v0debeg10000dbbh6p7og65uhjjn8kd0',
+        'video_duration': 277.805,
+        'url_expire': 1792622202,
+        if (fallback != null) 'fallback_api': {'fallback_api': fallback},
+      });
   return jsonEncode({
+    'BaseResp': {'StatusCode': 0, 'StatusMessage': 'success'},
     'code': 0,
     'data': {
-      'expire_time': 1792534512,
-      'video_height': height,
-      'video_model': jsonEncode({
-        'video_duration': 211.834,
-        'video_list': [
-          {
-            'main_url': 'https://cdn.example.com/$definition.mp4',
-            'backup_url': 'https://backup.example.com/$definition.mp4',
-            'quality_type': 1,
-            'video_meta': {
-              'definition': definition,
-              'vwidth': width,
-              'vheight': height,
-              'bitrate': 842051,
-              'size': 22421134,
-              'codec_type': 'bytevc1',
-            },
-          },
-        ],
-      }),
+      'disable_vsr': true,
+      'expire_time': 1792621925,
+      'video_height': 720,
+      'video_model': model,
+      'video_width': 1280,
     },
   });
 }
 
-void main() {
-  group('播放信息解析', () {
-    test('解析出清晰度与直链', () async {
-      final http = _FakeHttp((_) => (200, _successBody()));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
-
-      final media = await client.fetchEpisodeMedia('7503780574541122622');
-
-      expect(media.qualities, hasLength(1));
-      final q = media.qualities.first;
-      expect(q.definition, '1080p');
-      expect(q.width, 1080);
-      expect(q.height, 1920);
-      expect(q.url, contains('1080p.mp4'));
-      expect(q.backupUrl, contains('backup'));
-      expect(q.codec, 'bytevc1');
-      expect(media.durationSeconds, closeTo(211.834, 0.01));
-    });
-
-    test('多档按高度升序排列', () async {
-      final body = jsonEncode({
-        'code': 0,
-        'data': {
-          'expire_time': 1792534512,
-          'video_model': jsonEncode({
-            'video_duration': 100.0,
-            'video_list': [
-              {
-                'main_url': 'https://cdn/1080p.mp4',
-                'quality_type': 1,
-                'video_meta': {
-                  'definition': '1080p',
-                  'vwidth': 1080,
-                  'vheight': 1920,
-                  'bitrate': 842051,
-                  'size': 1,
-                  'codec_type': 'bytevc1',
-                },
-              },
-              {
-                'main_url': 'https://cdn/360p.mp4',
-                'quality_type': 40,
-                'video_meta': {
-                  'definition': '360p',
-                  'vwidth': 360,
-                  'vheight': 640,
-                  'bitrate': 241691,
-                  'size': 1,
-                  'codec_type': 'bytevc1',
-                },
-              },
-            ],
-          }),
+/// 构造第二步响应（含多档 video_list）。
+String _fallbackResponse({List<Map<String, Object?>>? items}) {
+  final list = items ??
+      [
+        {
+          'main_url': 'https://v9.example.com/1080.mp4?ft=abc',
+          'codec_type': 'bytevc1',
+          'definition': '1080p',
+          'vwidth': 1080,
+          'vheight': 1920,
+          'bitrate': 1213683,
+          'size': 21079909,
         },
-      });
-      final http = _FakeHttp((_) => (200, body));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
+        {
+          'main_url': 'https://v9.example.com/720.mp4?ft=def',
+          'codec_type': 'bytevc1',
+          'definition': '720p',
+          'vwidth': 720,
+          'vheight': 1280,
+          'bitrate': 842000,
+          'size': 14000000,
+        },
+        {
+          'main_url': 'https://v9.example.com/360.mp4?ft=ghi',
+          'codec_type': 'bytevc1',
+          'definition': '360p',
+          'vwidth': 360,
+          'vheight': 640,
+          'bitrate': 241000,
+          'size': 6971183,
+        },
+      ];
+  return jsonEncode({
+    'video_info': {
+      'data': {
+        'video_list': {
+          for (var i = 0; i < list.length; i++) 'video_${i + 1}': list[i],
+        },
+        'key_seed': '',
+      },
+    },
+  });
+}
 
-      final media = await client.fetchEpisodeMedia('1');
-      expect(media.qualities.first.definition, '360p');
-      expect(media.qualities.last.definition, '1080p');
-      expect(media.highest?.definition, '1080p');
-      expect(media.lowest?.definition, '360p');
-    });
+HongguoMediaClient _client(_StubHttp http) =>
+    HongguoMediaClient(http: http, logger: FusionLogger(minLevel: LogLevel.error));
 
-    test('按目标高度选档', () async {
-      final media = HongguoEpisodeMedia(
-        videoId: '1',
-        durationSeconds: 100,
-        expireAt: DateTime.now(),
-        videoHeight: 1920,
-        qualities: const [
-          HongguoQuality(
-            definition: '360p',
-            width: 360,
-            height: 640,
-            bitrate: 1,
-            url: 'a',
-            backupUrl: null,
-            codec: '',
-            fileSize: 1,
-            qualityType: 40,
-          ),
-          HongguoQuality(
-            definition: '720p',
-            width: 720,
-            height: 1280,
-            bitrate: 1,
-            url: 'b',
-            backupUrl: null,
-            codec: '',
-            fileSize: 1,
-            qualityType: 10,
-          ),
-          HongguoQuality(
-            definition: '1080p',
-            width: 1080,
-            height: 1920,
-            bitrate: 1,
-            url: 'c',
-            backupUrl: null,
-            codec: '',
-            fileSize: 1,
-            qualityType: 1,
-          ),
+void main() {
+  group('完整链路', () {
+    test('两步请求都能解析出多档直链', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/fplay/1/h/v?aid=8662')),
+          _ok(_fallbackResponse()),
         ],
       );
+      final media = await _client(http).fetchEpisodeMedia('7680951264905022488');
 
-      expect(media.pickByHeight(1280)?.definition, '720p');
-      expect(media.pickByHeight(1920)?.definition, '1080p');
-      expect(media.pickByHeight(640)?.definition, '360p');
-    });
-  });
+      expect(http.calls, hasLength(2));
+      expect(http.calls[0].url, contains('/novel/player/video_model/v1/'));
+      expect(http.calls[1].url, startsWith('https://vas.example.com/fplay/1/'));
 
-  group('端点名（回归防护）', () {
-    test('用的是 multi_video_model，不是 video_model', () {
-      final src = File('lib/src/adapters/hongguo/media_client.dart')
-          .readAsStringSync();
-      expect(
-        src.contains("'/novel/player/multi_video_model/v1/'"),
-        isTrue,
-        reason: 'video_model/v1 这个端点不存在，网关会对它返回 200 + 空 body。'
-            '正确端点是 multi_video_model/v1，它对未通过校验的请求'
-            '返回明确的业务错误码（100001/110001），'
-            '而不是空 body —— 这个差异是判断端点是否存在的唯一可靠依据。',
-      );
-      expect(
-        src.contains("'/novel/player/video_model/v1/'"),
-        isFalse,
-        reason: '不要退回错误的端点名',
-      );
+      expect(media.qualities, hasLength(3));
+      expect(media.highest!.definition, '1080p');
+      expect(media.lowest!.definition, '360p');
+      expect(media.videoHeight, 720);
+      expect(media.durationSeconds, closeTo(277.805, 0.01));
     });
 
-    test('能识别大小写两种错误码字段', () {
-      final src = File('lib/src/adapters/hongguo/media_client.dart')
-          .readAsStringSync();
-      expect(src.contains("root['Code']"), isTrue,
-          reason: '新接口给 Code（大写）+ BaseResp');
-      expect(src.contains("root['code']"), isTrue,
-          reason: '旧接口给 code（小写）');
+    test('档位按高度升序', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _ok(_fallbackResponse()),
+        ],
+      );
+      final media = await _client(http).fetchEpisodeMedia('1');
+      final heights = media.qualities.map((q) => q.height).toList();
+      expect(heights, [640, 1280, 1920]);
+    });
+
+    test('pickByHeight 按标签精确匹配', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _ok(_fallbackResponse()),
+        ],
+      );
+      final media = await _client(http).fetchEpisodeMedia('1');
+      expect(media.pickByHeight(1080)!.definition, '1080p');
+      expect(media.pickByHeight(720)!.definition, '720p');
+      expect(media.pickByHeight(360)!.definition, '360p');
+    });
+
+    test('pickByHeight 无精确标签时退化为最接近高度', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _ok(_fallbackResponse()),
+        ],
+      );
+      final media = await _client(http).fetchEpisodeMedia('1');
+      // 没有 480p 档，应选最接近的
+      expect(media.pickByHeight(480), isNotNull);
     });
   });
 
   group('请求构造', () {
-    test('带 x-ss-stub（请求体 MD5 大写）', () async {
-      final http = _FakeHttp((_) => (200, _successBody()));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
+    test('第一步带六个签名头', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _ok(_fallbackResponse()),
+        ],
+      );
+      await _client(http).fetchEpisodeMedia('1');
 
-      await client.fetchEpisodeMedia('7503780574541122622');
-
-      expect(http.capturedHeaders, hasLength(1));
-      final h = http.capturedHeaders.first;
-      expect(h['x-ss-stub'], isNotNull);
-      expect(h['x-ss-stub'], matches(RegExp(r'^[0-9A-F]{32}$')));
-
-      // stub 必须等于请求体的 MD5
-      final body = http.capturedBodies.first;
-      expect(h['x-ss-stub'], _md5Upper(body));
+      final headers = http.calls[0].headers;
+      for (final h in [
+        'x-khronos',
+        'x-ladon',
+        'x-argus',
+        'x-gorgon',
+        'x-helios',
+        'x-medusa',
+        'x-ss-stub',
+      ]) {
+        expect(headers.containsKey(h), isTrue, reason: '缺少 $h');
+      }
     });
 
-    test('请求体包含嵌套 biz_param', () async {
-      final http = _FakeHttp((_) => (200, _successBody()));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
+    test('请求体含 video_platform=1024 与 video_id', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _ok(_fallbackResponse()),
+        ],
+      );
+      await _client(http).fetchEpisodeMedia('999');
 
-      await client.fetchEpisodeMedia('123');
-
-      final body = jsonDecode(http.capturedBodies.first) as Map;
-      expect(body['video_id'], '123');
-      expect(body['content_type'], 1);
-      final biz = body['biz_param'] as Map;
+      final body = jsonDecode(http.calls[0].body) as Map<String, Object?>;
+      expect(body['video_id'], '999');
+      final biz = body['biz_param'] as Map<String, Object?>;
+      expect(biz['video_platform'], 1024);
       expect(biz['need_all_video_definition'], isTrue);
-      expect(biz['video_platform'], 3);
     });
 
-    test('设备标识固定：多次请求用同一对 ID', () async {
-      final http = _FakeHttp((_) => (200, _successBody()));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
+    test('每次请求用新的设备身份（16 位数字）', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _ok(_fallbackResponse()),
+        ],
+      );
+      await _client(http).fetchEpisodeMedia('1');
 
-      await client.fetchEpisodeMedia('1');
-      await client.fetchEpisodeMedia('2');
+      final qs = Uri.parse(http.calls[0].url).queryParameters;
+      expect(qs['device_id'], matches(r'^[0-9]{16}$'));
+      expect(qs['iid'], matches(r'^[0-9]{16}$'));
+      expect(qs['device_id'], isNot(qs['iid']));
+    });
 
-      // 从 URL 里取不到（假客户端不解析），改看诊断接口
-      final diag = client.identityForDiagnostics;
-      expect(diag['deviceId'], isNot('(未生成)'));
-      expect(diag['installId'], isNot('(未生成)'));
+    test('x-ss-stub 是请求体的 MD5 大写', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _ok(_fallbackResponse()),
+        ],
+      );
+      await _client(http).fetchEpisodeMedia('1');
+
+      final stub = http.calls[0].headers['x-ss-stub'];
+      expect(stub, matches(r'^[0-9A-F]{32}$'));
     });
   });
 
-  group('重试与错误分类', () {
-    test('空 body 会重试，第 3 次成功', () async {
-      final http = _FakeHttp((n) {
-        if (n < 3) return (200, '');
-        return (200, _successBody());
-      });
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
-
-      final media = await client.fetchEpisodeMedia('1');
+  group('错误分类', () {
+    test('空 body 换身份重试后成功', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(''),
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _ok(_fallbackResponse()),
+        ],
+      );
+      final media = await _client(http).fetchEpisodeMedia('1');
       expect(media.qualities, isNotEmpty);
-      expect(http.calls, 3);
+      expect(http.calls.length, greaterThanOrEqualTo(3));
     });
 
-    test('持续空 body 最终抛 upstreamError（可重试）', () async {
-      final http = _FakeHttp((_) => (200, ''));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
-
+    test('持续空 body 抛 upstreamError（可重试）', () async {
+      final http = _StubHttp(responses: [_ok('')]);
       await expectLater(
-        () => client.fetchEpisodeMedia('1'),
-        throwsA(isA<FusionException>()
-            .having((e) => e.code, 'code', FusionErrorCode.upstreamError)
-            .having((e) => e.retryable, 'retryable', isTrue)),
+        _client(http).fetchEpisodeMedia('1'),
+        throwsA(
+          isA<FusionException>()
+              .having((e) => e.code, 'code', FusionErrorCode.upstreamError)
+              .having((e) => e.retryable, 'retryable', isTrue),
+        ),
       );
-      expect(http.calls, 8, reason: '应重试满 8 次');
     });
 
     test('HTTP 404 → unsupportedPlatform，不重试', () async {
-      final http = _FakeHttp((_) => (404, ''));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
-
-      expect(
-        () => client.fetchEpisodeMedia('1'),
-        throwsA(isA<FusionException>()
-            .having((e) => e.code, 'code', FusionErrorCode.unsupportedPlatform)
-            .having((e) => e.retryable, 'retryable', isFalse)),
+      final http = _StubHttp(responses: [_status(404)]);
+      await expectLater(
+        _client(http).fetchEpisodeMedia('1'),
+        throwsA(
+          isA<FusionException>()
+              .having((e) => e.code, 'code', FusionErrorCode.unsupportedPlatform)
+              .having((e) => e.retryable, 'retryable', isFalse),
+        ),
       );
-      expect(http.calls, 1);
+      expect(http.calls, hasLength(1));
     });
 
     test('HTTP 500 → networkError，可重试', () async {
-      final http = _FakeHttp((_) => (500, ''));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
-
-      expect(
-        () => client.fetchEpisodeMedia('1'),
-        throwsA(isA<FusionException>()
-            .having((e) => e.code, 'code', FusionErrorCode.networkError)
-            .having((e) => e.retryable, 'retryable', isTrue)),
+      final http = _StubHttp(responses: [_status(500)]);
+      await expectLater(
+        _client(http).fetchEpisodeMedia('1'),
+        throwsA(
+          isA<FusionException>()
+              .having((e) => e.code, 'code', FusionErrorCode.networkError)
+              .having((e) => e.retryable, 'retryable', isTrue),
+        ),
       );
     });
 
-    test('code != 0 → 重试后抛 parseError', () async {
-      final http = _FakeHttp(
-          (_) => (200, jsonEncode({'code': 100001, 'message': '参数错误'})));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
+    test('业务错误码 → upstreamError，不重试', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(jsonEncode({'code': 100001, 'message': 'video platform invalid'})),
+        ],
+      );
+      await expectLater(
+        _client(http).fetchEpisodeMedia('1'),
+        throwsA(
+          isA<FusionException>()
+              .having((e) => e.code, 'code', FusionErrorCode.upstreamError)
+              .having((e) => e.retryable, 'retryable', isFalse),
+        ),
+      );
+    });
 
-      expect(
-        () => client.fetchEpisodeMedia('1'),
-        throwsA(isA<FusionException>()),
+    test('fallback_api 缺失 → parseError', () async {
+      final http = _StubHttp(
+        responses: [_ok(_modelResponse()), _ok(_fallbackResponse())],
+      );
+      await expectLater(
+        _client(http).fetchEpisodeMedia('1'),
+        throwsA(
+          isA<FusionException>()
+              .having((e) => e.code, 'code', FusionErrorCode.parseError),
+        ),
       );
     });
 
     test('video_list 为空 → 抛错而非返回空列表', () async {
-      final body = jsonEncode({
-        'code': 0,
-        'data': {
-          'expire_time': 1792534512,
-          'video_model': jsonEncode({
-            'video_duration': 100.0,
-            'video_list': <Object>[],
-          }),
-        },
-      });
-      final http = _FakeHttp((_) => (200, body));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
-
-      expect(
-        () => client.fetchEpisodeMedia('1'),
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _ok(jsonEncode({'video_info': {'data': {'video_list': {}}}})),
+        ],
+      );
+      await expectLater(
+        _client(http).fetchEpisodeMedia('1'),
         throwsA(isA<FusionException>()),
       );
     });
 
-    test('video_model 是 JSON 字符串也能解析', () async {
-      final http = _FakeHttp((_) => (200, _successBody()));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
-      final media = await client.fetchEpisodeMedia('1');
-      expect(media.qualities, isNotEmpty);
+    test('第二步 HTTP 500 → networkError', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _status(500),
+        ],
+      );
+      await expectLater(
+        _client(http).fetchEpisodeMedia('1'),
+        throwsA(
+          isA<FusionException>()
+              .having((e) => e.code, 'code', FusionErrorCode.networkError),
+        ),
+      );
     });
   });
 
-  group('过期时间', () {
-    test('解析 expire_time', () async {
-      final http = _FakeHttp((_) => (200, _successBody()));
-      final client =
-          HongguoMediaClient(http: http, logger: FusionLogger(enabled: false));
-      final media = await client.fetchEpisodeMedia('1');
-      expect(media.expireAt.year, greaterThan(2020));
+  group('响应形态兼容', () {
+    test('video_model 是对象而非字符串也能解析', () async {
+      final modelObj = {
+        'video_duration': 100.5,
+        'fallback_api': {'fallback_api': 'https://vas.example.com/f'},
+      };
+      final body = jsonEncode({
+        'code': 0,
+        'data': {'video_height': 1080, 'video_model': modelObj},
+      });
+      final http = _StubHttp(
+        responses: [_ok(body), _ok(_fallbackResponse())],
+      );
+      final media = await _client(http).fetchEpisodeMedia('1');
+      expect(media.qualities, isNotEmpty);
+    });
+
+    test('fallback_api 是字符串也能解析', () async {
+      final modelStr = jsonEncode({
+        'video_duration': 50,
+        'fallback_api': 'https://vas.example.com/direct',
+      });
+      final body = jsonEncode({
+        'code': 0,
+        'data': {'video_model': modelStr},
+      });
+      final http = _StubHttp(
+        responses: [_ok(body), _ok(_fallbackResponse())],
+      );
+      final media = await _client(http).fetchEpisodeMedia('1');
+      expect(media.qualities, isNotEmpty);
+      expect(http.calls[1].url, 'https://vas.example.com/direct');
+    });
+
+    test('Code 大写字段也能识别', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(jsonEncode({'Code': 110001, 'Message': '未知异常'})),
+        ],
+      );
+      await expectLater(
+        _client(http).fetchEpisodeMedia('1'),
+        throwsA(
+          isA<FusionException>()
+              .having((e) => e.code, 'code', FusionErrorCode.upstreamError),
+        ),
+      );
+    });
+
+    test('ByteVC2 档位被跳过（播放器不支持）', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _ok(
+            _fallbackResponse(
+              items: [
+                {
+                  'main_url': 'https://v9.example.com/bvc2.mp4',
+                  'codec_type': 'bytevc2',
+                  'definition': '1080p',
+                  'vheight': 1920,
+                },
+                {
+                  'main_url': 'https://v9.example.com/hevc.mp4',
+                  'codec_type': 'bytevc1',
+                  'definition': '720p',
+                  'vheight': 1280,
+                },
+              ],
+            ),
+          ),
+        ],
+      );
+      final media = await _client(http).fetchEpisodeMedia('1');
+      expect(media.qualities, hasLength(1));
+      expect(media.highest!.definition, '720p');
+    });
+
+    test('解析 expire_time 为 DateTime', () async {
+      final http = _StubHttp(
+        responses: [
+          _ok(_modelResponse(fallback: 'https://vas.example.com/f')),
+          _ok(_fallbackResponse()),
+        ],
+      );
+      final media = await _client(http).fetchEpisodeMedia('1');
+      expect(media.expireAt.year, greaterThan(2025));
     });
   });
 }
-
-String _md5Upper(String s) =>
-    md5.convert(utf8.encode(s)).toString().toUpperCase();

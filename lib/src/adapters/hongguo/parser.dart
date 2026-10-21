@@ -159,20 +159,21 @@ class HongguoParser {
         if (seen.contains(id)) continue;
 
         // 主数据源用 series_title；兼容 series_name
-        final title =
-            _str(v['series_title']) ?? _str(v['series_name']) ?? '';
+        final title = _str(v['series_title']) ?? _str(v['series_name']) ?? '';
         if (title.isEmpty) continue;
 
         seen.add(id);
-        out.add(HongguoSeries(
-          seriesId: id,
-          title: title,
-          coverUrl: _str(v['series_cover']) ?? _str(v['series_cover_pc']),
-          description: _str(v['series_intro']),
-          episodeCount: _toInt(v['episode_cnt']),
-          rank: _toInt(v['rank']),
-          tabName: tabName,
-        ));
+        out.add(
+          HongguoSeries(
+            seriesId: id,
+            title: title,
+            coverUrl: _str(v['series_cover']) ?? _str(v['series_cover_pc']),
+            description: _str(v['series_intro']),
+            episodeCount: _toInt(v['episode_cnt']),
+            rank: _toInt(v['rank']),
+            tabName: tabName,
+          ),
+        );
       }
     }
 
@@ -194,14 +195,16 @@ class HongguoParser {
         final id = _str(v['series_id']);
         final title = _str(v['series_title']) ?? _str(v['series_name']) ?? '';
         if (id == null || id.isEmpty || title.isEmpty) continue;
-        out.add(HongguoSeries(
-          seriesId: id,
-          title: title,
-          coverUrl: _str(v['series_cover']),
-          description: _str(v['series_intro']),
-          episodeCount: _toInt(v['episode_cnt']),
-          rank: _toInt(v['rank']),
-        ));
+        out.add(
+          HongguoSeries(
+            seriesId: id,
+            title: title,
+            coverUrl: _str(v['series_cover']),
+            description: _str(v['series_intro']),
+            episodeCount: _toInt(v['episode_cnt']),
+            rank: _toInt(v['rank']),
+          ),
+        );
       }
       return out;
     } catch (_) {
@@ -232,7 +235,8 @@ class HongguoParser {
         .toList();
     if (vids.isEmpty) return null;
 
-    final title = _str(_firstJsonValue(html, 'series_name')) ??
+    final title =
+        _str(_firstJsonValue(html, 'series_name')) ??
         _str(_firstJsonValue(html, 'series_title')) ??
         '';
 
@@ -242,13 +246,15 @@ class HongguoParser {
     final episodes = <HongguoEpisode>[];
     for (var i = 0; i < vids.length; i++) {
       final vid = vids[i];
-      episodes.add(HongguoEpisode(
-        index: i + 1,
-        vid: vid,
-        title: '第${i + 1}集',
-        // 只拼 360p —— 实测仅此档存在（540p/720p/1080p 均 404）
-        playUrl: '$baseUrl/video/public/$vid/360p.mp4',
-      ));
+      episodes.add(
+        HongguoEpisode(
+          index: i + 1,
+          vid: vid,
+          title: '第${i + 1}集',
+          // 只拼 360p —— 实测仅此档存在（540p/720p/1080p 均 404）
+          playUrl: '$baseUrl/video/public/$vid/360p.mp4',
+        ),
+      );
     }
 
     return HongguoSeriesDetail(

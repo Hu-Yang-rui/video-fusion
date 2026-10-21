@@ -27,10 +27,7 @@ library;
 
 /// 红果播放标识的编解码。
 class HongguoPlaybackId {
-  const HongguoPlaybackId({
-    required this.seriesId,
-    this.episodeIndex,
-  });
+  const HongguoPlaybackId({required this.seriesId, this.episodeIndex});
 
   /// 剧集 ID。
   final String seriesId;
@@ -71,8 +68,7 @@ class HongguoPlaybackId {
   }
 
   /// 用于历史记录展示的标题后缀。
-  String get episodeLabel =>
-      episodeIndex == null ? '' : ' 第$episodeIndex集';
+  String get episodeLabel => episodeIndex == null ? '' : ' 第$episodeIndex集';
 
   @override
   String toString() => toVideoId();
