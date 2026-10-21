@@ -21,9 +21,9 @@ class HongguoAdapter extends PlatformAdapter {
     required FusionHttpClient http,
     FusionLogger? logger,
     String siteOrigin = 'https://hongguoduanju.com',
-  })  : _http = http,
-        _logger = logger ?? appLogger,
-        _origin = siteOrigin;
+  }) : _http = http,
+       _logger = logger ?? appLogger,
+       _origin = siteOrigin;
 
   final FusionHttpClient _http;
   final FusionLogger _logger;
@@ -48,6 +48,12 @@ class HongguoAdapter extends PlatformAdapter {
       return null;
     }
   }
+
+  /// 首页内容来源标识。
+  ///
+  /// 带平台前缀：来源 id 全仓库共享一个命名空间，
+  /// 裸 id 会与其它平台撞名。
+  static const String feedSourceHome = 'hongguo:home';
 
   /// 官网需要普通浏览器 UA。
   static const _webUa =
@@ -107,17 +113,17 @@ class HongguoAdapter extends PlatformAdapter {
 
   @override
   AdapterCapabilities get capabilities => const AdapterCapabilities(
-        supportsMetadata: true,
-        supportsNativePlayback: true,
-        supportsOfficialEmbed: false,
-        supportsExternalFallback: true,
-        maxQualityWithoutAuth: '360p',
-        notes: [
-          '数据来自官网服务端渲染页面，不需要签名或登录',
-          '播放直链仅验证过 360p',
-          '红果是短剧平台，无点赞/投币/评论/私信等社交功能',
-        ],
-      );
+    supportsMetadata: true,
+    supportsNativePlayback: true,
+    supportsOfficialEmbed: false,
+    supportsExternalFallback: true,
+    maxQualityWithoutAuth: '360p',
+    notes: [
+      '数据来自官网服务端渲染页面，不需要签名或登录',
+      '播放直链仅验证过 360p',
+      '红果是短剧平台，无点赞/投币/评论/私信等社交功能',
+    ],
+  );
 
   @override
   List<String> get supportedHosts => const ['hongguoduanju.com'];
@@ -143,10 +149,7 @@ class HongguoAdapter extends PlatformAdapter {
       platformId: id,
       platformVideoId: seriesId,
       canonicalUrl: '$_origin/player/$seriesId',
-      notes: [
-        '红果剧集 ID: $seriesId',
-        if (vid != null) '指定分集 vid: $vid',
-      ],
+      notes: ['红果剧集 ID: $seriesId', if (vid != null) '指定分集 vid: $vid'],
     );
   }
 
@@ -175,7 +178,8 @@ class HongguoAdapter extends PlatformAdapter {
       throw FusionException(
         code: FusionErrorCode.parseError,
         userMessage: '红果首页暂时没有可显示的剧集。',
-        technicalMessage: 'parseHomepage returned empty '
+        technicalMessage:
+            'parseHomepage returned empty '
             '(html=${html.length} bytes); 页面结构可能已变化',
         platformId: id,
         retryable: true,
@@ -212,10 +216,7 @@ class HongguoAdapter extends PlatformAdapter {
       author: const VideoAuthor(name: '红果短剧'),
       coverUrl: detail.coverUrl,
       availability: VideoAvailability.available,
-      limitations: const [
-        '播放清晰度仅 360p（官网只提供这一档）',
-        '红果是短剧平台，无评论/弹幕/互动功能',
-      ],
+      limitations: const ['播放清晰度仅 360p（官网只提供这一档）', '红果是短剧平台，无评论/弹幕/互动功能'],
       notes: [
         '共 ${detail.episodes.length} 集',
         '来源：官网服务端渲染页面',
@@ -236,7 +237,8 @@ class HongguoAdapter extends PlatformAdapter {
         throw FusionException(
           code: FusionErrorCode.videoNotFound,
           userMessage: '这部剧不存在或已下架。',
-          technicalMessage: 'player page has no vid_list and no series_title '
+          technicalMessage:
+              'player page has no vid_list and no series_title '
               '(seriesId=$seriesId, html=${html.length} bytes)',
           platformId: id,
           retryable: false,
@@ -245,7 +247,8 @@ class HongguoAdapter extends PlatformAdapter {
       throw FusionException(
         code: FusionErrorCode.parseError,
         userMessage: '红果分集数据解析失败，可能是页面结构变化。',
-        technicalMessage: 'parsePlayerPage returned null but page is not '
+        technicalMessage:
+            'parsePlayerPage returned null but page is not '
             'missing (seriesId=$seriesId, html=${html.length} bytes)',
         platformId: id,
         retryable: true,
@@ -290,10 +293,12 @@ class HongguoAdapter extends PlatformAdapter {
     if (!playable) {
       throw FusionException(
         code: FusionErrorCode.upstreamError,
-        userMessage: '第 ${ep.index} 集暂无可播放的公开源。'
+        userMessage:
+            '第 ${ep.index} 集暂无可播放的公开源。'
             '红果官网只对部分集数开放公开播放（实测约前 7 集及零星几集），'
             '其余需要官方 APP。',
-        technicalMessage: '360p HEAD returned non-2xx for vid=${ep.vid} '
+        technicalMessage:
+            '360p HEAD returned non-2xx for vid=${ep.vid} '
             '(seriesId=$seriesId, episode=${ep.index}); '
             '官网公开源覆盖不完整，非本项目实现缺陷',
         platformId: id,
@@ -328,17 +333,17 @@ class HongguoAdapter extends PlatformAdapter {
             bandwidth: picked.bitrate,
           ),
           availableQualities: media.qualities
-              .map((q) => PlaybackQuality(
-                    platformQualityId: q.qualityType,
-                    label: q.label,
-                    width: q.width,
-                    height: q.height,
-                    bandwidth: q.bitrate,
-                  ))
+              .map(
+                (q) => PlaybackQuality(
+                  platformQualityId: q.qualityType,
+                  label: q.label,
+                  width: q.width,
+                  height: q.height,
+                  bandwidth: q.bitrate,
+                ),
+              )
               .toList(),
-          videoFallbackUrls: [
-            if (picked.backupUrl != null) picked.backupUrl!,
-          ],
+          videoFallbackUrls: [if (picked.backupUrl != null) picked.backupUrl!],
           isDash: false,
           expiresAt: media.expireAt.toUtc().toIso8601String(),
         );
@@ -349,10 +354,7 @@ class HongguoAdapter extends PlatformAdapter {
     return NativePlaybackSource(
       videoId: videoId,
       videoStreamUrl: ep.playUrl,
-      requiredHeaders: {
-        'Referer': '$_origin/',
-        'User-Agent': _webUa,
-      },
+      requiredHeaders: {'Referer': '$_origin/', 'User-Agent': _webUa},
       quality: const PlaybackQuality(
         platformQualityId: null,
         label: '360p',
@@ -370,9 +372,10 @@ class HongguoAdapter extends PlatformAdapter {
   /// 返回的字符串同时用于：
   ///  - `PlaybackRequest.platformVideoId`（适配器据此定位分集）
   ///  - `VideoProgressStore.videoId`（按集存进度）
-  String episodeVideoId(String seriesId, int episodeIndex) =>
-      HongguoPlaybackId(seriesId: seriesId, episodeIndex: episodeIndex)
-          .toVideoId();
+  String episodeVideoId(String seriesId, int episodeIndex) => HongguoPlaybackId(
+    seriesId: seriesId,
+    episodeIndex: episodeIndex,
+  ).toVideoId();
 
   /// 构造某一集的 [UnifiedVideo]（供「选集」与「续播」用）。
   ///
@@ -419,10 +422,7 @@ class HongguoAdapter extends PlatformAdapter {
         upstreamEndpoint: 'GET $_origin/player/{series_id}',
         fromCache: false,
         fetchDurationMs: 0,
-        notes: [
-          '第 $episodeIndex 集 / 共 $totalEpisodes 集',
-          '清晰度：360p',
-        ],
+        notes: ['第 $episodeIndex 集 / 共 $totalEpisodes 集', '清晰度：360p'],
       ),
     );
   }
@@ -432,15 +432,17 @@ class HongguoAdapter extends PlatformAdapter {
     final detail = await fetchSeriesDetail(seriesId);
     final now = DateTime.now().toIso8601String();
     return detail.episodes
-        .map((e) => episodeVideo(
-              seriesId: seriesId,
-              seriesTitle: detail.title,
-              episodeIndex: e.index,
-              totalEpisodes: detail.episodes.length,
-              coverUrl: detail.coverUrl,
-              description: detail.description,
-              fetchedAt: now,
-            ))
+        .map(
+          (e) => episodeVideo(
+            seriesId: seriesId,
+            seriesTitle: detail.title,
+            episodeIndex: e.index,
+            totalEpisodes: detail.episodes.length,
+            coverUrl: detail.coverUrl,
+            description: detail.description,
+            fetchedAt: now,
+          ),
+        )
         .toList();
   }
 
@@ -474,10 +476,7 @@ class HongguoAdapter extends PlatformAdapter {
         HttpRequestSpec(
           url: '$_origin/video/public/$vid/360p.mp4',
           method: 'HEAD',
-          headers: {
-            'User-Agent': _webUa,
-            'Referer': '$_origin/',
-          },
+          headers: {'User-Agent': _webUa, 'Referer': '$_origin/'},
           platformId: id,
           timeout: const Duration(seconds: 12),
         ),
@@ -512,20 +511,23 @@ class HongguoAdapter extends PlatformAdapter {
 
   @override
   List<FeedSource> get feedSources => const [
-        FeedSource(
-          id: 'home',
-          adapterId: 'hongguo',
-          label: '首页推荐',
-          description: '官网首页热播短剧',
-        ),
-      ];
+    FeedSource(
+      // 标签必须带平台名：发现页的来源是一排 chip，
+      // 用户只能靠标签认出平台。「首页推荐」会与
+      // B站/抖音的推荐来源混淆，等于没有入口。
+      id: feedSourceHome,
+      adapterId: 'hongguo',
+      label: '红果短剧',
+      description: '热播短剧、真人剧、漫剧',
+    ),
+  ];
 
   @override
   Future<FeedPage> fetchFeed(
     FeedRequest request, {
     required String sourceId,
   }) async {
-    if (sourceId != 'home') {
+    if (sourceId != feedSourceHome) {
       throw FusionException(
         code: FusionErrorCode.unsupportedPlatform,
         userMessage: '红果短剧暂不支持该内容来源。',
@@ -583,15 +585,15 @@ class HongguoAdapter extends PlatformAdapter {
     String query, {
     int page = 1,
     int pageSize = 20,
-  }) async =>
-      throw FusionException(
-        code: FusionErrorCode.unsupportedPlatform,
-        userMessage: '红果短剧暂不支持搜索。',
-        technicalMessage: 'hongguo: no verified public search endpoint '
-            '(官网未找到搜索接口)',
-        platformId: id,
-        retryable: false,
-      );
+  }) async => throw FusionException(
+    code: FusionErrorCode.unsupportedPlatform,
+    userMessage: '红果短剧暂不支持搜索。',
+    technicalMessage:
+        'hongguo: no verified public search endpoint '
+        '(官网未找到搜索接口)',
+    platformId: id,
+    retryable: false,
+  );
 
   // ── 内部 ──────────────────────────────────────────────────
 

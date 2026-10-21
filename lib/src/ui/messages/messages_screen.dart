@@ -56,9 +56,16 @@ class _MessagesScreenState extends State<MessagesScreen>
   }
 
   Future<void> _boot() async {
+    // 先把界面放出来，再去读凭证。
+    //
+    // 安全存储在部分设备上首次读取可能很慢（要唤醒 keystore）。
+    // 若等它返回才置 _initialized，用户会看到长时间空白/转圈，
+    // 看起来就像"这个页面什么都没有"。未登录态本身是有效状态，
+    // 先渲染它，读到会话后 store 通知会再刷一次。
+    if (mounted) setState(() => _initialized = true);
+
     final loggedIn = await widget.store.init();
     if (!mounted) return;
-    setState(() => _initialized = true);
     if (loggedIn) await widget.store.loadSessions(refresh: true);
   }
 

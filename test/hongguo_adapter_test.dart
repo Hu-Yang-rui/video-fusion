@@ -224,9 +224,24 @@ void main() {
       final native = source as NativePlaybackSource;
       // 直链来自 CDN 或官网兜底源，必须是 http(s)
       expect(native.videoStreamUrl, startsWith('http'));
-      // CDN 直链不带 .mp4 后缀，靠 mime_type=video_mp4 参数区分
-      expect(native.videoStreamUrl, contains('qznovelvod.com'));
       expect(native.quality, isNotNull);
+
+      // 两条合法路径：
+      //  a) 主接口可用 → CDN 直链（不带 .mp4 后缀，靠 mime_type 区分）
+      //  b) 主接口失效 → 如实降级到官网 360p，并在档位里标出
+      //
+      // 主接口是外部服务，会变。测试不该在它失效时红着——
+      // 该验证的是"要么拿到 CDN 直链，要么正确降级"，不是
+      // "外部接口必须一直可用"。
+      final isCdn = native.videoStreamUrl.contains('qznovelvod.com');
+      final isFallback = native.videoStreamUrl.contains('/video/public/') &&
+          native.quality!.label == '360p';
+      expect(
+        isCdn || isFallback,
+        isTrue,
+        reason: '直链要么来自 CDN，要么是官网 360p 兜底；'
+            '实际: ${native.videoStreamUrl} (档位 ${native.quality!.label})',
+      );
     });
 
     test('指定集数（{seriesId}#{index}）', () async {

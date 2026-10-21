@@ -131,6 +131,7 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
     _registry = PlatformRegistry(adapters: [
       BilibiliAdapter(http: http, logger: logger),
       DouyinAdapter(http: http, logger: logger),
+      HongguoAdapter(http: http, logger: logger),
       // 扩展性验证用适配器：本地测试数据，不伪装成真实平台。
       MockAdapter(http: http, logger: logger),
     ]);
