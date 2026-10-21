@@ -2,6 +2,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
@@ -193,6 +194,35 @@ void main() {
       expect(media.pickByHeight(1280)?.definition, '720p');
       expect(media.pickByHeight(1920)?.definition, '1080p');
       expect(media.pickByHeight(640)?.definition, '360p');
+    });
+  });
+
+  group('端点名（回归防护）', () {
+    test('用的是 multi_video_model，不是 video_model', () {
+      final src = File('lib/src/adapters/hongguo/media_client.dart')
+          .readAsStringSync();
+      expect(
+        src.contains("'/novel/player/multi_video_model/v1/'"),
+        isTrue,
+        reason: 'video_model/v1 这个端点不存在，网关会对它返回 200 + 空 body。'
+            '正确端点是 multi_video_model/v1，它对未通过校验的请求'
+            '返回明确的业务错误码（100001/110001），'
+            '而不是空 body —— 这个差异是判断端点是否存在的唯一可靠依据。',
+      );
+      expect(
+        src.contains("'/novel/player/video_model/v1/'"),
+        isFalse,
+        reason: '不要退回错误的端点名',
+      );
+    });
+
+    test('能识别大小写两种错误码字段', () {
+      final src = File('lib/src/adapters/hongguo/media_client.dart')
+          .readAsStringSync();
+      expect(src.contains("root['Code']"), isTrue,
+          reason: '新接口给 Code（大写）+ BaseResp');
+      expect(src.contains("root['code']"), isTrue,
+          reason: '旧接口给 code（小写）');
     });
   });
 
