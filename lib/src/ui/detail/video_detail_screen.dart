@@ -87,6 +87,7 @@ class VideoDetailScreen extends StatefulWidget {
   /// 未登录时点击互动按钮的跳转动作（通常去「我的」页登录）。
   /// 为 null 时互动条自己提示"请先登录"，不做跳转。
   final VoidCallback? onOpenLogin;
+
   /// 续播位置（来自观看历史）。
   final Duration? initialPosition;
 
@@ -184,7 +185,8 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
     if (!outcome.ok) {
       setState(() {
         _resolving = false;
-        _error = outcome.error ??
+        _error =
+            outcome.error ??
             FusionException(
               code: FusionErrorCode.capabilityUnavailable,
               userMessage: '无法解析该视频的播放地址。',
@@ -285,9 +287,7 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
       await SystemChrome.setPreferredOrientations([
         DeviceOrientation.portraitUp,
       ]);
-      await SystemChrome.setEnabledSystemUIMode(
-        SystemUiMode.edgeToEdge,
-      );
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     }
   }
 
@@ -340,9 +340,7 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
           ),
 
           // 内容
-          SliverToBoxAdapter(
-            child: _buildContent(c),
-          ),
+          SliverToBoxAdapter(child: _buildContent(c)),
         ],
       ),
     );
@@ -570,10 +568,7 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
               children: [
                 Text(
                   v.title,
-                  style: AppleType.title3.copyWith(
-                    color: c.label,
-                    height: 1.3,
-                  ),
+                  style: AppleType.title3.copyWith(color: c.label, height: 1.3),
                 ),
                 const SizedBox(height: AppleSpace.sm),
                 // 元信息一行，低视觉权重
@@ -587,8 +582,7 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
                       _metaText(c, '${_fmtCount(v.stats.viewCount!)}次播放'),
                     if (v.publishedAt != null)
                       _metaText(c, _fmtDate(v.publishedAt!)),
-                    if (v.durationLabel != null)
-                      _metaText(c, v.durationLabel!),
+                    if (v.durationLabel != null) _metaText(c, v.durationLabel!),
                   ],
                 ),
               ],
@@ -708,8 +702,7 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
           _hairline(c),
 
           // ── 评论入口（一行可点内容，不是按钮）────────
-          if (_interaction != null)
-            _buildCommentEntry(c, _interaction!),
+          if (_interaction != null) _buildCommentEntry(c, _interaction!),
 
           _hairline(c),
 
@@ -736,19 +729,14 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
   }
 
   /// 元信息文字（低权重）。
-  Widget _metaText(AppleColors c, String text) => Text(
-        text,
-        style: AppleType.caption1.copyWith(color: c.tertiaryLabel),
-      );
+  Widget _metaText(AppleColors c, String text) =>
+      Text(text, style: AppleType.caption1.copyWith(color: c.tertiaryLabel));
 
   /// 细分割线（内容区之间）。
   Widget _hairline(AppleColors c) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: AppleSpace.pageInset),
-        child: SizedBox(
-          height: 0.5,
-          child: ColoredBox(color: c.separator),
-        ),
-      );
+    padding: const EdgeInsets.symmetric(horizontal: AppleSpace.pageInset),
+    child: SizedBox(height: 0.5, child: ColoredBox(color: c.separator)),
+  );
 
   /// 评论入口。
   ///
@@ -759,9 +747,7 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
       listenable: ctrl,
       builder: (context, _) {
         final count = ctrl.commentTotal;
-        final label = count > 0
-            ? '查看 ${_fmtCount(count)} 条评论'
-            : '查看评论';
+        final label = count > 0 ? '查看 ${_fmtCount(count)} 条评论' : '查看评论';
         return InkWell(
           onTap: () => _openComments(ctrl),
           child: Padding(
@@ -780,9 +766,7 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
                 Expanded(
                   child: Text(
                     label,
-                    style: AppleType.subheadline.copyWith(
-                      color: c.label,
-                    ),
+                    style: AppleType.subheadline.copyWith(color: c.label),
                   ),
                 ),
                 Icon(
@@ -869,6 +853,8 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
                 ],
                 if (v.width != null && v.height != null)
                   _techRow(c, '分辨率', '${v.width}×${v.height}'),
+                if (_qualityFallbackReason != null)
+                  _techRow(c, '清晰度说明', _qualityFallbackReason!),
                 if (limitations.isNotEmpty) ...[
                   const SizedBox(height: AppleSpace.sm),
                   for (final l in limitations)
@@ -891,25 +877,39 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
   }
 
   Widget _techRow(AppleColors c, String label, String value) => Padding(
-        padding: const EdgeInsets.only(bottom: 4),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 80,
-              child: Text(
-                label,
-                style: AppleType.caption2.copyWith(color: c.tertiaryLabel),
-              ),
-            ),
-            Expanded(
-              child: Text(
-                value,
-                style: AppleType.caption2.copyWith(color: c.secondaryLabel),
-              ),
-            ),
-          ],
+    padding: const EdgeInsets.only(bottom: 4),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 80,
+          child: Text(
+            label,
+            style: AppleType.caption2.copyWith(color: c.tertiaryLabel),
+          ),
         ),
-      );
+        Expanded(
+          child: Text(
+            value,
+            style: AppleType.caption2.copyWith(color: c.secondaryLabel),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  /// 只剩单一档位时的说明。
+  ///
+  /// 高清源是平台侧接口，可能整段时间不可用。用户看到"只有 360p"
+  /// 时需要知道这是平台侧限制，不是应用故障。
+  String? get _qualityFallbackReason {
+    final s = _source;
+    if (s is! NativePlaybackSource) return null;
+    final qs = s.availableQualities;
+    if (qs.length > 1) return null;
+    final label = qs.isNotEmpty ? qs.first.label : (s.quality?.label ?? '');
+    if (!label.contains('360')) return null;
+    return '高清源当前不可用，已使用平台公开源';
+  }
 
   String _playbackModeLabel() {
     final s = _source;
@@ -981,9 +981,7 @@ class _InteractionBar extends StatelessWidget {
             active: state.liked,
             activeColor: c.pink,
             busy: ctrl.likePending,
-            onTap: () => ctrl.isLoggedIn
-                ? ctrl.toggleLike()
-                : onOpenLogin(),
+            onTap: () => ctrl.isLoggedIn ? ctrl.toggleLike() : onOpenLogin(),
           ),
         if (caps.favorite)
           _PillAction(
@@ -1026,9 +1024,8 @@ class _InteractionBar extends StatelessWidget {
             active: state.watchLater,
             activeColor: c.green,
             busy: ctrl.watchLaterPending,
-            onTap: () => ctrl.isLoggedIn
-                ? ctrl.toggleWatchLater()
-                : onOpenLogin(),
+            onTap: () =>
+                ctrl.isLoggedIn ? ctrl.toggleWatchLater() : onOpenLogin(),
           ),
         _PillAction(
           icon: Icons.share_outlined,
@@ -1063,10 +1060,8 @@ class _InteractionBar extends StatelessWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => CoinSheet(
-        controller: ctrl,
-        coinBalance: ctrl.coinBalance,
-      ),
+      builder: (_) =>
+          CoinSheet(controller: ctrl, coinBalance: ctrl.coinBalance),
     );
   }
 
@@ -1080,10 +1075,7 @@ class _InteractionBar extends StatelessWidget {
     try {
       await Clipboard.setData(ClipboardData(text: url));
       final read = await Clipboard.getData(Clipboard.kTextPlain);
-      _toast(
-        context,
-        read?.text == url ? '链接已复制：$url' : '已尝试复制链接，请确认粘贴内容。',
-      );
+      _toast(context, read?.text == url ? '链接已复制：$url' : '已尝试复制链接，请确认粘贴内容。');
     } catch (_) {
       _toast(context, '复制失败，可在「在原平台打开」后手动复制。');
     }
@@ -1153,7 +1145,9 @@ class _PillAction extends StatelessWidget {
           vertical: 7,
         ),
         decoration: BoxDecoration(
-          color: active ? (activeColor ?? c.blue).withValues(alpha: 0.10) : c.fill,
+          color: active
+              ? (activeColor ?? c.blue).withValues(alpha: 0.10)
+              : c.fill,
           borderRadius: BorderRadius.circular(AppleRadius.pill),
         ),
         child: Row(
@@ -1163,7 +1157,10 @@ class _PillAction extends StatelessWidget {
               SizedBox(
                 width: 15,
                 height: 15,
-                child: CircularProgressIndicator(strokeWidth: 1.8, color: color),
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.8,
+                  color: color,
+                ),
               )
             else
               Icon(icon, size: 16, color: color),
@@ -1241,7 +1238,8 @@ class _FollowButton extends StatelessWidget {
 }
 
 /// 毛玻璃返回按钮。
-class _GlassBackButton extends StatelessWidget {  const _GlassBackButton({required this.onTap});
+class _GlassBackButton extends StatelessWidget {
+  const _GlassBackButton({required this.onTap});
 
   final VoidCallback onTap;
 
