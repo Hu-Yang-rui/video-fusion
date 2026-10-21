@@ -59,7 +59,7 @@ import 'nav_gesture.dart';
 /// 一级导航的标签定义。
 ///
 /// 用枚举而不是下标：直播是否在场会改变下标，但不会改变语义。
-enum AppTab { feed, discover, live, messages, profile }
+enum AppTab { feed, discover, drama, live, messages, profile }
 
 /// 应用主框架。
 class AppShell extends StatefulWidget {
@@ -68,6 +68,7 @@ class AppShell extends StatefulWidget {
     required this.feedPage,
     required this.discoverPage,
     required this.profilePage,
+    this.dramaPage,
     this.livePage,
     this.messagesPage,
     this.initialIndex = 0,
@@ -76,6 +77,11 @@ class AppShell extends StatefulWidget {
 
   final Widget feedPage;
   final Widget discoverPage;
+
+  /// 「影视」页：短剧 / 电影 / 番剧等长内容。
+  ///
+  /// 与短视频推荐流分开：推荐流是沉浸式刷，影视是找剧、看剧。
+  final Widget? dramaPage;
 
   /// 「我的」页：账号 + 内容入口 + 设置次级入口。
   final Widget profilePage;
@@ -109,10 +115,11 @@ class AppShellState extends State<AppShell>
   /// 当前标签的语义。
   AppTab get currentTab => _tabs[_index];
 
-  /// 页面顺序：推荐 / 发现 / [直播] / 我的。
+  /// 页面顺序：推荐 / 发现 / 影视 / [直播] / [消息] / 我的。
   List<AppTab> get _tabs => [
         AppTab.feed,
         AppTab.discover,
+        if (widget.dramaPage != null) AppTab.drama,
         if (widget.livePage != null) AppTab.live,
         if (widget.messagesPage != null) AppTab.messages,
         AppTab.profile,
@@ -120,16 +127,20 @@ class AppShellState extends State<AppShell>
 
   /// 短视频页的导航栏是否被手势唤出。
   ///
-  /// 只在当前处于推荐页时有意义；其它页面导航栏常驻。
+  /// 保留这个状态是为了手势逻辑不失效，但导航栏已改为**始终显示**，
+  /// 不再依赖它决定可见性。
   bool _feedNavVisible = false;
 
   bool get feedNavVisible => _feedNavVisible;
 
-  /// 当前是否真的在显示导航栏。
-  bool get navBarVisible => currentTab != AppTab.feed || _feedNavVisible;
+  /// 导航栏始终显示。
+  ///
+  /// 此前推荐页默认隐藏、下滑才唤出，实际使用中用户找不到入口。
+  /// 现在所有页面都常驻底栏。
+  bool get navBarVisible => true;
 
-  /// 沉浸式页面（只有推荐页是沉浸式）。
-  bool get _immersive => currentTab == AppTab.feed;
+  /// 沉浸式页面：无。底栏常驻后不再有沉浸页。
+  bool get _immersive => false;
 
   /// 「我的」标签的下标（登录引导等外部动作需要按语义跳转）。
   int get profileIndex => _tabs.indexOf(AppTab.profile);
@@ -137,7 +148,7 @@ class AppShellState extends State<AppShell>
   late final AnimationController _navAnim = AnimationController(
     vsync: this,
     duration: AppleMotion.standard,
-    value: _immersive ? 0 : 1,
+    value: 1,
   );
 
   late final Animation<double> _navCurve = CurvedAnimation(
@@ -240,6 +251,7 @@ class AppShellState extends State<AppShell>
         switch (t) {
           AppTab.feed => widget.feedPage,
           AppTab.discover => widget.discoverPage,
+          AppTab.drama => widget.dramaPage ?? widget.discoverPage,
           AppTab.live => widget.livePage!,
           AppTab.messages => widget.messagesPage!,
           AppTab.profile => widget.profilePage,
@@ -342,6 +354,11 @@ class AppShellState extends State<AppShell>
             activeIcon: Icons.explore_rounded,
             label: '发现',
           ),
+        AppTab.drama => const AppleTabItem(
+            icon: Icons.movie_outlined,
+            activeIcon: Icons.movie_rounded,
+            label: '影视',
+          ),
         AppTab.live => const AppleTabItem(
             icon: Icons.live_tv_outlined,
             activeIcon: Icons.live_tv_rounded,
@@ -359,18 +376,20 @@ class AppShellState extends State<AppShell>
           ),
       };
 
-  /// 标签项数量（供测试与诊断）。
+  /// 标签项（供测试与诊断）。
   ///
-  /// 推荐/发现/我的 恒在；直播与消息各自按平台能力条件注入。
+  /// 推荐/发现/我的 恒在；影视、直播与消息各自按能力条件注入。
   @visibleForTesting
   static List<AppleTabItem> itemsFor({
     required bool hasLive,
     bool hasMessages = false,
+    bool hasDrama = true,
   }) =>
       [
         for (final t in [
           AppTab.feed,
           AppTab.discover,
+          if (hasDrama) AppTab.drama,
           if (hasLive) AppTab.live,
           if (hasMessages) AppTab.messages,
           AppTab.profile,

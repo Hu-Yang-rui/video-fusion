@@ -40,7 +40,9 @@ void main() {
       expect(hongguo, isNotEmpty,
           reason: '红果适配器必须在 registry 里，否则发现页不会有它的来源');
 
-      expect(hongguo.length, 1, reason: '目前红果只有一个首页来源');
+      // 首页 + 真人剧 / 漫剧 / AI 剧 三个分类
+      expect(hongguo.length, 4, reason: '红果有首页 + 3 个分类来源');
+      expect(hongguo.map((s) => s.label), containsAll(['红果短剧', '真人剧', '漫剧', 'AI 剧']));
     });
 
     test('红果 chip 的标签就是「红果短剧」', () {

@@ -55,6 +55,15 @@ class HongguoAdapter extends PlatformAdapter {
   /// 裸 id 会与其它平台撞名。
   static const String feedSourceHome = 'hongguo:home';
 
+  /// 分类来源 id 前缀。
+  static const String _categorySourcePrefix = 'hongguo:category:';
+
+  static const String feedSourceRealDrama =
+      '${_categorySourcePrefix}real-drama';
+  static const String feedSourceComicDrama =
+      '${_categorySourcePrefix}comic-drama';
+  static const String feedSourceAiDrama = '${_categorySourcePrefix}ai-drama';
+
   /// 官网需要普通浏览器 UA。
   static const _webUa =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -577,6 +586,24 @@ class HongguoAdapter extends PlatformAdapter {
       label: '红果短剧',
       description: '热播短剧、真人剧、漫剧',
     ),
+    FeedSource(
+      id: feedSourceRealDrama,
+      adapterId: 'hongguo',
+      label: '真人剧',
+      description: '真人出演的短剧',
+    ),
+    FeedSource(
+      id: feedSourceComicDrama,
+      adapterId: 'hongguo',
+      label: '漫剧',
+      description: '漫画风格的短剧',
+    ),
+    FeedSource(
+      id: feedSourceAiDrama,
+      adapterId: 'hongguo',
+      label: 'AI 剧',
+      description: 'AI 生成的短剧',
+    ),
   ];
 
   @override
@@ -584,6 +611,10 @@ class HongguoAdapter extends PlatformAdapter {
     FeedRequest request, {
     required String sourceId,
   }) async {
+    // 分类源：feedSourceCategory:<slug>
+    final slug = _categorySlugOf(sourceId);
+    if (slug != null) return _fetchCategoryFeed(slug);
+
     if (sourceId != feedSourceHome) {
       throw FusionException(
         code: FusionErrorCode.unsupportedPlatform,
@@ -633,6 +664,57 @@ class HongguoAdapter extends PlatformAdapter {
       upstreamEndpoint: 'GET $_origin/ (homeSections)',
       notes: const ['来源：官网首页 homeSections'],
     );
+  }
+
+  /// 分类源的 feed。
+  Future<FeedPage> _fetchCategoryFeed(String slug) async {
+    final started = DateTime.now();
+    final list = await fetchCategory(slug);
+    final now = DateTime.now().toIso8601String();
+    final label = categoryLabels[slug] ?? slug;
+
+    final items = list.map((s) {
+      return UnifiedVideo(
+        id: '$id:${s.seriesId}',
+        platformId: id,
+        platformVideoId: s.seriesId,
+        originalUrl: '$_origin/player/${s.seriesId}',
+        canonicalUrl: '$_origin/player/${s.seriesId}',
+        title: s.title,
+        description: s.description,
+        author: const VideoAuthor(name: '红果短剧'),
+        coverUrl: s.coverUrl,
+        fetchedAt: now,
+        availability: VideoAvailability.available,
+        playbackModes: const [PlaybackMode.native],
+        diagnostics: VideoDiagnostics(
+          adapterId: id,
+          upstreamEndpoint: 'GET $_origin/category/$slug (recommendList)',
+          fromCache: false,
+          fetchDurationMs: DateTime.now().difference(started).inMilliseconds,
+          notes: [
+            '分类：$label',
+            if (s.episodeCount != null) '共 ${s.episodeCount} 集',
+          ],
+        ),
+      );
+    }).toList();
+
+    return FeedPage(
+      items: items,
+      hasMore: false,
+      adapterId: id,
+      upstreamEndpoint: 'GET $_origin/category/$slug (recommendList)',
+      notes: ['来源：官网分类页 $label'],
+    );
+  }
+
+  /// 从 sourceId 解析分类 slug；不是分类源时返回 null。
+  String? _categorySlugOf(String sourceId) {
+    const prefix = 'hongguo:category:';
+    if (!sourceId.startsWith(prefix)) return null;
+    final slug = sourceId.substring(prefix.length);
+    return categoryLabels.containsKey(slug) ? slug : null;
   }
 
   // ── 搜索：如实不支持 ─────────────────────────────────────

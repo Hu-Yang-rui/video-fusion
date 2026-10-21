@@ -38,6 +38,7 @@ import 'src/models/feed.dart' as feed_models;
 import 'src/models/unified_video.dart';
 import 'src/ui/detail/video_detail_screen.dart';
 import 'src/ui/discover/discover_screen.dart';
+import 'src/ui/drama/drama_screen.dart';
 import 'src/ui/feed/feed_screen.dart';
 import 'src/ui/interaction/interaction_registry.dart';
 import 'src/ui/live/live_screen.dart';
@@ -378,6 +379,10 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
           onOpenVideo: (v) => _openDetail(v),
           onOpenSourcePicker: _openSourcePicker,
           onOpenLinkIntake: _openLinkIntake,
+        ),
+        dramaPage: DramaScreen(
+          service: _service,
+          onOpenVideo: (v) => _openDetail(v),
         ),
         // 短视频页切走时暂停、切回时恢复（用户主动暂停过则不恢复）。
         onFeedVisibilityChanged: (visible) {
