@@ -8,6 +8,8 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 
+import 'byte_signer.dart';
+
 import '../../core/errors.dart';
 import '../../core/http_client.dart';
 import '../../core/logger.dart';
@@ -206,8 +208,27 @@ class HongguoMediaClient {
       'biz_param': {'need_all_video_definition': true, 'video_platform': 3},
     });
 
-    // 请求体完整性校验：带上请求体的 MD5（大写）。
-    final stub = md5.convert(utf8.encode(body)).toString().toUpperCase();
+    // 签名头。
+    //
+    // X-Gorgon 算法已完整还原（见 byte_signer.dart，12 项对照测试通过），
+    // 但服务端仍判定为无效请求：实测带 Gorgon 反而从「明确错误码」
+    // 退化为「空 body」（被整体丢弃），比不带更差。
+    //
+    // 说明完整校验还依赖别的东西（可能是 X-Argus 的真值，
+    // 或 body 结构与服务端期望不一致）。在搞清之前不带签名，
+    // 保持「拿到明确错误码」这个可诊断的状态。
+    //
+    // 开关：确认签名可用后置 true。
+    const useSignature = false;
+    final signHeaders = useSignature
+        ? ByteDanceSigner(random: _random)
+              .sign(url: url, body: utf8.encode(body))
+        : <String, String>{
+            'x-ss-stub': md5
+                .convert(utf8.encode(body))
+                .toString()
+                .toUpperCase(),
+          };
 
     // 服务端会随机返回空 body（实测约 25% 概率，与设备、vid 都无关），
     // 重试即可。实测平均 2.7 次成功，留 8 次余量。
@@ -223,7 +244,7 @@ class HongguoMediaClient {
           'x-xs-from-web': '0',
           'sdk-version': '2',
           'content-type': 'application/json; charset=utf-8',
-          'x-ss-stub': stub,
+          ...signHeaders,
         },
         platformId: 'hongguo',
         timeout: const Duration(seconds: 25),
