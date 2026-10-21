@@ -310,6 +310,10 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
                 videoId: video.id,
                 position: pos,
                 duration: dur,
+                // 带上展示信息，历史页才能显示剧名而不是一串 ID
+                title: video.title,
+                coverUrl: video.coverUrl,
+                platformId: video.platformId,
               ));
             }
           },

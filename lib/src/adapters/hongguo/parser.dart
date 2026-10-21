@@ -181,6 +181,51 @@ class HongguoParser {
     return out;
   }
 
+  /// 解析分类页，提取剧集列表。
+  ///
+  /// 数据源是 `recommendList[]`，字段名用 `series_name`（不是首页的
+  /// `series_title`）。每页 24 部。
+  ///
+  /// 分类路径：
+  ///   `/category/real-drama`   真人剧
+  ///   `/category/comic-drama`  漫剧
+  ///   `/category/ai-drama`     AI 剧
+  List<HongguoSeries> parseCategoryPage(String html) {
+    final raw = _extractJsonArray(html, 'recommendList');
+    if (raw == null) return const [];
+
+    final List<Object?> items;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      items = decoded;
+    } catch (_) {
+      return const [];
+    }
+
+    final out = <HongguoSeries>[];
+    final seen = <String>{};
+    for (final item in items) {
+      if (item is! Map) continue;
+      final v = Map<String, Object?>.from(item);
+      final id = _str(v['series_id']);
+      final title = _str(v['series_name']) ?? _str(v['series_title']) ?? '';
+      if (id == null || id.isEmpty || title.isEmpty) continue;
+      if (!seen.add(id)) continue;
+      out.add(
+        HongguoSeries(
+          seriesId: id,
+          title: title,
+          coverUrl: _str(v['series_cover']),
+          description: _str(v['series_intro']),
+          episodeCount: _toInt(v['episode_cnt']),
+          rank: _toInt(v['rank']),
+        ),
+      );
+    }
+    return out;
+  }
+
   /// 兜底：解析顶层 `video_list`（首页只有 9 部时可能走这里）。
   List<HongguoSeries> _parseTopLevelVideoList(String html) {
     final raw = _extractJsonArray(html, 'video_list');

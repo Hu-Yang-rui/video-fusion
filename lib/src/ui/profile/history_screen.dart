@@ -111,7 +111,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
             for (var i = 0; i < _items.length; i++) ...[
               if (i > 0) const AppleDivider(),
               AppleListRow(
-                title: _title(_items[i].videoId),
+                title: _items[i].displayTitle,
                 subtitle: '${_fmt(_items[i].position)} / '
                     '${_fmt(_items[i].duration)}'
                     '${_items[i].isFinished ? ' · 已看完' : ''}',

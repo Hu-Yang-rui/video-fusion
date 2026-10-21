@@ -203,6 +203,63 @@ class HongguoAdapter extends PlatformAdapter {
     return grouped;
   }
 
+  /// 分类页的 slug。
+  static const categoryRealDrama = 'real-drama';
+  static const categoryComicDrama = 'comic-drama';
+  static const categoryAiDrama = 'ai-drama';
+
+  /// 分类的中文名。
+  static const Map<String, String> categoryLabels = {
+    categoryRealDrama: '真人剧',
+    categoryComicDrama: '漫剧',
+    categoryAiDrama: 'AI 剧',
+  };
+
+  final Map<String, ({List<HongguoSeries> data, DateTime at})> _categoryCache =
+      {};
+
+  static const Duration _categoryCacheTtl = Duration(minutes: 10);
+
+  /// 拉取某个分类的剧集（每页 24 部）。
+  ///
+  /// [slug] 取 [categoryRealDrama] / [categoryComicDrama] / [categoryAiDrama]。
+  Future<List<HongguoSeries>> fetchCategory(
+    String slug, {
+    bool forceRefresh = false,
+  }) async {
+    final cached = _categoryCache[slug];
+    if (!forceRefresh &&
+        cached != null &&
+        DateTime.now().difference(cached.at) < _categoryCacheTtl) {
+      return cached.data;
+    }
+
+    final html = await _fetchHtml('$_origin/category/$slug');
+    final list = _parser.parseCategoryPage(html);
+
+    if (list.isEmpty) {
+      _logger.warn('hongguo: category parsed empty', {
+        'slug': slug,
+        'htmlLength': html.length,
+      });
+      throw FusionException(
+        code: FusionErrorCode.parseError,
+        userMessage: '红果${categoryLabels[slug] ?? '该分类'}暂时没有可显示的剧集。',
+        technicalMessage:
+            'parseCategoryPage($slug) returned empty '
+            '(html=${html.length} bytes)',
+        platformId: id,
+        retryable: true,
+      );
+    }
+
+    _categoryCache[slug] = (data: list, at: DateTime.now());
+    return list;
+  }
+
+  /// 已拉取过的分类（供诊断）。
+  Iterable<String> get cachedCategories => _categoryCache.keys;
+
   // ── 元数据（必需）────────────────────────────────────────
 
   @override

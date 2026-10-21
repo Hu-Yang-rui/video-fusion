@@ -20,12 +20,29 @@ class WatchProgress {
     required this.positionMs,
     required this.durationMs,
     required this.updatedAt,
+    this.title,
+    this.coverUrl,
+    this.platformId,
   });
 
   final String videoId;
   final int positionMs;
   final int durationMs;
   final String updatedAt;
+
+  /// 视频标题。旧记录没有这个字段，为 null。
+  ///
+  /// 没有它时历史页只能显示 `红果 · 7680951264905022488` 这样的 ID，
+  /// 用户认不出是哪一集。
+  final String? title;
+
+  /// 封面地址。旧记录为 null。
+  final String? coverUrl;
+
+  /// 平台标识（`hongguo` / `bilibili` / `douyin`）。
+  ///
+  /// 旧记录从 `videoId` 的前缀推断。
+  final String? platformId;
 
   Duration get position => Duration(milliseconds: positionMs);
   Duration get duration => Duration(milliseconds: durationMs);
@@ -41,11 +58,32 @@ class WatchProgress {
   bool get isResumable =>
       durationMs > 0 && positionMs > 5000 && ratio < 0.95;
 
+  /// 平台标识：优先用存储的，否则从 `videoId` 前缀推断。
+  String get resolvedPlatformId {
+    final stored = platformId;
+    if (stored != null && stored.isNotEmpty) return stored;
+    final i = videoId.indexOf(':');
+    return i < 0 ? '' : videoId.substring(0, i);
+  }
+
+  /// 用于列表展示的标题：有标题用标题，否则退化为 `平台 · ID`。
+  String get displayTitle {
+    final t = title;
+    if (t != null && t.trim().isNotEmpty) return t.trim();
+    final p = resolvedPlatformId;
+    final i = videoId.indexOf(':');
+    final raw = i < 0 ? videoId : videoId.substring(i + 1);
+    return p.isEmpty ? raw : '$p · $raw';
+  }
+
   Map<String, Object?> toJson() => {
         'videoId': videoId,
         'positionMs': positionMs,
         'durationMs': durationMs,
         'updatedAt': updatedAt,
+        if (title != null) 'title': title,
+        if (coverUrl != null) 'coverUrl': coverUrl,
+        if (platformId != null) 'platformId': platformId,
       };
 
   factory WatchProgress.fromJson(Map<String, Object?> json) => WatchProgress(
@@ -53,6 +91,15 @@ class WatchProgress {
         positionMs: (json['positionMs'] as num?)?.toInt() ?? 0,
         durationMs: (json['durationMs'] as num?)?.toInt() ?? 0,
         updatedAt: json['updatedAt'] as String? ?? '',
+        title: (json['title'] as String?)?.trim().isEmpty ?? true
+            ? null
+            : json['title'] as String?,
+        coverUrl: (json['coverUrl'] as String?)?.trim().isEmpty ?? true
+            ? null
+            : json['coverUrl'] as String?,
+        platformId: (json['platformId'] as String?)?.trim().isEmpty ?? true
+            ? null
+            : json['platformId'] as String?,
       );
 }
 
@@ -109,22 +156,41 @@ class VideoProgressStore {
   }
 
   /// 写入进度。播放时间过短（<3s）时不记录，避免产生噪声数据。
+  ///
+  /// [title] / [coverUrl] / [platformId] 是可选的展示信息。带上它们，
+  /// 历史页才能显示剧名而不是一串 ID。旧调用点不传也能工作，
+  /// 只是列表里会退化成 `平台 · ID`。
   Future<void> save({
     required String videoId,
     required Duration position,
     required Duration duration,
+    String? title,
+    String? coverUrl,
+    String? platformId,
   }) async {
     if (duration.inSeconds <= 0) return;
     if (position.inSeconds < 3) return;
 
     await _ensureLoaded();
+    final existing = _memory[videoId];
     _memory[videoId] = WatchProgress(
       videoId: videoId,
       positionMs: position.inMilliseconds,
       durationMs: duration.inMilliseconds,
       updatedAt: DateTime.now().toUtc().toIso8601String(),
+      // 新值为空时保留旧值：同一集反复保存不应把标题冲掉
+      title: _pick(title, existing?.title),
+      coverUrl: _pick(coverUrl, existing?.coverUrl),
+      platformId: _pick(platformId, existing?.platformId),
     );
     await _persist();
+  }
+
+  /// 取非空的那个。
+  static String? _pick(String? incoming, String? fallback) {
+    final t = incoming?.trim();
+    if (t != null && t.isNotEmpty) return t;
+    return fallback;
   }
 
   /// 读取单条进度。
