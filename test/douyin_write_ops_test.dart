@@ -21,6 +21,8 @@
 ///  4. 私信仍如实声明不支持（独立网关，Web 端不可达）
 library;
 
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:video_fusion/src/adapters/douyin/live_interaction.dart';
 import 'package:video_fusion/src/adapters/douyin/web_signer.dart';
@@ -79,6 +81,155 @@ void main() {
 
     test('搜索已支持（需登录）', () {
       expect(a.supportsSearch, isTrue);
+    });
+
+    test('本轮新增：评论点赞 / 评论发表 / 云端历史 均声明支持（需登录）', () {
+      // 实测（2026-10-22，probe_douyin_comment_history.mjs）：
+      //  - history/read     → code=8 用户未登录
+      //  - comment/digg     → code=8 用户未登录
+      //  - comment/publish  → code=8 用户未登录（comment:null）
+      // 三者都不是 404（不存在）、不是 403（Argus），只差登录态。
+      expect(a.supportsCommentLike, isTrue,
+          reason: '实测 code=8 需登录，可实现');
+      expect(a.supportsCommentReply, isTrue,
+          reason: '实测 code=8 需登录，可实现');
+      expect(a.supportsCloudHistory, isTrue,
+          reason: '实测 code=8 需登录，可实现');
+    });
+
+    test('楼中楼读取声明支持；云端播放进度如实声明不支持', () {
+      // 楼中楼：comment/list/reply 是 comment/list 的同构翻页
+      // （bundle s86.js 调用点 k(e)），读路径公开可用。
+      expect(a.supportsCommentReplies, isTrue);
+
+      // play/progress：端点存在（bundle 有通用调用点，与 history/write
+      // 的信息流翻页语义不同），但实测（2026-10-23，
+      // probe_dy_pp_gate.mjs）5 种 body 全部 code=5 参数不合法，
+      // 连调用**页面自己的**上报函数（webpack 649397.J$，签名参数
+      // 全由页面负责）也是 code=5——那个函数被 isLogin 门控，
+      // 匿名时页面根本不触发，服务端参数契约在无登录态下不可观察。
+      // 按「不谎报」：拿不到一次 code=0 就不声明支持。
+      expect(a.supportsCloudProgress, isFalse,
+          reason: 'play/progress 匿名 code=5，契约不可观察，不接死按钮');
+    });
+
+    test('reportPlaybackProgress（抖音）抛 unsupportedPlatform，不谎报成功',
+        () async {
+      final a = _adapter();
+      await expectLater(
+        a.reportPlaybackProgress(
+          platformVideoId: '1',
+          position: const Duration(seconds: 5),
+          duration: const Duration(seconds: 30),
+          session: _session(),
+        ),
+        throwsA(
+          isA<FusionException>().having(
+            (e) => e.code,
+            'code',
+            FusionErrorCode.unsupportedPlatform,
+          ),
+        ),
+      );
+    });
+  });
+
+  group('本轮新接的写路径：本地校验先拦（不浪费请求）', () {
+    test('setCommentLike：非数字 cid 直接 videoIdNotFound', () async {
+      final a = _adapter();
+      await expectLater(
+        a.setCommentLike(
+          '123',
+          commentId: 'not-a-number',
+          like: true,
+          session: _session(),
+        ),
+        throwsA(
+          isA<FusionException>().having(
+            (e) => e.code,
+            'code',
+            FusionErrorCode.videoIdNotFound,
+          ),
+        ),
+      );
+    });
+
+    test('replyComment：空内容本地拦截', () async {
+      final a = _adapter();
+      await expectLater(
+        a.replyComment(
+          '123',
+          message: '   ',
+          session: _session(),
+        ),
+        throwsA(
+          isA<FusionException>().having(
+            (e) => e.code,
+            'code',
+            FusionErrorCode.invalidUrl,
+          ),
+        ),
+      );
+    });
+
+    test('replyComment：超 500 字本地拦截', () async {
+      final a = _adapter();
+      await expectLater(
+        a.replyComment(
+          '123',
+          message: '字' * 501,
+          session: _session(),
+        ),
+        throwsA(
+          isA<FusionException>().having(
+            (e) => e.code,
+            'code',
+            FusionErrorCode.invalidUrl,
+          ),
+        ),
+      );
+    });
+
+    test('写路径缺会话：本地先抛，不发 WebView 请求', () async {
+      // replyComment / setCommentLike 的 session 是 required，
+      // 这里验证的是**参数校验在 signer 之前**：
+      // 空内容时 _writeRequest 根本没被调用（不会挂 WebView）。
+      final a = _adapter();
+      await expectLater(
+        a.replyComment('123', message: '', session: _session()),
+        throwsA(isA<FusionException>()),
+      );
+    });
+  });
+
+  group('_writeRequest 不吞掉调用方的 aweme_id（2026-10-22 修正）', () {
+    // 原代码 `{..._detailParams(''), ...params}..remove('aweme_id')`
+    // 无条件删 aweme_id：占位被删是预期，调用方传的真 aweme_id 也一起没了。
+    // 未登录停在 code=8 走不到参数校验，登录前看不出来；有登录态后
+    // 点赞/收藏/关注会全部变成"参数错误"。
+    //
+    // 这条走 WebView 无法离线断言返回值，用**源码约束**守：
+    // 必须"仅当值为空才删"，而不是无条件 remove。
+    late String src;
+    setUpAll(() {
+      src = File('lib/src/adapters/douyin_adapter.dart').readAsStringSync();
+    });
+
+    test('mergedParams 不再链式 ..remove(aweme_id)', () {
+      expect(
+        src.contains('...params}..remove(\'aweme_id\')') ||
+            src.contains('...params}..remove("aweme_id")'),
+        isFalse,
+        reason: '无条件 remove 会删掉调用方传入的真实 aweme_id',
+      );
+    });
+
+    test('改为仅当空占位才删除', () {
+      expect(
+        src.contains("if ((mergedParams['aweme_id'] ?? '').isEmpty)"),
+        isTrue,
+        reason: '应改为值判空后才 remove，保留调用方真值',
+      );
     });
   });
 

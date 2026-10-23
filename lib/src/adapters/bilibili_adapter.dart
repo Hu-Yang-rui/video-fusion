@@ -2388,6 +2388,17 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
 
     final ipLocation = _parseIpLocation(replyControl['location']);
 
+    // 楼中楼定位字段（实测 2026-10-23 `/x/v2/reply/reply`）：
+    //  - 顶层评论没有 root/parent（或为 0）
+    //  - 二级评论带 `root`（所属一级评论）与 `parent`（被回复的那条；
+    //    回复一级评论时 parent == root）
+    final rootRaw = _nullableString(raw['root_str']) ??
+        (raw['root'] as num?)?.toString();
+    final parentRaw = _nullableString(raw['parent_str']) ??
+        (raw['parent'] as num?)?.toString();
+    final hasRoot = rootRaw != null && rootRaw != '0';
+    final hasParent = parentRaw != null && parentRaw != '0';
+
     return VideoComment(
       id: rpid,
       authorName: _nullableString(member['uname']) ?? '匿名用户',
@@ -2398,12 +2409,19 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
           DateTime.now().toUtc().toIso8601String(),
       likeCount: (raw['like'] as num?)?.toInt(),
       replyCount: (raw['rcount'] as num?)?.toInt(),
+      rootCommentId: hasRoot ? rootRaw : null,
+      parentCommentId: hasParent ? parentRaw : null,
+      isSubComment: hasRoot,
       isUpAuthor: raw['up_action'] is Map &&
           ((raw['up_action'] as Map)['reply'] == true ||
               (raw['up_action'] as Map)['like'] == true),
       isPinned: raw['is_top'] == 1 || raw['is_top'] == true,
       floor: (raw['floor'] as num?)?.toInt(),
       ipLocation: ipLocation,
+      // 我对该评论的点赞状态：`up_action.like`。
+      // 实测：匿名请求不下发 up_action（或恒 false），登录态才有效。
+      isLikedByMe: raw['up_action'] is Map &&
+          (raw['up_action'] as Map)['like'] == true,
     );
   }
 
@@ -3197,7 +3215,10 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
     required String commentId,
     required bool like,
     required PlatformSession session,
+    int? replyLevel,
   }) async {
+    // B站 reply/action 不需要层级（楼中楼也走同一个 rpid），[replyLevel]
+    // 是抖音 comment/digg 的入参，这里忽略。
     final aid = await _resolveAid(platformVideoId);
     if (aid == null) {
       throw FusionException(
@@ -3243,12 +3264,113 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
   @override
   bool get supportsCommentReply => true;
 
+  /// 楼中楼：支持读取二级评论列表。
+  @override
+  bool get supportsCommentReplies => true;
+
+  /// 拉取某条一级评论下的二级评论（楼中楼）。
+  ///
+  /// 接口：`GET /x/v2/reply/reply?type=1&oid={aid}&root={根rpid}&pn={页}&ps={每页数}`
+  ///
+  /// 实测（2026-10-23，真实账号，只读）：
+  ///  - `BV1GJ411x7h7`（oid=80433022）根评论 3760801399（rcount=2216）
+  ///    → code=0，10 条，条目键含 `root / parent / rpid_str / up_action`
+  ///  - `data.page = {num,size,count}` → 总数在 page.count
+  ///  - 分页**用 pn（页码）+ ps（每页条数）**；`next` 在本接口不生效
+  ///    （与一级评论 `/x/v2/reply/main` 的游标语义不同——这是踩过的坑，
+  ///    照搬 next 会让每页都返回同一批数据）
+  ///  - `up_action.like` 在楼中楼条目同样下发（点赞回显可用）
+  ///
+  /// [parentCommentId] 必须是**一级评论** rpid（楼中楼按根归属查询）。
+  @override
+  Future<CommentPage> fetchCommentReplies(
+    String platformVideoId, {
+    required String parentCommentId,
+    int page = 1,
+    int pageSize = 20,
+    PlatformSession? session,
+  }) async {
+    final aid = await _resolveAid(platformVideoId);
+    if (aid == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '无法解析该视频的 ID，暂时无法加载回复。',
+        technicalMessage: 'Cannot resolve aid for $platformVideoId',
+        platformId: id,
+      );
+    }
+    final root = int.tryParse(parentCommentId);
+    if (root == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '评论 ID 格式不正确，无法加载回复。',
+        technicalMessage: 'parentCommentId "$parentCommentId" is not numeric',
+        platformId: id,
+      );
+    }
+
+    final safeSize = pageSize.clamp(1, 20);
+    final safePage = page < 1 ? 1 : page;
+    // 分页参数实测（2026-10-23，同一 root 下逐一比对首条 rpid）：
+    //  - `pn` 才是页码（pn=2 → data.page.num=2，首条 rpid 变化）
+    //  - `ps` 是每页条数（ps=5 → size=5）
+    //  - `next` 在本接口**不生效**：next=0/1/2 返回的首条 rpid 完全相同
+    //    （与一级评论 `/x/v2/reply/main` 的游标语义不同，别照搬）
+    final result = await _http.get(
+      '$_apiBase/x/v2/reply/reply'
+      '?type=1&oid=$aid&root=$root&pn=$safePage&ps=$safeSize',
+      headers: {
+        'Referer': _referer,
+        'Accept': 'application/json, text/plain, */*',
+        // 楼中楼读取匿名也可得（platform 策略），登录态才下发 up_action。
+        if (session != null) 'Cookie': session.cookieHeader,
+      },
+      platformId: id,
+    );
+    final json = result.jsonObject(platformId: id);
+    _assertApiOk(json, endpoint: '/x/v2/reply/reply');
+
+    final data = json['data'];
+    if (data is! Map) {
+      return CommentPage(
+        items: const [],
+        page: safePage,
+        totalCount: 0,
+        hasMore: false,
+      );
+    }
+    final d = Map<String, Object?>.from(data);
+    final rawReplies = d['replies'];
+    final items = <VideoComment>[];
+    if (rawReplies is List) {
+      for (final raw in rawReplies) {
+        if (raw is! Map) continue;
+        final c = _replyToComment(Map<String, Object?>.from(raw));
+        if (c != null) items.add(c);
+      }
+    }
+    final pageInfo = d['page'] is Map
+        ? Map<String, Object?>.from(d['page'] as Map)
+        : const <String, Object?>{};
+    final total = (pageInfo['count'] as num?)?.toInt() ?? items.length;
+
+    return CommentPage(
+      items: items,
+      page: safePage,
+      totalCount: total,
+      // 平台给了总数：按"已取条数 < 总数"判还有更多
+      hasMore: items.isNotEmpty && total > safePage * safeSize,
+      notes: [if (total > 0) '共 $total 条回复。'],
+    );
+  }
+
   @override
   Future<String?> replyComment(
     String platformVideoId, {
     required String message,
     required PlatformSession session,
     String? replyToCommentId,
+    String? rootCommentId,
   }) async {
     final text = message.trim();
     if (text.isEmpty) {
@@ -3281,10 +3403,18 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
 
     // 二级评论：带上父评论 id 与所属根评论 id。
     //
-    // 实测：只带 root 不带 parent（或反之）都返回 -400 参数错误。
-    // 对一级评论的回复，root 与 parent 是同一个值。
+    // 实测（2026-10-19）：只带 root 不带 parent（或反之）都返回 -400 参数错误。
+    // 两种情况：
+    //  - 回复**一级评论**：root 与 parent 是同一个值（老调用点只传
+    //    [replyToCommentId]，行为不变）。
+    //  - 回复**楼中楼里的二级评论**（2026-10-23 实测 `/x/v2/reply/reply`
+    //    子评论带 root≠parent）：root = 所属一级评论，parent = 被回复的
+    //    那条二级评论。此时 [rootCommentId] 必须单独传。
     if (replyToCommentId != null && replyToCommentId.isNotEmpty) {
-      body['root'] = replyToCommentId;
+      final root = (rootCommentId != null && rootCommentId.isNotEmpty)
+          ? rootCommentId
+          : replyToCommentId;
+      body['root'] = root;
       body['parent'] = replyToCommentId;
     }
 
@@ -3972,8 +4102,236 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
     );
   }
 
-  /// 已保存内容分页的统一装配（把两类条目源归一到 [SavedVideoPage]）。
+  /// 云端观看历史。
+  @override
+  bool get supportsCloudHistory => true;
+
+  /// 云端播放进度上报。
   ///
+  /// 接口：`POST /x/v2/history/report`，body `{aid, cid, progress,
+  /// duration, platform=web, csrf}`。
+  ///
+  /// 实测（2026-10-23，真实账号，上报后读回并恢复原值）：
+  ///  - `report(progress=60)` → `code=0 OK`；历史列表 `progress` 读回 60
+  ///    → **单位是秒**（不是毫秒），别把 `inMilliseconds` 直接塞进去
+  ///  - `aid=0` → `code=-400 请求错误`（路由存在，参数校验在）
+  ///  - `/x/player/store/report` → **404**，不是这条路径，别用
+  ///  - 看完时平台侧显示"已看完"，与前端一致的做法是进度归 0
+  ///    （bundle 判定 `|duration - current| < 1000ms` 时上报 0）
+  @override
+  bool get supportsCloudProgress => true;
+
+  @override
+  Future<void> reportPlaybackProgress({
+    required String platformVideoId,
+    required Duration position,
+    required Duration duration,
+    required PlatformSession session,
+    int? partNumber,
+  }) async {
+    final aid = await _resolveAid(platformVideoId);
+    if (aid == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '无法解析该视频的 ID，暂时无法上报播放进度。',
+        technicalMessage: 'Cannot resolve aid for $platformVideoId',
+        platformId: id,
+      );
+    }
+    final cid = await _resolveCid(platformVideoId);
+    if (cid == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '无法解析该视频的分集 ID，暂时无法上报播放进度。',
+        technicalMessage: 'Cannot resolve cid for $platformVideoId',
+        platformId: id,
+      );
+    }
+
+    // 单位：秒（实测读回一致）。看完归 0（与前端 |duration-current|<1s 一致）。
+    final durSec = duration.inSeconds;
+    final nearEnd = durSec > 0 && (duration - position).inSeconds <= 1;
+    final progSec = nearEnd ? 0 : position.inSeconds;
+
+    final json = await _postAuthed(
+      '/x/v2/history/report',
+      body: {
+        'aid': '$aid',
+        // cid 一律用解析出来的值。[partNumber] 是分集号（P 号），
+        // 与 cid 不是一回事，拿它顶 cid 会把进度报到一个错误的分集上。
+        // 本项目播放的是 view 返回的第一 P（_resolveCid 的口径），
+        // 多 P 续播需要按 P 号重新解析 cid，当前未支持。
+        'cid': '$cid',
+        'progress': '$progSec',
+        'duration': '$durSec',
+        'platform': 'web',
+        'csrf': _csrfFrom(session),
+      },
+      session: session,
+      endpoint: '/x/v2/history/report',
+    );
+    final code = json['code'];
+    if (code != 0) {
+      // 不谎报成功：平台没收下就是没收下。
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '平台未接受本次播放进度上报。',
+        technicalMessage: '/x/v2/history/report returned $code',
+        upstreamCode: code,
+        platformId: id,
+      );
+    }
+  }
+
+  /// 拉取账号的**云端**观看历史。
+  ///
+  /// 接口：`GET /x/web-interface/history/cursor?ps=&type=archive&business=`
+  ///
+  /// 与「稍后再看」的关键区别：
+  ///  - 分页用**游标**（`data.cursor.max/min`）而不是页码；
+  ///  - 条目外层多一层 `history` 对象，`bvid/aid` 在里面；
+  ///  - `ps` 上限 20（与稍后再看一致）。
+  ///
+  /// 注意：这是**账号侧数据**，不是本设备的 `VideoProgressStore`。
+  @override
+  Future<SavedVideoPage> fetchHistoryVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+    int cursor = 0,
+  }) async {
+    final ps = pageSize.clamp(1, 20);
+    final buf = StringBuffer(
+      '/x/web-interface/history/cursor?ps=$ps&type=archive&business=',
+    );
+    // 游标：0 表示第一页；后续页用上一页返回的 max
+    if (cursor > 0) buf.write('&max=$cursor');
+
+    final json = await _getAuthed(buf.toString(), session: session);
+
+    final data = json['data'];
+    if (data is! Map) {
+      return const SavedVideoPage(
+        items: [],
+        hasMore: false,
+        total: 0,
+        upstreamEndpoint: '/x/web-interface/history/cursor',
+      );
+    }
+    final d = Map<String, Object?>.from(data);
+    final list = d['list'];
+    final rawItems = list is List ? list : const <Object?>[];
+
+    // 游标翻页：平台用 cursor.max 表示"下一页从哪开始"，
+    // 没有 total，用「本页是否满」判断还有没有下一页。
+    final cursorObj = d['cursor'];
+    final nextCursor = cursorObj is Map
+        ? (_toInt(cursorObj['max']) ?? 0)
+        : 0;
+
+    final items = <UnifiedVideo>[];
+    for (final raw in rawItems) {
+      final v = _historyItemToVideo(raw);
+      if (v != null) items.add(v);
+    }
+
+    return SavedVideoPage(
+      items: items,
+      hasMore: rawItems.length >= ps && nextCursor > 0,
+      total: -1, // 该接口不返回总数
+      upstreamEndpoint: '/x/web-interface/history/cursor',
+      nextCursor: nextCursor,
+      notes: [
+        if (nextCursor > 0) '下一页游标：$nextCursor',
+      ],
+    );
+  }
+
+  /// 历史条目 → 统一视频。
+  ///
+  /// # 字段分层（实测 2026-10-22，真实登录态 `history/cursor`）
+  ///
+  /// 响应条目**不是**内容都在 `history` 里，恰恰相反：
+  ///  - **顶层**：`title / long_title / cover / covers / uri / author_name /
+  ///    author_face / author_mid / view_at / progress / duration / videos /
+  ///    badge / is_finish / current / total`（展示与进度全在这）
+  ///  - **history 内层**：只有 `oid / epid / bvid / page / cid / part /
+  ///    business / dt`（定位信息，没有标题封面）
+  ///
+  /// 旧实现从 `history` 里取 title/cover/owner，实测恒为 null，
+  /// 整页历史会被解析成空列表——这里按实测分层读取。
+  UnifiedVideo? _historyItemToVideo(Object? raw) {
+    if (raw is! Map) return null;
+    final m = Map<String, Object?>.from(raw);
+    final h = m['history'];
+    final hm = h is Map ? Map<String, Object?>.from(h) : const <String, Object?>{};
+
+    final bvid = _nullableString(hm['bvid']);
+    final aid = _toInt(hm['oid']);
+    if (bvid == null || bvid.isEmpty) return null;
+
+    // 标题：顶层 title（合集条目是"分集名"，show_title 才是合集名）
+    final title = _nullableString(m['title']) ??
+        _nullableString(m['long_title']) ??
+        _nullableString(hm['part']) ??
+        '';
+    if (title.isEmpty) return null;
+
+    // 进度：progress 是秒（本次观看到的位置），duration 也是秒
+    final progress = _toInt(m['progress']) ?? 0;
+    final duration = _toInt(m['duration']) ?? 0;
+
+    // 观看时间：view_at 是 epoch 秒
+    final viewAt = _toInt(m['view_at']);
+    final viewNote = viewAt == null
+        ? null
+        : '观看于 ${DateTime.fromMillisecondsSinceEpoch(viewAt * 1000, isUtc: true).toLocal()
+            .toString().substring(0, 16)}';
+
+    final uri = _nullableString(m['uri']);
+
+    return UnifiedVideo(
+      id: '$id:$bvid',
+      platformId: id,
+      platformVideoId: bvid,
+      originalUrl: uri ?? 'https://www.bilibili.com/video/$bvid',
+      canonicalUrl: 'https://www.bilibili.com/video/$bvid',
+      title: title,
+      description: null,
+      author: VideoAuthor(
+        name: _nullableString(m['author_name']),
+        platformAuthorId: _nullableString(m['author_mid']),
+        avatarUrl: _nullableString(m['author_face']),
+      ),
+      coverUrl: _nullableString(m['cover']),
+      durationSeconds: duration > 0 ? duration.toDouble() : null,
+      publishedAt: null,
+      fetchedAt: DateTime.now().toIso8601String(),
+      stats: const VideoStats(),
+      availability: VideoAvailability.available,
+      playbackModes: const [PlaybackMode.native, PlaybackMode.officialEmbed],
+      diagnostics: VideoDiagnostics(
+        adapterId: id,
+        upstreamEndpoint: '/x/web-interface/history/cursor',
+        fromCache: false,
+        fetchDurationMs: 0,
+        notes: [
+          if (progress > 0 && duration > 0)
+            '看到 ${_fmtSeconds(progress)} / ${_fmtSeconds(duration)}',
+          if (viewNote != null) viewNote,
+          if (aid != null) 'aid=$aid',
+        ],
+      ),
+    );
+  }
+
+  static String _fmtSeconds(int s) {
+    final m = (s ~/ 60).toString().padLeft(2, '0');
+    final sec = (s % 60).toString().padLeft(2, '0');
+    return '$m:$sec';
+  }
+
+  /// 已保存内容分页的统一装配（把两类条目源归一到 [SavedVideoPage]）。
   /// # hasMore 以平台的 `has_more` 为准，不用总数算
   ///
   /// B 站的 `info.totals` / `media_count` 在夹内存在**已失效条目**时与

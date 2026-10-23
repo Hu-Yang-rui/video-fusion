@@ -475,6 +475,250 @@ class InteractionController extends ChangeNotifier {
     }
   }
 
+  // ── 评论点赞 / 发表评论 ──────────────────────────────────────
+  //
+  // 与视频点赞同一原则：
+  //  - **不乐观更新计数**。平台写接口不返回新计数（B 站
+  //    `reply/action`、抖音 `comment/digg` 实测都只回 code），
+  //    所以只翻转"我赞过"这个**已被平台确认**的状态位；
+  //    计数保持平台上次下发的值，刷新评论列表时才更新。
+  //  - 未登录不渲染点亮，点了给登录提示（[capabilities.commentLike]
+  //    为 false 时 UI 整颗按钮不渲染）。
+
+  final Set<String> _commentLikePending = {};
+
+  /// 某条评论的点赞请求是否在飞。
+  bool commentLikePending(String commentId) =>
+      _commentLikePending.contains(commentId);
+
+  /// 给评论点赞 / 取消点赞。
+  ///
+  /// 一级评论与楼中楼二级评论走同一个入口：控制器按 commentId 在两层里
+  /// 找到那条，并把它的 `level` 透传给平台（抖音 comment/digg 要回传
+  /// 被点赞评论自己的 level，bundle 的调用点直接转发；B站忽略该参数）。
+  Future<void> toggleCommentLike(String commentId) async {
+    if (_commentLikePending.contains(commentId)) return;
+    if (!_requireLogin('点赞')) return;
+    if (!capabilities.commentLike) return;
+
+    final found = _findComment(commentId);
+    if (found == null) return;
+    final target = !found.comment.isLikedByMe;
+
+    _commentLikePending.add(commentId);
+    notifyListeners();
+
+    try {
+      final r = await _service.setCommentLike(
+        video,
+        commentId: commentId,
+        like: target,
+        session: _session,
+        replyLevel: found.comment.replyLevel,
+      );
+      if (!r.accepted) {
+        _lastMessage = r.message ?? '平台未接受本次评论点赞。';
+      } else {
+        // 平台确认成功后才改状态位；计数不动（见上方说明）。
+        _replaceComment(commentId, found.comment.copyWith(isLikedByMe: target));
+        _lastMessage = target ? '已点赞评论' : '已取消点赞';
+      }
+    } on FusionException catch (e) {
+      await _handleFailure(e);
+    } finally {
+      _commentLikePending.remove(commentId);
+      notifyListeners();
+    }
+  }
+
+  /// 在「一级评论 + 所有已加载的楼中楼」里按 id 找一条评论。
+  ///
+  /// 返回它在哪个列表（顶层或某个 root 的子列表）以及下标，
+  /// 写后回显要就地替换那一条，不能只查 [_comments]——
+  /// 只查顶层会让楼中楼里的点赞点了没反应。
+  ({VideoComment comment, String? inRoot, int index})? _findComment(
+    String commentId,
+  ) {
+    final top = _comments.indexWhere((c) => c.id == commentId);
+    if (top >= 0) {
+      return (comment: _comments[top], inRoot: null, index: top);
+    }
+    for (final entry in _subComments.entries) {
+      final i = entry.value.indexWhere((c) => c.id == commentId);
+      if (i >= 0) {
+        return (comment: entry.value[i], inRoot: entry.key, index: i);
+      }
+    }
+    return null;
+  }
+
+  /// 就地替换某条评论（顶层或楼中楼）。
+  void _replaceComment(String commentId, VideoComment updated) {
+    final found = _findComment(commentId);
+    if (found == null) return;
+    if (found.inRoot == null) {
+      _comments[found.index] = updated;
+      _invalidateCommentsView();
+    } else {
+      _subComments[found.inRoot!] = [
+        for (var i = 0; i < _subComments[found.inRoot]!.length; i++)
+          if (i == found.index) updated else _subComments[found.inRoot]![i],
+      ];
+      _subViewCache.remove(found.inRoot!);
+    }
+    notifyListeners();
+  }
+
+  // ── 楼中楼（二级评论）──────────────────────────────────────────
+  //
+  // 为什么不一次全拉：
+  //  - 一级评论列表**不内联**二级评论（抖音实测 reply_comment_total=2
+  //    但 reply_comment 为空数组），每条带回复的评论都要单独一次请求；
+  //  - 一个视频动辄上千条一级评论，全量拉楼中楼会直接把平台打死
+  //    （B站连续第 6 个请求起 412，见 scanFoldersContainingVideo 同类实测）。
+  //  所以按 root 惰性加载 + 缓存，UI 点"展开 N 条回复"才发请求。
+
+  /// root 评论 id → 它的二级评论列表。
+  final Map<String, List<VideoComment>> _subComments = {};
+
+  /// 只读视图缓存（同 [_commentsView] 的理由：避免每帧新建包装器）。
+  final Map<String, List<VideoComment>> _subViewCache = {};
+
+  List<VideoComment> subCommentsOf(String rootId) =>
+      _subViewCache[rootId] ??=
+          List.unmodifiable(_subComments[rootId] ?? const []);
+
+  final Map<String, bool> _subLoading = {};
+  bool subCommentsLoading(String rootId) => _subLoading[rootId] == true;
+
+  final Map<String, FusionException?> _subError = {};
+  FusionException? subCommentsError(String rootId) => _subError[rootId];
+
+  final Map<String, bool> _subHasMore = {};
+  bool subCommentsHasMore(String rootId) => _subHasMore[rootId] == true;
+
+  final Map<String, int> _subPage = {};
+
+  /// 该 root 的楼中楼是否已拉过（含拉失败——失败后 UI 给"重试"而不是再发一次）。
+  bool subCommentsLoadedOnce(String rootId) => _subComments.containsKey(rootId);
+
+  /// 该平台是否支持读楼中楼（UI 据此决定"展开 N 条回复"要不要出现）。
+  bool get supportsSubComments => capabilities.commentReplies;
+
+  /// 拉取某条一级评论下的楼中楼。首次调用拉第 1 页，之后追加。
+  Future<void> loadSubComments(
+    String rootId, {
+    bool refresh = false,
+  }) async {
+    if (!supportsSubComments) return;
+    if (_subLoading[rootId] == true) return;
+
+    if (refresh) {
+      _subComments[rootId] = [];
+      _subViewCache.remove(rootId);
+      _subPage[rootId] = 0;
+      _subHasMore[rootId] = true;
+      _subError[rootId] = null;
+    }
+    if (_subHasMore[rootId] == false && !refresh) return;
+
+    _subLoading[rootId] = true;
+    _subError[rootId] = null;
+    notifyListeners();
+
+    try {
+      final page = await _service.fetchCommentReplies(
+        video,
+        parentCommentId: rootId,
+        page: (_subPage[rootId] ?? 0) + 1,
+        pageSize: 20,
+        session: _session,
+      );
+      _subPage[rootId] = (_subPage[rootId] ?? 0) + 1;
+      final existing = _subComments[rootId] ?? <VideoComment>[];
+      final ids = existing.map((c) => c.id).toSet();
+      final merged = <VideoComment>[
+        ...existing,
+        for (final c in page.items)
+          if (ids.add(c.id)) c,
+      ];
+      _subComments[rootId] = merged;
+      _subViewCache.remove(rootId);
+      _subHasMore[rootId] = page.hasMore;
+    } on FusionException catch (e) {
+      _subError[rootId] = e;
+    } catch (e) {
+      _subError[rootId] = normalizeError(e, platformId: video.platformId);
+    } finally {
+      _subLoading[rootId] = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> loadMoreSubComments(String rootId) async {
+    if (subCommentsHasMore(rootId) == false) return;
+    await loadSubComments(rootId);
+  }
+
+  bool _postingComment = false;
+  bool get postingComment => _postingComment;
+
+  /// 发表评论（[replyToCommentId] 为 null 时发顶层评论）。
+  ///
+  /// 回复**楼中楼里的二级评论**时，控制器自动把那条二级评论所属的
+  /// 根评论 id 一起传下去——两个平台都要 root 与 parent 分开：
+  ///  - B站 `reply/add`：`root`=一级评论、`parent`=被回复的二级评论，
+  ///    只带一个实测 `-400 参数错误`
+  ///  - 抖音 `comment/publish`：`reply_id`=根、`reply_to_reply_id`=二级
+  ///
+  /// 成功后刷新第一页，让新评论以平台口径出现——不在本地拼一条
+  /// "看起来像"的假评论插进列表（平台会给新评论排序、审核状态、
+  /// 属地，这些本地都没有）。
+  Future<void> postComment(String text, {String? replyToCommentId}) async {
+    if (_postingComment) return;
+    if (!_requireLogin('评论')) return;
+    if (!capabilities.commentReply) return;
+
+    final message = text.trim();
+    if (message.isEmpty) {
+      _lastMessage = '评论内容不能为空。';
+      notifyListeners();
+      return;
+    }
+
+    // 目标是二级评论时取它的 root
+    final target =
+        replyToCommentId == null ? null : _findComment(replyToCommentId);
+    final rootForReply = (target?.comment.isSubComment ?? false)
+        ? target!.comment.rootCommentId
+        : null;
+
+    _postingComment = true;
+    notifyListeners();
+
+    try {
+      await _service.replyComment(
+        video,
+        message: message,
+        session: _session,
+        replyToCommentId: replyToCommentId,
+        rootCommentId: rootForReply,
+      );
+      _lastMessage = '已发表${replyToCommentId == null ? '评论' : '回复'}';
+      if (rootForReply != null) {
+        // 回复的是楼中楼：刷新那一栋，而不是整个一级列表
+        await loadSubComments(rootForReply, refresh: true);
+      } else {
+        await loadComments(refresh: true);
+      }
+    } on FusionException catch (e) {
+      await _handleFailure(e);
+    } finally {
+      _postingComment = false;
+      notifyListeners();
+    }
+  }
+
   // ── 投币 ────────────────────────────────────────────────────
 
   /// 拉取硬币余额（B 站：`/x/member/web/exp/reward` 的 `data.coins`）。
@@ -990,6 +1234,13 @@ class InteractionController extends ChangeNotifier {
       _commentCursor = 0;
       _commentsHasMore = true;
       _commentsError = null;
+      // 楼中楼缓存一起清：展开态属于旧快照，刷新后各 root 的
+      // 回复数/内容都可能变了，留着会把旧回复挂在新评论下。
+      _subComments.clear();
+      _subViewCache.clear();
+      _subPage.clear();
+      _subHasMore.clear();
+      _subError.clear();
     }
     if (!_commentsHasMore && _commentPage > 0) return;
 

@@ -26,6 +26,7 @@ import 'src/adapters/hongguo_adapter.dart';
 import 'src/adapters/mock_adapter.dart';
 import 'src/adapters/platform_registry.dart';
 import 'src/core/credential_vault.dart';
+import 'src/core/cloud_progress_reporter.dart';
 import 'src/core/http_client.dart';
 import 'src/core/logger.dart';
 import 'src/core/platform/flutter_secure_store.dart';
@@ -77,6 +78,12 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
   late final FeedController _feedController;
   late final PlatformRegistry _registry;
   late final VideoProgressStore _progressStore;
+
+  /// 云端播放进度旁路上报器。
+  ///
+  /// 与本地 `_progressStore` 完全分开：本地进度是权威，云端只是尽力
+  /// 而为的跨设备同步。**上报失败绝不影响本地落盘**，也不弹窗。
+  late final CloudProgressReporter _cloudProgress;
 
   /// 全局互动状态登记表。
   ///
@@ -151,6 +158,11 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
       storage: SharedPreferencesStore(),
       logger: logger,
     );
+    _cloudProgress = CloudProgressReporter(
+      service: _service,
+      vault: _vault,
+      logger: logger,
+    );
   }
 
   /// 启动：选择首个可用来源 → 加载内容 → 后台恢复登录态。
@@ -197,6 +209,9 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
       _loggedInLabel = label;
       _sessionRevision++;
     });
+    // 登录态变了：云端进度上报器丢掉会话缓存与节流窗口，
+    // 否则刚导入 Cookie 的账号要等 5 分钟缓存过期才开始上报。
+    _cloudProgress.invalidateSessions();
     // 已打开的推荐流/详情页要重新读登录态，否则导入 Cookie 后
     // 按钮仍显示"登录后可操作"，必须切走再切回才更新。
     await _interactions.recalibrateAll();
@@ -316,6 +331,15 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
                 coverUrl: video.coverUrl,
                 platformId: video.platformId,
               ));
+              // 云端进度旁路（内部自带 30s 节流 + 失败静默）。
+              // 本地进度是权威，这条挂了不影响上面那次落盘。
+              _cloudProgress.maybeReport(
+                videoId: video.id,
+                platformId: video.platformId,
+                platformVideoId: video.platformVideoId,
+                position: pos,
+                duration: dur,
+              );
             }
           },
         ),

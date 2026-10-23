@@ -24,6 +24,11 @@ class VideoComment {
     this.isPinned = false,
     this.floor,
     this.ipLocation,
+    this.isLikedByMe = false,
+    this.rootCommentId,
+    this.parentCommentId,
+    this.isSubComment = false,
+    this.replyLevel,
   });
 
   /// 平台评论 ID。
@@ -62,6 +67,68 @@ class VideoComment {
   /// 为 null 时 UI 不显示任何地区文字，不得用昵称/头像/网络位置猜测。
   final String? ipLocation;
 
+  /// **当前登录用户**是否点赞过这条评论。
+  ///
+  /// 只承载平台明确下发的值，**绝不本地推断**：
+  ///  - B 站：`up_action.like`（登录态才下发，实测语义为"我点赞过"）
+  ///  - 抖音：`comment/digg` 无登录时不下发，恒 false
+  ///
+  /// 未登录时该字段没有意义，UI 在未登录时不渲染点亮状态，
+  /// 而不是渲染成"未点赞"。
+  final bool isLikedByMe;
+
+  /// 所属**根评论** id（楼中楼归属的一级评论）。
+  ///
+  /// 顶层评论为 null。二级评论用它在平台接口里定位（B站 `root`、
+  /// 抖音 `reply_id`）。来源是平台响应字段，不本地推断。
+  final String? rootCommentId;
+
+  /// 被回复的**那条**评论 id（可能是二级评论本身）。
+  ///
+  /// 抖音回复二级评论时要 `reply_to_reply_id` = 该值；
+  /// B站回复二级评论时 `parent` = 该值、`root` = [rootCommentId]。
+  /// 顶层评论为 null。
+  final String? parentCommentId;
+
+  /// 是否是二级评论（楼中楼里的一条）。
+  ///
+  /// 决定回复时的参数形态：回复顶层只带 root，回复二级要带
+  /// root + parent 两个（B站实测只带一个会 -400 参数错误）。
+  final bool isSubComment;
+
+  /// 平台下发的评论层级（抖音 `level`）。
+  ///
+  /// 抖音的评论点赞 `comment/digg` 要回传**被点赞评论自己的 level**
+  /// （bundle s86.js 的调用点直接解构 `level:r` 原样转发）。
+  /// 只承载平台下发的值；B站没有这个概念时为 null。
+  final int? replyLevel;
+
+  /// 返回带新点赞状态的副本（评论是不可变值对象，写后回显用）。
+  VideoComment copyWith({
+    bool? isLikedByMe,
+    int? likeCount,
+    int? replyCount,
+  }) =>
+      VideoComment(
+        id: id,
+        authorName: authorName,
+        authorAvatarUrl: authorAvatarUrl,
+        authorId: authorId,
+        message: message,
+        createdAt: createdAt,
+        likeCount: likeCount ?? this.likeCount,
+        replyCount: replyCount ?? this.replyCount,
+        isUpAuthor: isUpAuthor,
+        isPinned: isPinned,
+        floor: floor,
+        ipLocation: ipLocation,
+        isLikedByMe: isLikedByMe ?? this.isLikedByMe,
+        rootCommentId: rootCommentId,
+        parentCommentId: parentCommentId,
+        isSubComment: isSubComment,
+        replyLevel: replyLevel,
+      );
+
   Map<String, Object?> toJson() => {
         'id': id,
         'authorName': authorName,
@@ -75,6 +142,11 @@ class VideoComment {
         'isPinned': isPinned,
         'floor': floor,
         'ipLocation': ipLocation,
+        'isLikedByMe': isLikedByMe,
+        'rootCommentId': rootCommentId,
+        'parentCommentId': parentCommentId,
+        'isSubComment': isSubComment,
+        'replyLevel': replyLevel,
       };
 }
 

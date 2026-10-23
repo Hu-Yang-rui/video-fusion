@@ -79,10 +79,17 @@ class SavedVideoPage {
     this.adapterId = '',
     this.upstreamEndpoint = '',
     this.notes = const [],
+    this.nextCursor = 0,
   });
 
   /// 本页条目（已标准化为 [UnifiedVideo]，可直接进播放链路）。
   final List<UnifiedVideo> items;
+
+  /// 下一页游标。
+  ///
+  /// 只有游标式接口（如 B 站云端历史）才用；页码式接口恒为 0。
+  /// 调用方把它原样传回 `cursor` 参数即可翻页。
+  final int nextCursor;
 
   /// 是否还有下一页。
   ///

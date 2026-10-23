@@ -59,7 +59,6 @@ import '../models/video_danmaku.dart';
 import 'douyin/live_client.dart';
 import 'douyin/live_danmaku_http.dart';
 import 'douyin/web_signer.dart';
-import 'json_helpers.dart';
 import 'platform_adapter.dart';
 
 /// 抖音播放地址的进程内缓存项。
@@ -789,7 +788,19 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   }) async {
     // 参数集合：所有调用点必须用**完全相同**的一套，
     // 否则实测结论无法互相对照。
-    final mergedParams = {..._detailParams(''), ...params}..remove('aweme_id');
+    //
+    // 修正（2026-10-22）：这里原来是 `{..._detailParams(''), ...params}
+    // ..remove('aweme_id')`，**无条件**删掉 aweme_id。
+    // `_detailParams('')` 会塞一个空的 `aweme_id=''` 占位，本意是删掉
+    // 这个占位；但 `..remove` 连调用方传进来的**真实 aweme_id** 也一起删了。
+    // 未登录时请求停在 `code=8 用户未登录`，还没走到参数校验，所以这个
+    // 坑当时没暴露；一旦有真实登录态，`commit/item/digg`（点赞）与
+    // `aweme/collect`（收藏）都会因为缺 aweme_id 变成"参数错误"。
+    // 现在：只在值是空占位时删除，调用方给了真值就保留。
+    final mergedParams = {..._detailParams(''), ...params};
+    if ((mergedParams['aweme_id'] ?? '').isEmpty) {
+      mergedParams.remove('aweme_id');
+    }
 
     final DouyinCommentResponse response;
     {
@@ -1058,6 +1069,15 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       isUpAuthor: raw['is_author'] == true,
       isPinned: false,
       floor: null,
+      // 楼中楼定位（取自 bundle s93.js 评论映射）：
+      //  - `level`：一级评论 0/1，二级评论 ≥2 → 判是否楼中楼条目
+      //  - `reply_id`：所属**根评论** cid（回复一级评论时 = 该一级 cid）
+      //  - `reply_to_reply_id`：被回复的那条**二级评论** cid（回复一级时为 0）
+      // 平台不下发时恒 null / false，不本地推断。
+      isSubComment: ((raw['level'] as num?)?.toInt() ?? 0) >= 2,
+      replyLevel: (raw['level'] as num?)?.toInt(),
+      rootCommentId: _nonZeroId(raw['reply_id']),
+      parentCommentId: _nonZeroId(raw['reply_to_reply_id']),
       // IP 属地。
       //
       // 实测（2026-10，未登录态，通过应用内 WebView 请求）：
@@ -1067,6 +1087,12 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       // 注意不要用 `user.region` —— 那是账号注册国家（恒为 "CN"），
       // 不是 IP 属地。
       ipLocation: _nullableString(raw['ip_label'])?.trim(),
+      // 我对该评论的点赞状态：`user_digged`（1 = 我赞过）。
+      //
+      // 取自前端 bundle 的评论映射（s93.js：`userDigged: e.user_digged`），
+      // 是平台下发的字段，不是本地推断。未登录时恒为 0/缺省 → false，
+      // UI 在未登录态不渲染点亮（避免把"不知道"显示成"未点赞"）。
+      isLikedByMe: (raw['user_digged'] as num?)?.toInt() == 1,
     );
   }
 
@@ -1255,24 +1281,30 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
         platformId: id,
       );
 
-  // ── 评论点赞 / 回复：接口可达，缺登录态 ─────────────────────
+  // ── 评论点赞 / 回复：Web 端路径可达，缺登录态 ────────────────
   //
   // 抖音的评论点赞走 `/aweme/v1/web/comment/digg/`，回复走
   // `/aweme/v1/web/comment/publish/`，与其它写操作同属 Web 端路径。
   //
   // 实测（2026-10-20）：
   //  - `comment/digg`    未登录 → `code=8 用户未登录`（不是 403 Argus）
-  //  - `comment/publish` 未登录 → `{"comment":null,"status_code":0}`
-  //    （接口真的到了业务层，只因 aweme_id 无效 + 未登录而返回 null）
+  //  - `comment/publish` 未登录 → `{"comment":null,"status_code":8}`
+  //    或 `status_code=0 + comment=null`（取决于是否带 aweme_id）
   //
-  // 但本项目**没有抖音登录态**，只能验证到"未登录被正确拒绝"。
-  // 登录后能否真正写入未验证——按本项目一贯原则，未验证的能力不声明
-  // 为支持，避免 UI 渲染一个点了必然失败的按钮。
+  // 入参形态取自前端 bundle（s86.js `vf_dy` 段）：
+  //  - digg：`{cid, aweme_id, digg_type, item_type, level, channel_id,
+  //          app_name}`，全部走 query，POST 无 body
+  //  - publish：query 放 `app_name/enter_from/previous_page`，
+  //    **表单 body** 放 `aweme_id, text, text_extra, reply_id,
+  //    reply_to_reply_id`
   //
-  // 错误码用 `loginRequired` 而非 `unsupportedPlatform`：
-  // 语义是"缺登录"，不是"平台不支持"。
+  // 与其它写操作同一判定：`code=8`（缺登录）而不是 `404`（不存在）
+  // → 能力真实存在，声明 supports=true，未登录由 `_writeRequest`
+  // 统一映射为 loginRequired。登录后能否真正写入仍未实测到
+  // （本项目没有抖音登录态），代码**不谎报成功**：`code != 0`
+  // 一律如实失败。
   @override
-  bool get supportsCommentLike => false;
+  bool get supportsCommentLike => true;
 
   @override
   Future<InteractionResult> setCommentLike(
@@ -1280,18 +1312,198 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     required String commentId,
     required bool like,
     required PlatformSession session,
-  }) =>
+    int? replyLevel,
+  }) async {
+    final cid = int.tryParse(commentId);
+    if (cid == null) {
       throw FusionException(
-        code: FusionErrorCode.loginRequired,
-        userMessage: '抖音评论点赞需要登录。导入抖音 Cookie 后可用。',
-        technicalMessage: 'douyin comment digg: endpoint reachable '
-            '(/aweme/v1/web/comment/digg/ returns code=8 not 403); '
-            'write path unverified without a real login session',
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '评论 ID 格式不正确，无法点赞。',
+        technicalMessage: 'commentId "$commentId" is not numeric cid',
         platformId: id,
       );
+    }
+    final json = await _writeRequest(
+      path: '/aweme/v1/web/comment/digg/',
+      params: {
+        'cid': '$cid',
+        'aweme_id': platformVideoId,
+        // 平台语义：digg_type 1 = 点赞。取消实测形态是同一接口
+        // 再发一次 digg_type=0（bundle 里 digg 只有 1，取消走
+        // 重复提交切换）；item_type=0 普通评论。
+        'digg_type': like ? '1' : '0',
+        'item_type': '0',
+        'channel_id': '0',
+        'app_name': 'aweme',
+        // level：bundle 的 digg 调用点原样转发被点赞评论自己的 level
+        // （一级评论与楼中楼二级评论的 level 不同）。平台没下发时传 0。
+        'level': '${replyLevel ?? 0}',
+      },
+    );
+    final accepted = json['status_code'] == 0;
+    return InteractionResult(
+      accepted: accepted,
+      message: accepted
+          ? (like ? '已点赞评论' : '已取消点赞')
+          : (json['status_msg'] is String &&
+                  (json['status_msg'] as String).isNotEmpty
+              ? json['status_msg'] as String
+              : '平台未接受本次评论点赞'),
+      upstreamCode: json['status_code'],
+    );
+  }
 
   @override
-  bool get supportsCommentReply => false;
+  bool get supportsCommentReply => true;
+
+  /// 楼中楼：抖音的二级评论**不内联**在一级评论里。
+  ///
+  /// 实测（2026-10-23，正式 UIFID，`comment/list`，
+  /// probe_dy_reply_inline 归档版输出）：
+  /// 一级评论 `reply_comment_total=2`，但响应条目里**没有**
+  /// `reply_comment` 字段（解析结果为 null）→ 展开回复必须单独
+  /// 请求 `/comment/list/reply/`。这推翻了我上一轮"少量楼中楼
+  /// 内联在 comment/list"的猜测。
+  /// 被动抓包（probe_dy_reply_capture.mjs）也证实：点「展开 2 条
+  /// 回复」时页面发出的正是 `comment/list/reply/`，HTTP 200。
+  ///
+  /// 读取形态取自 bundle `s86.js` 的调用点 k(e)：
+  /// `GET /aweme/v1/web/comment/list/reply/`
+  /// `{item_id, comment_id(=根 cid), cursor, count, item_type,
+  ///   whale_cut_token, cut_version:1}`
+  ///
+  /// ⚠️ 读取路径的验证口径：本类 `fetchComments` 的注释（第 895 行）记的
+  /// 是**应用内隐藏 WebView**（真实浏览器会话）实测 `comment/list/reply/`
+  /// 同样可用——它和 `comment/list` 走的是**同一个已验证通道**，所以读取
+  /// 是已实现的。本轮我在 CDP headless harness 里手工 fetch 它反复挂起
+  /// （12s abort / 页外 HTTP 200 空 body），那是已知的"抖音空 body 率高"
+  /// 环境问题（见 `dart_test.yaml`），不是端点坏了。
+  /// 因此实现按 bundle 与 comment/list 同构写；空 body 如实报网络失败、
+  /// 不当成"这条评论没有回复"。
+  @override
+  bool get supportsCommentReplies => true;
+
+  @override
+  Future<CommentPage> fetchCommentReplies(
+    String platformVideoId, {
+    required String parentCommentId,
+    int page = 1,
+    int pageSize = 20,
+    PlatformSession? session,
+  }) async {
+    final rootCid = int.tryParse(parentCommentId);
+    if (rootCid == null) {
+      throw FusionException(
+        code: FusionErrorCode.videoIdNotFound,
+        userMessage: '评论 ID 格式不正确，无法加载回复。',
+        technicalMessage: 'parentCommentId "$parentCommentId" is not numeric',
+        platformId: id,
+      );
+    }
+    final safeSize = pageSize.clamp(1, 50);
+    // 与 comment/list 同款：游标是偏移量（0/20/40），不是时间戳
+    final cursor = (page <= 1 ? 0 : (page - 1) * safeSize);
+
+    final params = <String, String>{
+      'item_id': platformVideoId,
+      'comment_id': '$rootCid',
+      'cursor': '$cursor',
+      'count': '$safeSize',
+      'item_type': '0',
+      'whale_cut_token': '',
+      'cut_version': '1',
+    };
+
+    final DouyinCommentResponse response;
+    {
+      final signer = _ensureSigner;
+      final ready = await signer.ensureReady(awemeId: platformVideoId);
+      if (!ready) {
+        throw FusionException(
+          code: FusionErrorCode.capabilityUnavailable,
+          userMessage: '抖音会话初始化失败，暂时无法加载回复。',
+          technicalMessage: 'DouyinWebSigner not ready for comment/list/reply',
+          platformId: id,
+          retryable: true,
+        );
+      }
+      response = await signer.request(
+        path: '/aweme/v1/web/comment/list/reply/',
+        // 公共参数与 comment/list 同一套（_detailParams 会带 aweme_id，
+        // 这里再覆盖成 item_id 语义的值）
+        params: {..._detailParams(platformVideoId), ...params},
+      );
+    }
+
+    if (response.isEmpty) {
+      throw FusionException(
+        code: FusionErrorCode.networkError,
+        userMessage: '抖音返回了空回复列表，可能是会话凭证已失效。',
+        technicalMessage:
+            'empty body from comment/list/reply (HTTP ${response.statusCode}); '
+            'not treating empty as "no replies"',
+        httpStatus: response.statusCode,
+        platformId: id,
+        retryable: true,
+      );
+    }
+
+    final json = response.tryParseJson();
+    if (json == null) {
+      throw FusionException(
+        code: FusionErrorCode.parseError,
+        userMessage: '抖音回复数据无法解析。',
+        technicalMessage: 'comment/list/reply body is not JSON '
+            '(length=${response.body.length})',
+        platformId: id,
+      );
+    }
+    final statusCode = json['status_code'];
+    // 与 _writeRequest 同一套码语义：8 / 2483 是缺登录，不是"没有回复"。
+    if (statusCode == 8 || statusCode == 2483) {
+      throw FusionException(
+        code: FusionErrorCode.loginRequired,
+        userMessage: '查看评论回复需要登录抖音账号。',
+        technicalMessage:
+            'comment/list/reply returned $statusCode: '
+            '${json['status_msg'] ?? ''}',
+        upstreamCode: statusCode,
+        platformId: id,
+      );
+    }
+    if (statusCode != 0) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '抖音返回错误：${json['status_msg'] ?? '未知原因'}',
+        technicalMessage: 'comment/list/reply status_code=$statusCode',
+        upstreamCode: statusCode,
+        platformId: id,
+      );
+    }
+
+    final rawComments = json['comments'];
+    final items = <VideoComment>[];
+    final seen = <String>{};
+    if (rawComments is List) {
+      for (final raw in rawComments) {
+        if (raw is! Map) continue;
+        final c = _commentFromJson(Map<String, Object?>.from(raw));
+        if (c == null) continue;
+        if (!seen.add(c.id)) continue; // 跨页去重（与 comment/list 同）
+        items.add(c);
+      }
+    }
+    final total = (json['total'] as num?)?.toInt() ?? 0;
+    final hasMore = json['has_more'] == 1 || json['has_more'] == true;
+
+    return CommentPage(
+      items: items,
+      page: page,
+      totalCount: total,
+      hasMore: hasMore && items.isNotEmpty,
+      notes: [if (total > 0) '共 $total 条回复。'],
+    );
+  }
 
   @override
   Future<String?> replyComment(
@@ -1299,15 +1511,73 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     required String message,
     required PlatformSession session,
     String? replyToCommentId,
-  }) =>
+    String? rootCommentId,
+  }) async {
+    final text = message.trim();
+    if (text.isEmpty) {
       throw FusionException(
-        code: FusionErrorCode.loginRequired,
-        userMessage: '抖音评论回复需要登录。导入抖音 Cookie 后可用。',
-        technicalMessage: 'douyin comment publish: endpoint reachable '
-            '(/aweme/v1/web/comment/publish/ returns status_code=0 '
-            'with comment=null); write path unverified without login',
+        code: FusionErrorCode.invalidUrl,
+        userMessage: '评论内容不能为空。',
+        technicalMessage: 'empty comment message',
         platformId: id,
       );
+    }
+    if (text.length > 500) {
+      throw FusionException(
+        code: FusionErrorCode.invalidUrl,
+        userMessage: '评论内容过长（上限 500 字）。',
+        technicalMessage: 'comment length ${text.length} > 500',
+        platformId: id,
+      );
+    }
+
+    // 表单 body：与前端 bundle 的 publish 调用形态一致。
+    //
+    // bundle 语义（s86.js 调用点 b(e)）：
+    //  - `reply_id` = 被回复的**根评论** cid
+    //  - `reply_to_reply_id` = 被回复的**二级评论** cid（回复顶层时为 0）
+    //
+    // 两种情况：
+    //  - 回复**一级评论**：只有 [replyToCommentId]，root = parent，
+    //    `reply_to_reply_id` = 0。
+    //  - 回复**楼中楼里的二级评论**：[replyToCommentId] 是被回复的那条
+    //    二级评论，[rootCommentId] 是它所属的一级评论。两个都给，
+    //    按 bundle 各自落到 reply_id / reply_to_reply_id。
+    //    （上一版把二者混成一个值，回复二级评论时会楼错位置。）
+    final isSubReply =
+        rootCommentId != null &&
+        rootCommentId.isNotEmpty &&
+        replyToCommentId != null &&
+        replyToCommentId.isNotEmpty;
+    final root = isSubReply ? rootCommentId! : (replyToCommentId ?? '0');
+    final form = <String, String>{
+      'aweme_id': platformVideoId,
+      'text': text,
+      'text_extra': '[]',
+      'reply_id': root.isEmpty ? '0' : root,
+      'reply_to_reply_id': isSubReply ? replyToCommentId! : '0',
+    };
+    final bodyStr = Uri(queryParameters: form).query;
+
+    final json = await _writeRequest(
+      path: '/aweme/v1/web/comment/publish/',
+      // query 侧参数按 bundle：app_name / enter_from / previous_page。
+      params: {
+        'app_name': 'aweme',
+        'enter_from': 'discover',
+        'previous_page': 'discover',
+      },
+      body: bodyStr,
+    );
+
+    // 平台把新评论放在 `comment` 里返回；有 ID 就回传，供 UI 就地插入。
+    final comment = json['comment'];
+    if (comment is Map) {
+      return _nullableString(comment['cid']) ??
+          (comment['cid'] as num?)?.toString();
+    }
+    return null;
+  }
 
   @override
   bool get supportsTripleAction => false;
@@ -1664,6 +1934,48 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     );
   }
 
+  /// 云端播放进度：抖音**不支持**（如实声明，不硬接）。
+  ///
+  /// 接口 `/aweme/v1/web/play/progress/` 确实存在且是通用播放上报
+  /// （bundle 调用点 body 形态 `{item_id, item_duration, item_progress}`，
+  /// 毫秒），与 `/history/write/`（信息流翻页记账）不是一回事。
+  ///
+  /// 但**匿名打不进业务层**：实测（2026-10-23，probe_dy_pp_gate.mjs）
+  /// 五种 body 组合全部 `code=5 参数不合法`——连调用**页面自己的**
+  /// 上报函数（webpack 模块 649397 的 `J$`，签名/公共参数全由页面负责）
+  /// 也是 `code=5`。原因在 bundle 的调用点：`playProgress` 上报器
+  /// 被 `isLogin` 门控，匿名时页面根本不触发它，服务端的参数契约
+  /// （要什么样的播放上下文）**在无登录态下不可观察**。
+  ///
+  /// 按本项目「不谎报 / 不伪造成功」：拿不到一次 `code=0` 的上报，
+  /// 就不声明支持，避免接一个"点了必然 code=5"的旁路。
+  /// 等有了真实登录态，先用 probe_dy_pp_gate.mjs 复测拿到 code=0
+  /// 再打开这个开关。
+  @override
+  bool get supportsCloudProgress => false;
+
+  @override
+  Future<void> reportPlaybackProgress({
+    required String platformVideoId,
+    required Duration position,
+    required Duration duration,
+    required PlatformSession session,
+    int? partNumber,
+  }) async {
+    // async 体：让 throw 变成 Future 错误而不是同步抛出——
+    // 上层（CloudProgressReporter / VideoService）都是 await 调用，
+    // 同步 throw 会绕过它们的 catch。
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持云端播放进度。',
+      technicalMessage:
+          'douyin play/progress exists but anonymous probe returns code=5 '
+          '(参数不合法) even via the page\'s own reporter (isLogin-gated); '
+          'contract unobservable without a login session, not declaring support',
+      platformId: id,
+    );
+  }
+
   /// 稍后再看列表。
   ///
   /// 实测：`watchlater/list` 未登录返回 `code=0` + `items: null`，
@@ -1701,6 +2013,105 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       total: (json['list_num'] as num?)?.toInt() ?? items.length,
       adapterId: id,
       upstreamEndpoint: '/aweme/v1/web/watchlater/list/',
+    );
+  }
+
+  /// 抖音云端观看历史。
+  ///
+  /// 接口：`GET /aweme/v1/web/history/read/`
+  ///
+  /// # 实测依据
+  ///
+  /// 未登录返回 `code=8 用户未登录`（`_dy_verify_paths` 探针实测，
+  /// `aweme_list:null / has_more:0 / max_cursor:0`）——
+  /// **不是 404**，路由与参数形态都在，只差登录态。
+  /// 因此声明 [supportsCloudHistory] = true，未登录由 [_writeRequest]
+  /// 统一映射为 [FusionErrorCode.loginRequired]。
+  ///
+  /// # 分页语义（取自前端 bundle `history/read` 调用点）
+  ///
+  ///  **游标式**：入参 `max_cursor`（0 = 第一页），响应回 `max_cursor`
+  ///  作为下一页游标；与"稍后再看"的偏移量游标不同。
+  ///  另带 `status` / `category` / `directory` 三个筛选位，
+  ///  本项目按默认值（全部、不限目录）请求。
+  ///  响应里 `aweme_date[aweme_id]` 是该条目的观看时间，
+  ///  条目本身与 feed 的 aweme 同构，直接复用 [_awemeToVideo]。
+  @override
+  bool get supportsCloudHistory => true;
+
+  @override
+  Future<SavedVideoPage> fetchHistoryVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+    int cursor = 0,
+  }) async {
+    final safeSize = pageSize.clamp(1, 20);
+    final json = await _writeRequest(
+      path: '/aweme/v1/web/history/read/',
+      params: {
+        'max_cursor': '${cursor < 0 ? 0 : cursor}',
+        'count': '$safeSize',
+        'status': '0',
+        'category': '0',
+        'directory': '0',
+      },
+      method: 'GET',
+    );
+
+    // 观看时间表：aweme_id → 时间戳（秒）
+    final dateTable = json['aweme_date'];
+    final dates = dateTable is Map ? Map<String, Object?>.from(dateTable) : null;
+
+    final list = json['aweme_list'];
+    final items = <UnifiedVideo>[];
+    final seen = <String>{};
+    if (list is List) {
+      for (final raw in list) {
+        if (raw is! Map) continue;
+        final v = _awemeToVideo(Map<String, Object?>.from(raw));
+        if (v == null) continue;
+        if (!seen.add(v.id)) continue; // 游标翻页有重复条目
+        items.add(_withHistoryTime(v, dates));
+      }
+    }
+
+    final nextCursor = (json['max_cursor'] as num?)?.toInt() ?? cursor;
+    return SavedVideoPage(
+      items: items,
+      hasMore: (json['has_more'] == 1 || json['has_more'] == true) &&
+          nextCursor > 0,
+      // 该接口不下发总数；用 -1 表示"不知道"，不冒充条数
+      total: -1,
+      adapterId: id,
+      upstreamEndpoint: '/aweme/v1/web/history/read/',
+      nextCursor: nextCursor,
+    );
+  }
+
+  /// 把 `aweme_date` 里的观看时间挂到诊断说明上，供云端历史页显示。
+  UnifiedVideo _withHistoryTime(
+    UnifiedVideo video,
+    Map<String, Object?>? dates,
+  ) {
+    final ts = dates?[video.platformVideoId];
+    if (ts is! num) return video;
+    final dt =
+        DateTime.fromMillisecondsSinceEpoch(ts.toInt() * 1000, isUtc: true)
+            .toLocal();
+    final two = (int v) => v.toString().padLeft(2, '0');
+    final now = DateTime.now();
+    final isToday = dt.year == now.year &&
+        dt.month == now.month &&
+        dt.day == now.day;
+    // 今天的记录带时分，更早的只给日期——列表信息密度优先。
+    final label = isToday
+        ? '${dt.year}-${two(dt.month)}-${two(dt.day)} ${two(dt.hour)}:${two(dt.minute)}'
+        : '${dt.year}-${two(dt.month)}-${two(dt.day)}';
+    return video.copyWith(
+      diagnostics: video.diagnostics.copyWith(
+        notes: [...video.diagnostics.notes, '观看于 $label'],
+      ),
     );
   }
 
@@ -2974,6 +3385,19 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     if (value == null) return null;
     if (value is String) return value.isEmpty ? null : value;
     return value.toString();
+  }
+
+  /// 把平台下发的 id 字段转成字符串，**把 0 / '0' 当作"没有"**。
+  ///
+  /// 抖音的 `reply_id` / `reply_to_reply_id` 在顶层评论上是 0，
+  /// 直接 `toString()` 会得到 '0' 并被上层当成一个合法的评论 id，
+  /// 回复时就会带上 root=0 这种垃圾参数。
+  static String? _nonZeroId(Object? value) {
+    if (value == null) return null;
+    if (value is num) return value.toInt() == 0 ? null : '${value.toInt()}';
+    final s = value.toString().trim();
+    if (s.isEmpty || s == '0') return null;
+    return s;
   }
 
   static String _stringOr(Object? value, String fallback) =>

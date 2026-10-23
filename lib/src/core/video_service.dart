@@ -64,6 +64,11 @@ class InteractionCapabilities {
     this.watchLater = false,
     this.follow = false,
     this.savedContent = false,
+    this.commentLike = false,
+    this.commentReply = false,
+    this.cloudHistory = false,
+    this.commentReplies = false,
+    this.cloudProgress = false,
   });
 
   final bool comments;
@@ -89,6 +94,26 @@ class InteractionCapabilities {
   /// UI 用这个决定"点开收藏夹看内容"是否可用，避免放死按钮。
   final bool savedContent;
 
+  /// 是否支持给**评论**点赞（评论面板里的爱心按钮）。
+  final bool commentLike;
+
+  /// 是否支持发表评论 / 回复评论（评论面板底部的输入框）。
+  final bool commentReply;
+
+  /// 是否提供**云端**观看历史（「我的」页的入口）。
+  final bool cloudHistory;
+
+  /// 是否支持读取**楼中楼**（某条一级评论下的二级评论列表）。
+  ///
+  /// 与 [commentReply] 分开：能回复 ≠ 能列出回复。评论面板据此决定
+  /// "展开 N 条回复"要不要出现。
+  final bool commentReplies;
+
+  /// 是否支持**云端播放进度上报**（跨设备续播）。
+  ///
+  /// 与 [cloudHistory] 也分开：能读历史 ≠ 能写进度。
+  final bool cloudProgress;
+
   static const InteractionCapabilities none = InteractionCapabilities(
     comments: false,
     like: false,
@@ -100,9 +125,11 @@ class InteractionCapabilities {
   ///
   /// 语义保持与既有一致（`comments || like || coin || favorite`）：
   /// UI 早已按这个判断"要不要显示互动区"。新增的
-  /// [favoriteFolders]/[coinBalance]/[watchLater]/[follow]/[savedContent]
+  /// [favoriteFolders]/[coinBalance]/[watchLater]/[follow]/[savedContent]/
+  /// [commentLike]/[commentReply]/[cloudHistory]
   /// **不计入**这里，否则一个只支持"稍后再看"的平台会被判成
   /// "有互动能力"，从而显示出点赞/收藏这类实际会失败的按钮。
+  /// 评论点赞/回复依附于 [comments]（评论面板内），不单独点亮互动区。
   bool get hasAny => comments || like || coin || favorite;
 }
 
@@ -217,6 +244,11 @@ class VideoService {
       watchLater: adapter.supportsWatchLater,
       follow: adapter.supportsFollowAuthor,
       savedContent: adapter.supportsSavedContent,
+      commentLike: adapter.supportsCommentLike,
+      commentReply: adapter.supportsCommentReply,
+      cloudHistory: adapter.supportsCloudHistory,
+      commentReplies: adapter.supportsCommentReplies,
+      cloudProgress: adapter.supportsCloudProgress,
     );
   }
 
@@ -596,6 +628,36 @@ class VideoService {
     );
   }
 
+  /// 拉取账号的**云端**观看历史（分页 / 游标）。
+  ///
+  /// 与本地 `VideoProgressStore` 无关：那个只记录本设备的播放位置。
+  Future<SavedVideoPage> fetchHistoryVideos(
+    String platformId, {
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+    int cursor = 0,
+  }) {
+    return _adapterFor(platformId).fetchHistoryVideos(
+      session: session,
+      page: page,
+      pageSize: pageSize,
+      cursor: cursor,
+    );
+  }
+
+  /// 某个平台是否提供云端观看历史。
+  ///
+  /// 用 `_registry.byId(...) ?? false` 而不是 `_adapterFor(...)`：
+  /// 这是**能力查询**，UI（「我的」页）拿每个会话的平台 id 来问"要不要
+  /// 渲染云端历史入口"。未接入/已移除的平台必须答"没有"，而不是抛异常——
+  /// 一个残留会话就会让整个个人页崩掉。与 [supportsFavoriteFoldersFor]
+  /// / [supportsSavedContentFor] 同一形态。
+  bool platformSupportsCloudHistory(String platformId) {
+    final adapter = _registry.byId(platformId);
+    return adapter?.supportsCloudHistory ?? false;
+  }
+
   /// 拉取评论列表。
   Future<CommentPage> fetchComments(
     UnifiedVideo video, {
@@ -812,6 +874,142 @@ class VideoService {
       session: session!,
       folderIds: folderIds,
       removeFolderIds: removeFolderIds,
+    );
+  }
+
+  /// 给**评论**点赞 / 取消点赞（不是给视频点赞）。
+  ///
+  /// 平台不支持（[PlatformAdapter.supportsCommentLike] = false）时
+  /// 抛 `unsupportedPlatform`；未登录抛 `loginRequired`。
+  Future<InteractionResult> setCommentLike(
+    UnifiedVideo video, {
+    required String commentId,
+    required bool like,
+    PlatformSession? session,
+    int? replyLevel,
+  }) async {
+    final adapter = _requireInteractionAdapter(video, session, '评论点赞');
+    if (!adapter.supportsCommentLike) {
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持评论点赞。',
+        technicalMessage: 'Adapter ${video.platformId} '
+            'does not implement setCommentLike',
+        platformId: video.platformId,
+      );
+    }
+    return adapter.setCommentLike(
+      video.platformVideoId,
+      commentId: commentId,
+      like: like,
+      session: session!,
+      replyLevel: replyLevel,
+    );
+  }
+
+  /// 拉取某条一级评论下的**楼中楼**（二级评论）。
+  ///
+  /// 平台不支持读回复列表（[PlatformAdapter.supportsCommentReplies]=false）
+  /// 时抛 `unsupportedPlatform`。多数平台楼中楼读取匿名可得，
+  /// [session] 可空。
+  Future<CommentPage> fetchCommentReplies(
+    UnifiedVideo video, {
+    required String parentCommentId,
+    int page = 1,
+    int pageSize = 20,
+    PlatformSession? session,
+  }) async {
+    final adapter = _registry.byId(video.platformId);
+    if (adapter == null || !adapter.supportsCommentReplies) {
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持查看楼中楼回复。',
+        technicalMessage:
+            'No sub-reply support for ${video.platformId}',
+        platformId: video.platformId,
+      );
+    }
+    return adapter.fetchCommentReplies(
+      video.platformVideoId,
+      parentCommentId: parentCommentId,
+      page: page,
+      pageSize: pageSize,
+      session: session,
+    );
+  }
+
+  /// 该平台是否支持楼中楼读取（评论面板决定"展开 N 条回复"是否出现）。
+  bool supportsCommentRepliesFor(String platformId) {
+    final adapter = _registry.byId(platformId);
+    return adapter?.supportsCommentReplies ?? false;
+  }
+
+  /// 上报**云端**播放进度（跨设备续播）。
+  ///
+  /// 参数直接收平台标识，不收整个 UnifiedVideo：播放进度每秒都在回调，
+  /// 为它重建/传一个完整视频实体是没有必要的耦合。
+  ///
+  /// 这是旁路：调用方（播放进度落盘点）必须 catch 后降级——本地
+  /// `VideoProgressStore` 才是权威，云端失败不能影响本机进度。
+  /// 未登录抛 `loginRequired`；平台不支持抛 `unsupportedPlatform`。
+  Future<void> reportPlaybackProgress(
+    String platformId, {
+    required String platformVideoId,
+    required Duration position,
+    required Duration duration,
+    required PlatformSession session,
+  }) async {
+    final adapter = _registry.byId(platformId);
+    if (adapter == null || !adapter.supportsCloudProgress) {
+      // 不静默返回——那等于"假装上报过了"。调用方按异常降级即可。
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持云端播放进度。',
+        technicalMessage: 'No cloud progress support for $platformId',
+        platformId: platformId,
+      );
+    }
+    await adapter.reportPlaybackProgress(
+      platformVideoId: platformVideoId,
+      position: position,
+      duration: duration,
+      session: session,
+    );
+  }
+
+  /// 该平台是否支持云端播放进度上报。
+  bool supportsCloudProgressFor(String platformId) {
+    final adapter = _registry.byId(platformId);
+    return adapter?.supportsCloudProgress ?? false;
+  }
+
+  /// 发表评论 / 回复评论。
+  ///
+  /// [replyToCommentId] 为 null 时发**顶层评论**，非 null 时回复到该评论。
+  /// 返回新评论 ID（平台不回传时为 null）。
+  Future<String?> replyComment(
+    UnifiedVideo video, {
+    required String message,
+    PlatformSession? session,
+    String? replyToCommentId,
+    String? rootCommentId,
+  }) async {
+    final adapter = _requireInteractionAdapter(video, session, '评论');
+    if (!adapter.supportsCommentReply) {
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持发表评论。',
+        technicalMessage: 'Adapter ${video.platformId} '
+            'does not implement replyComment',
+        platformId: video.platformId,
+      );
+    }
+    return adapter.replyComment(
+      video.platformVideoId,
+      message: message,
+      session: session!,
+      replyToCommentId: replyToCommentId,
+      rootCommentId: rootCommentId,
     );
   }
 

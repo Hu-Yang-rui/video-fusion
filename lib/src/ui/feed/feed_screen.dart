@@ -1014,7 +1014,11 @@ class _ActionRail extends StatelessWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => CommentSheet(controller: interaction),
+      // onOpenLogin：评论面板里未登录点"登录"的引导入口
+      builder: (_) => CommentSheet(
+        controller: interaction,
+        onOpenLogin: onOpenLogin,
+      ),
     );
   }
 

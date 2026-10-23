@@ -35,6 +35,7 @@
 ///  - 与竖滑流的差异：这里支持完整播放、进度恢复、清晰度、全屏
 library;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -178,7 +179,13 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
   }
 
   Future<void> _doResolveAndLoad() async {
+    debugPrint('[detail] resolve start: ${widget.video.id}');
     final outcome = await widget.service.resolvePlayback(widget.video);
+    debugPrint(
+      '[detail] resolve done: ok=${outcome.ok} '
+      'source=${outcome.source?.runtimeType} '
+      'error=${outcome.error?.technicalMessage}',
+    );
 
     if (!mounted) return;
 
@@ -787,7 +794,11 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => CommentSheet(controller: ctrl),
+      // onOpenLogin：评论面板里"未登录"时的登录引导入口
+      builder: (_) => CommentSheet(
+        controller: ctrl,
+        onOpenLogin: widget.onOpenLogin,
+      ),
     );
   }
 

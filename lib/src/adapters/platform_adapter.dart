@@ -518,6 +518,29 @@ abstract class PlatformAdapter {
     );
   }
 
+  /// 平台是否提供**云端**观看历史。
+  ///
+  /// 与本地 `VideoProgressStore` 是两回事：那个只记录本设备的播放位置，
+  /// 不能冒充平台账号的历史记录。
+  bool get supportsCloudHistory => false;
+
+  /// 拉取账号的云端观看历史（分页）。
+  ///
+  /// 不支持时抛 `unsupportedPlatform`；未登录抛 `loginRequired`。
+  Future<SavedVideoPage> fetchHistoryVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+    int cursor = 0,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持云端观看历史。',
+      technicalMessage: 'Adapter $id does not implement fetchHistoryVideos',
+      platformId: id,
+    );
+  }
+
   /// 关注 / 取关 UP 主。
   ///
   /// [targetMid] 为 UP 主的数字用户 ID 字符串。不支持时抛
@@ -675,8 +698,12 @@ abstract class PlatformAdapter {
 
   /// 给评论点赞 / 取消点赞。
   ///
-  /// [commentId] 是平台评论 ID（B站 `rpid`）。
+  /// [commentId] 是平台评论 ID（B站 `rpid`、抖音 `cid`）。
   /// [platformVideoId] 用于定位评论所属的视频（B站接口要求 `oid`）。
+  /// [replyLevel] 是**被点赞评论自己的层级**（抖音 `level` 字段）：
+  /// 抖音的 `comment/digg` 要原样回传该值（bundle s86.js 调用点直接
+  /// 解构 `level:r` 转发），楼中楼里的二级评论与一级评论的 level 不同。
+  /// 没有该概念的平台（B站）忽略此参数。
   ///
   /// 未登录必须抛 `loginRequired`，不得静默失败。
   Future<InteractionResult> setCommentLike(
@@ -684,6 +711,7 @@ abstract class PlatformAdapter {
     required String commentId,
     required bool like,
     required PlatformSession session,
+    int? replyLevel,
   }) {
     throw FusionException(
       code: FusionErrorCode.unsupportedPlatform,
@@ -696,10 +724,74 @@ abstract class PlatformAdapter {
   /// 是否支持回复评论。
   bool get supportsCommentReply => false;
 
+  /// 是否支持读取**楼中楼**（某条评论下的二级评论）。
+  ///
+  /// 与 [supportsCommentReply] 分开：能回复到评论下 ≠ 能把那条评论的
+  /// 二级评论列出来。多数平台一级评论列表**不内联**二级评论
+  /// （抖音实测 `reply_comment_total=2` 但 `reply_comment` 为空数组），
+  /// 所以"展开 N 条回复"必须单独一次请求。
+  bool get supportsCommentReplies => false;
+
+  /// 拉取某条评论下的二级评论（分页）。
+  ///
+  /// [parentCommentId] 是**根评论** id（楼中楼归属的那条一级评论）。
+  /// 未登录时二级评论通常也能读（平台策略不同），因此 [session] 可空；
+  /// 但 `isLikedByMe` 这类登录态字段会退化为 false。
+  ///
+  /// 不支持时抛 `unsupportedPlatform`，**不返回空列表**——
+  /// 那会把"能力不存在"伪装成"这条评论没有回复"。
+  Future<CommentPage> fetchCommentReplies(
+    String platformVideoId, {
+    required String parentCommentId,
+    int page = 1,
+    int pageSize = 20,
+    PlatformSession? session,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持查看楼中楼回复。',
+      technicalMessage: 'Adapter $id does not implement fetchCommentReplies',
+      platformId: id,
+    );
+  }
+
+  /// 平台是否提供**云端播放进度上报**。
+  ///
+  /// 与本地 `VideoProgressStore` 是两回事：那个只记本设备的位置。
+  bool get supportsCloudProgress => false;
+
+  /// 把本次播放位置上报给平台账号（跨设备续播用）。
+  ///
+  /// 语义约束：
+  ///  - 这是**旁路**操作。失败不得影响本地进度落盘，调用方必须
+  ///    catch 后降级（本地进度是权威，云端是尽力而为）。
+  ///  - 未登录抛 `loginRequired`；平台不支持抛 `unsupportedPlatform`。
+  ///  - **不做乐观成功**：平台回非 0 码时如实抛错。
+  Future<void> reportPlaybackProgress({
+    required String platformVideoId,
+    required Duration position,
+    required Duration duration,
+    required PlatformSession session,
+    int? partNumber,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持云端播放进度。',
+      technicalMessage: 'Adapter $id does not implement reportPlaybackProgress',
+      platformId: id,
+    );
+  }
+
   /// 回复一条评论（发一条新评论，或回复到某条评论下）。
   ///
   /// [replyToCommentId] 为 null 表示发**顶层评论**；非 null 表示回复
   /// 到该评论下（B站二级评论）。
+  ///
+  /// [rootCommentId]：**回复二级评论**时才传——它是那条二级评论所属的
+  /// 根评论 id。实测（B站 `reply/add`）回复二级评论必须同时带
+  /// `root`（根）与 `parent`（被回复的那条二级评论）两个不同的值，
+  /// 只带一个会 `-400 参数错误`。回复顶层时二者相同，可不传
+  /// [rootCommentId]（适配器把 parent 也当 root）。
   ///
   /// 返回新评论的 ID（平台不给时返回 null）。
   ///
@@ -709,6 +801,7 @@ abstract class PlatformAdapter {
     required String message,
     required PlatformSession session,
     String? replyToCommentId,
+    String? rootCommentId,
   }) {
     throw FusionException(
       code: FusionErrorCode.unsupportedPlatform,

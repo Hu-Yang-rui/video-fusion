@@ -841,9 +841,14 @@ class CommentSheet extends StatefulWidget {
   const CommentSheet({
     super.key,
     required this.controller,
+    this.onOpenLogin,
   });
 
   final InteractionController controller;
+
+  /// 未登录点"登录"时的跳转入口（详情页/推荐流各自有登录页）。
+  /// 为 null 时仅显示提示文案，不放死按钮。
+  final VoidCallback? onOpenLogin;
 
   @override
   State<CommentSheet> createState() => _CommentSheetState();
@@ -861,11 +866,76 @@ class _CommentSheetState extends State<CommentSheet> {
   //  - ListView 直接用 sheetScroll
   //  - 触底加载改由 NotificationListener<ScrollNotification> 驱动
 
+  /// 发表/回复输入框。
+  final TextEditingController _editor = TextEditingController();
+
+  /// 输入框焦点：点"回复"时把光标送进去。
+  final FocusNode _editorFocus = FocusNode();
+
+  /// 当前回复目标（null = 发顶层评论）。
+  VideoComment? _replyTo;
+
   @override
   void initState() {
     super.initState();
     if (!widget.controller.commentsLoadedOnce) {
       widget.controller.loadComments();
+    }
+  }
+
+  @override
+  void dispose() {
+    _editor.dispose();
+    _editorFocus.dispose();
+    super.dispose();
+  }
+
+  void _selectReplyTarget(VideoComment c) {
+    setState(() => _replyTo = c);
+    _editorFocus.requestFocus();
+  }
+
+  void _cancelReply() {
+    setState(() => _replyTo = null);
+  }
+
+  Future<void> _send() async {
+    final text = _editor.text;
+    final ctrl = widget.controller;
+
+    // 未登录：让控制器记下"请先登录…"（postComment 本地拦截，不发请求），
+    // 原样回显并**保留草稿**，同时弹出登录引导（若有入口）。
+    if (!ctrl.isLoggedIn) {
+      await ctrl.postComment(text);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(ctrl.lastMessage ?? '请先登录平台账号。'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      widget.onOpenLogin?.call();
+      return;
+    }
+
+    if (text.trim().isEmpty) return;
+    final target = _replyTo;
+    // 先清草稿再 await：发送成功后 loadComments(refresh) 会重建列表，
+    // 若此时输入框还留着旧文本，用户会以为"发了两条"。
+    _editor.clear();
+    setState(() => _replyTo = null);
+
+    // 失败信息单独用 SnackBar 呈现，并**恢复草稿**——
+    // 评论被频控/敏感词拒绝时，用户不应该重打一遍。
+    final before = ctrl.lastMessage;
+    await ctrl.postComment(text, replyToCommentId: target?.id);
+    final after = ctrl.lastMessage;
+    if (!mounted) return;
+    if (after != null && after != before && !after.startsWith('已发表')) {
+      if (_editor.text.trim().isEmpty) _editor.text = text;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(after), duration: const Duration(seconds: 3)),
+      );
     }
   }
 
@@ -953,6 +1023,26 @@ class _CommentSheetState extends State<CommentSheet> {
                   Expanded(
                     child: _buildBody(c, ctrl, sheetScroll),
                   ),
+
+                  // 发表 / 回复输入区：只在平台真实支持发评论时渲染
+                  // （capabilities.commentReply）。不支持时整段不出现，
+                  // 不放点了必然失败的输入框。
+                  if (ctrl.capabilities.commentReply) ...[
+                    const AppleDivider(indent: 0),
+                    if (_replyTo != null)
+                      _ReplyTargetBar(
+                        comment: _replyTo!,
+                        onCancel: _cancelReply,
+                      ),
+                    _CommentComposer(
+                      controller: _editor,
+                      focusNode: _editorFocus,
+                      posting: ctrl.postingComment,
+                      isLoggedIn: ctrl.isLoggedIn,
+                      replyTarget: _replyTo,
+                      onSend: _send,
+                    ),
+                  ],
                 ],
               );
             },
@@ -1074,7 +1164,7 @@ class _CommentSheetState extends State<CommentSheet> {
           final comment = ctrl.comments[index];
           // 稳定的 Key：翻页追加时 Flutter 能复用已构建的 element，
           // 而不是按位置错配导致整屏重建。
-          return _CommentTile(
+          final tile = _CommentTile(
             key: ValueKey<String>(comment.id),
             comment: comment,
             translation: ctrl.translationOf(comment.id),
@@ -1082,6 +1172,37 @@ class _CommentSheetState extends State<CommentSheet> {
             onTranslate: ctrl.supportsTranslation
                 ? () => ctrl.translateComment(comment.id)
                 : null,
+            // 评论点赞 / 回复入口：平台不支持时传 null，整颗不渲染。
+            canLike: ctrl.capabilities.commentLike,
+            likePending: ctrl.commentLikePending(comment.id),
+            onLike: ctrl.capabilities.commentLike
+                ? () => ctrl.toggleCommentLike(comment.id)
+                : null,
+            canReply: ctrl.capabilities.commentReply,
+            onReply: ctrl.capabilities.commentReply
+                ? () => _selectReplyTarget(comment)
+                : null,
+          );
+
+          // 楼中楼：只有平台支持读回复、且这条评论确实有回复时才出现入口。
+          final hasReplies = comment.replyCount != null &&
+              comment.replyCount! > 0 &&
+              ctrl.supportsSubComments;
+          if (!hasReplies) return tile;
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              tile,
+              _SubCommentsArea(
+                rootId: comment.id,
+                total: comment.replyCount!,
+                ctrl: ctrl,
+                onReply: ctrl.capabilities.commentReply
+                    ? _selectReplyTarget
+                    : null,
+              ),
+            ],
           );
         },
       ),
@@ -1110,6 +1231,11 @@ class _CommentTile extends StatelessWidget {
     this.translation,
     this.supportsTranslation = false,
     this.onTranslate,
+    this.canLike = false,
+    this.likePending = false,
+    this.onLike,
+    this.canReply = false,
+    this.onReply,
   }) : _avatarInitial = _initialOf(comment.authorName);
 
   final VideoComment comment;
@@ -1122,6 +1248,21 @@ class _CommentTile extends StatelessWidget {
 
   /// 点击翻译 / 展开收起。
   final VoidCallback? onTranslate;
+
+  /// 平台是否支持评论点赞（false 时整颗按钮不渲染）。
+  final bool canLike;
+
+  /// 该条点赞请求在飞（禁用按钮，不显示假的状态变化）。
+  final bool likePending;
+
+  /// 点赞 / 取消点赞。
+  final VoidCallback? onLike;
+
+  /// 平台是否支持回复（false 时不显示"回复"入口）。
+  final bool canReply;
+
+  /// 点击"回复"：由上层把目标评论填进输入框。
+  final VoidCallback? onReply;
 
   /// 昵称首字（构造时计算一次）。
   final String _avatarInitial;
@@ -1269,18 +1410,44 @@ class _CommentTile extends StatelessWidget {
                         ),
                       ),
                     ],
-                    if (comment.likeCount != null && comment.likeCount! > 0) ...[
+                    if (comment.likeCount != null || canLike) ...[
                       const SizedBox(width: AppleSpace.md),
-                      Icon(
-                        Icons.thumb_up_outlined,
-                        size: 11,
-                        color: c.tertiaryLabel,
-                      ),
-                      const SizedBox(width: 2),
-                      Text(
-                        '${comment.likeCount}',
-                        style: AppleType.caption2.copyWith(
-                          color: c.tertiaryLabel,
+                      // 点赞：平台支持时是可点按钮；点亮态来自平台下发的
+                      // isLikedByMe（我赞过），不是本地猜的。
+                      GestureDetector(
+                        onTap: (canLike && !likePending) ? onLike : null,
+                        behavior: HitTestBehavior.opaque,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 4,
+                            horizontal: 2,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                comment.isLikedByMe
+                                    ? Icons.thumb_up_rounded
+                                    : Icons.thumb_up_outlined,
+                                size: 11,
+                                color: comment.isLikedByMe
+                                    ? c.blue
+                                    : c.tertiaryLabel,
+                              ),
+                              if (comment.likeCount != null &&
+                                  comment.likeCount! > 0) ...[
+                                const SizedBox(width: 2),
+                                Text(
+                                  '${comment.likeCount}',
+                                  style: AppleType.caption2.copyWith(
+                                    color: comment.isLikedByMe
+                                        ? c.blue
+                                        : c.tertiaryLabel,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
                         ),
                       ),
                     ],
@@ -1291,6 +1458,27 @@ class _CommentTile extends StatelessWidget {
                         '${comment.replyCount} 条回复',
                         style: AppleType.caption2.copyWith(
                           color: c.tertiaryLabel,
+                        ),
+                      ),
+                    ],
+                    // 回复入口：与"翻译"同级的小字链接，支持时才渲染。
+                    if (canReply && onReply != null) ...[
+                      const SizedBox(width: AppleSpace.md),
+                      GestureDetector(
+                        onTap: onReply,
+                        behavior: HitTestBehavior.opaque,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 4,
+                            horizontal: 2,
+                          ),
+                          child: Text(
+                            '回复',
+                            style: AppleType.caption2.copyWith(
+                              color: c.blue,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
                         ),
                       ),
                     ],
@@ -1496,6 +1684,395 @@ class _IpLocationNotice extends StatelessWidget {
                 height: 1.4,
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 回复目标提示条："回复 @某某" + 取消。
+class _ReplyTargetBar extends StatelessWidget {
+  const _ReplyTargetBar({required this.comment, required this.onCancel});
+
+  final VideoComment comment;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppleSpace.lg,
+        AppleSpace.sm,
+        AppleSpace.sm,
+        0,
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.reply_rounded, size: 13, color: c.secondaryLabel),
+          const SizedBox(width: AppleSpace.xs),
+          Expanded(
+            child: Text(
+              '回复 @${comment.authorName}：${comment.message}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppleType.caption1.copyWith(color: c.secondaryLabel),
+            ),
+          ),
+          IconButton(
+            onPressed: onCancel,
+            icon: Icon(Icons.close_rounded, size: 15, color: c.tertiaryLabel),
+            tooltip: '取消回复',
+            visualDensity: VisualDensity.compact,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 评论输入区（发表顶层评论 / 回复某条）。
+///
+/// 只在平台支持发评论（capabilities.commentReply）时渲染——
+/// 红果这类没有评论概念的平台根本不显示这一段。
+class _CommentComposer extends StatefulWidget {
+  const _CommentComposer({
+    required this.controller,
+    required this.posting,
+    required this.isLoggedIn,
+    required this.onSend,
+    this.focusNode,
+    this.replyTarget,
+  });
+
+  final TextEditingController controller;
+  final FocusNode? focusNode;
+  final bool posting;
+  final bool isLoggedIn;
+  final VoidCallback onSend;
+
+  /// 当前回复目标（null = 发顶层评论）。仅用于占位文案。
+  final VideoComment? replyTarget;
+
+  @override
+  State<_CommentComposer> createState() => _CommentComposerState();
+}
+
+class _CommentComposerState extends State<_CommentComposer> {
+  @override
+  void initState() {
+    super.initState();
+    // 文本变化要驱动"发送"按钮的启用态。不监听的话，
+    // 输入后按钮仍然是灰的（只有整个 sheet 重建时才刷新）。
+    widget.controller.addListener(_onTextChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _CommentComposer old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.controller, widget.controller)) {
+      old.controller.removeListener(_onTextChanged);
+      widget.controller.addListener(_onTextChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onTextChanged);
+    super.dispose();
+  }
+
+  void _onTextChanged() => setState(() {});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    final posting = widget.posting;
+    final isLoggedIn = widget.isLoggedIn;
+    final replyTarget = widget.replyTarget;
+    final onSend = widget.onSend;
+    final controller = widget.controller;
+    final hasText = controller.text.trim().isNotEmpty;
+
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          AppleSpace.lg,
+          AppleSpace.sm,
+          AppleSpace.lg,
+          AppleSpace.sm,
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: controller,
+                focusNode: widget.focusNode,
+                enabled: !posting,
+                minLines: 1,
+                maxLines: 3,
+                textInputAction: TextInputAction.send,
+                onSubmitted: (_) => onSend(),
+                decoration: InputDecoration(
+                  hintText: isLoggedIn
+                      ? (replyTarget == null
+                          ? '发条评论…'
+                          : '回复 @${replyTarget.authorName}…')
+                      : '登录后才能发评论',
+                  hintStyle:
+                      AppleType.footnote.copyWith(color: c.tertiaryLabel),
+                  filled: true,
+                  fillColor: c.fill,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: AppleSpace.md,
+                    vertical: AppleSpace.sm,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppleRadius.md),
+                    borderSide: BorderSide.none,
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppleRadius.md),
+                    borderSide: BorderSide.none,
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppleRadius.md),
+                    borderSide: BorderSide(color: c.blue, width: 1.5),
+                  ),
+                ),
+                style: AppleType.footnote.copyWith(color: c.label),
+              ),
+            ),
+            const SizedBox(width: AppleSpace.sm),
+            // 发送按钮：未登录时**可点**（触发登录引导），
+            // 已登录无内容时禁用；发送中显示转圈防重复提交。
+            if (posting)
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              FilledButton(
+                onPressed: hasText || !isLoggedIn ? onSend : null,
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppleSpace.lg,
+                    vertical: AppleSpace.sm,
+                  ),
+                ),
+                child: Text(isLoggedIn ? '发送' : '登录'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+/// 楼中楼展开区：一条一级评论下方的"展开 N 条回复"按钮 + 展开后的子评论。
+///
+/// 只在平台支持读回复（supportsSubComments）且该评论确实有回复时挂载。
+class _SubCommentsArea extends StatelessWidget {
+  const _SubCommentsArea({
+    required this.rootId,
+    required this.total,
+    required this.ctrl,
+    this.onReply,
+  });
+
+  final String rootId;
+  final int total;
+  final InteractionController ctrl;
+  final void Function(VideoComment)? onReply;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    final loaded = ctrl.subCommentsLoadedOnce(rootId);
+    final loading = ctrl.subCommentsLoading(rootId);
+    final err = ctrl.subCommentsError(rootId);
+    final subs = ctrl.subCommentsOf(rootId);
+
+    // 未展开：给一个"展开 N 条回复"的文字按钮（首次点击才发请求）。
+    if (!loaded) {
+      return Padding(
+        padding: const EdgeInsets.only(
+          left: 60,
+          bottom: AppleSpace.md,
+          right: AppleSpace.lg,
+        ),
+        child: loading
+            ? Row(
+                children: [
+                  const SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 1.6),
+                  ),
+                  const SizedBox(width: 6),
+                  Text('加载回复…',
+                      style: AppleType.caption2.copyWith(color: c.tertiaryLabel)),
+                ],
+              )
+            : GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => ctrl.loadSubComments(rootId),
+                child: Text(
+                  '展开 $total 条回复',
+                  style: AppleType.caption1.copyWith(
+                    color: c.blue,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+      );
+    }
+
+    // 已展开：错误时给"重试"，否则渲染子评论列表 + 加载更多。
+    if (err != null && subs.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(left: 60, bottom: AppleSpace.md),
+        child: Row(
+          children: [
+            Flexible(
+              child: Text(
+                err.userMessage,
+                style: AppleType.caption2.copyWith(color: c.orange),
+              ),
+            ),
+            const SizedBox(width: AppleSpace.sm),
+            GestureDetector(
+              onTap: () => ctrl.loadSubComments(rootId, refresh: true),
+              child: Text('重试',
+                  style: AppleType.caption2.copyWith(
+                    color: c.blue,
+                    fontWeight: FontWeight.w600,
+                  )),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final s in subs)
+          _SubCommentRow(
+            key: ValueKey<String>(s.id),
+            comment: s,
+            pending: ctrl.commentLikePending(s.id),
+            canLike: ctrl.capabilities.commentLike,
+            onLike:
+                ctrl.capabilities.commentLike ? () => ctrl.toggleCommentLike(s.id) : null,
+            canReply: ctrl.capabilities.commentReply && onReply != null,
+            onReply: onReply == null ? null : () => onReply!(s),
+          ),
+        if (ctrl.subCommentsLoading(rootId))
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: AppleSpace.sm, horizontal: 60),
+            child: SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 1.6),
+            ),
+          )
+        else if (ctrl.subCommentsHasMore(rootId))
+          Padding(
+            padding: const EdgeInsets.only(left: 60, bottom: AppleSpace.md),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => ctrl.loadMoreSubComments(rootId),
+              child: Text('查看更多回复',
+                  style: AppleType.caption2.copyWith(color: c.blue)),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// 单条二级评论（楼中楼）：紧凑版，左缩进对齐"展开"入口。
+class _SubCommentRow extends StatelessWidget {
+  const _SubCommentRow({
+    super.key,
+    required this.comment,
+    required this.pending,
+    required this.canLike,
+    this.onLike,
+    required this.canReply,
+    this.onReply,
+  });
+
+  final VideoComment comment;
+  final bool pending;
+  final bool canLike;
+  final VoidCallback? onLike;
+  final bool canReply;
+  final VoidCallback? onReply;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(
+        left: 60,
+        right: AppleSpace.lg,
+        bottom: AppleSpace.sm,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: '${comment.authorName}: ',
+                  style: AppleType.caption1.copyWith(
+                    color: c.secondaryLabel,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                TextSpan(
+                  text: comment.message,
+                  style: AppleType.footnote.copyWith(color: c.label, height: 1.4),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 2),
+          Row(
+            children: [
+              if (comment.ipLocation != null)
+                Text(comment.ipLocation!,
+                    style: AppleType.caption2.copyWith(color: c.tertiaryLabel)),
+              if (canLike) ...[
+                const SizedBox(width: AppleSpace.md),
+                GestureDetector(
+                  onTap: pending ? null : onLike,
+                  behavior: HitTestBehavior.opaque,
+                  child: Icon(
+                    comment.isLikedByMe ? Icons.thumb_up_rounded : Icons.thumb_up_outlined,
+                    size: 12,
+                    color: comment.isLikedByMe ? c.blue : c.tertiaryLabel,
+                  ),
+                ),
+              ],
+              if (canReply) ...[
+                const SizedBox(width: AppleSpace.md),
+                GestureDetector(
+                  onTap: onReply,
+                  behavior: HitTestBehavior.opaque,
+                  child: Text('回复',
+                      style: AppleType.caption2.copyWith(
+                          color: c.blue, fontWeight: FontWeight.w600)),
+                ),
+              ],
+            ],
           ),
         ],
       ),

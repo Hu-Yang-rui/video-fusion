@@ -29,6 +29,26 @@ class MockAdapter implements PlatformAdapter {
       : _http = http,
         _logger = logger ?? appLogger;
 
+  /// mock 平台没有云端历史。
+  @override
+  bool get supportsCloudHistory => false;
+
+  /// mock 平台不实现云端历史：显式抛出，避免被误当成"空列表"。
+  @override
+  Future<SavedVideoPage> fetchHistoryVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+    int cursor = 0,
+  }) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持云端观看历史。',
+      technicalMessage: 'MockAdapter does not implement fetchHistoryVideos',
+      platformId: id,
+    );
+  }
+
   // ignore: unused_field
   final FusionHttpClient _http;
 
@@ -404,6 +424,7 @@ class MockAdapter implements PlatformAdapter {
     required String commentId,
     required bool like,
     required PlatformSession session,
+    int? replyLevel,
   }) =>
       throw FusionException(
         code: FusionErrorCode.unsupportedPlatform,
@@ -421,11 +442,50 @@ class MockAdapter implements PlatformAdapter {
     required String message,
     required PlatformSession session,
     String? replyToCommentId,
+    String? rootCommentId,
   }) =>
       throw FusionException(
         code: FusionErrorCode.unsupportedPlatform,
         userMessage: '该平台暂不支持回复评论。',
         technicalMessage: 'MockAdapter does not implement replyComment',
+        platformId: id,
+      );
+
+  // 楼中楼 / 云端进度：mock 一律如实不支持（抛错，不返回空列表）。
+  @override
+  bool get supportsCommentReplies => false;
+
+  @override
+  Future<CommentPage> fetchCommentReplies(
+    String platformVideoId, {
+    required String parentCommentId,
+    int page = 1,
+    int pageSize = 20,
+    PlatformSession? session,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持查看楼中楼回复。',
+        technicalMessage: 'MockAdapter does not implement fetchCommentReplies',
+        platformId: id,
+      );
+
+  @override
+  bool get supportsCloudProgress => false;
+
+  @override
+  Future<void> reportPlaybackProgress({
+    required String platformVideoId,
+    required Duration position,
+    required Duration duration,
+    required PlatformSession session,
+    int? partNumber,
+  }) =>
+      throw FusionException(
+        code: FusionErrorCode.unsupportedPlatform,
+        userMessage: '该平台暂不支持云端播放进度。',
+        technicalMessage:
+            'MockAdapter does not implement reportPlaybackProgress',
         platformId: id,
       );
 

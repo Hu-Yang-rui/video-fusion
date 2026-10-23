@@ -34,6 +34,7 @@ import '../../design/components/apple_layout.dart';
 import '../../models/unified_video.dart';
 import '../shell/app_shell.dart' show tabBarInsets;
 import 'favorites_screen.dart';
+import 'cloud_history_screen.dart';
 import 'history_screen.dart';
 import 'watch_later_screen.dart';
 
@@ -166,6 +167,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   bool get _hasAnySession => _sessions.isNotEmpty;
 
+  /// 支持云端历史的会话（当前：B 站 + 抖音）。
+  ///
+  /// 每个支持的账号各给一行入口；一个都没有时整段不渲染——
+  /// 不放点了没内容的死按钮。
+  List<PlatformSession> get _cloudHistorySessions => _sessions
+      .where((s) => widget.service.platformSupportsCloudHistory(s.platformId))
+      .toList();
+
+  Future<void> _openCloudHistory(PlatformSession session) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => CloudHistoryScreen(
+          service: widget.service,
+          session: session,
+          onOpenVideo: (v) {
+            Navigator.pop(context);
+            widget.onOpenVideo?.call(v);
+          },
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = AppleColors.of(context);
@@ -233,6 +257,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   showChevron: true,
                   onTap: _openHistory,
                 ),
+                // 云端历史：账号侧记录，跨设备同步。
+                // 与本机进度分开——两者数据源不同，混在一起会让人
+                // 以为换设备也能接着看。
+                // 每个支持该能力的账号各一行（B 站 / 抖音 数据不互通）。
+                for (final s in _cloudHistorySessions)
+                  AppleListRow(
+                    leadingIcon: Icons.cloud_outlined,
+                    leadingColor: c.blue,
+                    title: '云端历史 · ${_platformLabel(s.platformId)}',
+                    subtitle: '来自 ${s.displayName} 账号，跨设备同步',
+                    showChevron: true,
+                    onTap: () => _openCloudHistory(s),
+                  ),
                 // 消息入口：只在平台确实支持私信时出现（当前仅 B 站），
                 // 不支持时整行不渲染 —— 不放点了没内容的死按钮。
                 if (widget.service.imPlatformIds.isNotEmpty)

@@ -169,3 +169,11 @@ key.properties
 # 探针产物（含真实抓包数据：房间号、状态码、响应形态）
 # 由 tool/vf_dy_*.mjs 运行时生成，不入库。
 /tool/_dy_*.json
+
+# ── 探针脚本（含真实接口路径与参数）────────────────────────────
+# 按 AGENTS.md 的边界表：「接口路径、探针脚本」只在私有仓库。
+# 归档副本在 video-fusion-prompts 的 逆向分析/<平台>/探针脚本/。
+# 文件保留在本地（测试与代码会引用），只是不进公开仓库。
+/tool/probe_*.mjs
+/tool/live/bili_history_upaction_probe.dart
+/tool/live/comment_replies_probe.dart
