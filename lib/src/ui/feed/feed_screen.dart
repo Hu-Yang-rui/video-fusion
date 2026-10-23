@@ -26,6 +26,7 @@ import '../../core/video_service.dart';
 import '../../design/apple_tokens.dart';
 import '../../design/components/video_widgets.dart';
 
+import '../../models/feed.dart' as feed_models;
 import '../../models/unified_video.dart';
 import '../../player/player_controller.dart';
 import '../interaction/interaction_controller.dart';
@@ -69,6 +70,7 @@ class FeedScreen extends StatefulWidget {
     required this.onOpenLogin,
     required this.onOpenOriginal,
     required this.onOpenLinkIntake,
+    this.activeSource,
     this.loggedInLabel,
     this.onOpenDetail,
   });
@@ -91,6 +93,14 @@ class FeedScreen extends StatefulWidget {
   final VoidCallback onOpenLogin;
   final void Function(UnifiedVideo) onOpenOriginal;
   final VoidCallback onOpenLinkIntake;
+
+  /// 当前正在播放的内容来源（用于顶栏显示来源名并可点击切换）。
+  ///
+  /// 之前顶栏把来源选择器拿掉了，导致竖滑页**只能看启动时选的那一个平台**
+  /// （默认 B站），用户以为"不支持抖音/红果"。能力一直都在——
+  /// 三个平台都声明了 feedSources，只是入口被删了。
+  final feed_models.FeedSource? activeSource;
+
   final String? loggedInLabel;
 
   /// 打开长视频详情页（用于时长较长的内容）。
@@ -386,6 +396,8 @@ class _FeedScreenState extends State<FeedScreen>
               child: _TopBar(
                 loggedInLabel: widget.loggedInLabel,
                 onOpenLogin: widget.onOpenLogin,
+                activeSource: widget.activeSource,
+                onSwitchSource: widget.onOpenSourcePicker,
               ),
             ),
           ),
@@ -617,10 +629,14 @@ class _TopBar extends StatelessWidget {
   const _TopBar({
     required this.loggedInLabel,
     required this.onOpenLogin,
+    required this.onSwitchSource,
+    this.activeSource,
   });
 
   final String? loggedInLabel;
   final VoidCallback onOpenLogin;
+  final VoidCallback onSwitchSource;
+  final feed_models.FeedSource? activeSource;
 
   @override
   Widget build(BuildContext context) {
@@ -642,14 +658,24 @@ class _TopBar extends StatelessWidget {
           ],
         ),
       ),
-      // 顶栏只保留"账号"这一项用户功能。
+      // 左侧：当前内容来源（可点切换）；右侧：账号。
       //
-      // 历史版本这里还有「内容来源」下拉与「链接接入」按钮：
-      //  - 内容来源是平台选择器，属于工具语义，已移到「发现」页的来源分段；
-      //  - 链接接入属于外部内容导入，已移到「发现」页工具栏。
-      // 视频画面上不再叠加任何平台选择/工具入口。
+      // # 为什么把来源切换放回来
+      //
+      // 上一版把「内容来源」从顶栏删掉了，理由是"属于工具语义、已移到发现页"。
+      // 但竖滑页是**默认首页**：用户一进来就在刷，不会先去发现页选平台，
+      // 结果只能刷到启动时默认的那一个源（B站），看起来像"只支持 B站"。
+      //
+      // 三个平台都声明了 feedSources（抖音推荐/热榜、红果首页/分类、
+      // B站推荐/热门/排行），能力一直在，缺的只是这个入口。
+      // 做成一个轻量的胶囊标签：不抢画面，但一眼能看到"现在在刷哪个平台"。
       child: Row(
         children: [
+          if (activeSource != null)
+            Flexible(child: _SourcePill(
+              label: activeSource!.label,
+              onTap: onSwitchSource,
+            )),
           const Spacer(),
           _GlassIconButton(
             icon: loggedInLabel == null
@@ -659,6 +685,54 @@ class _TopBar extends StatelessWidget {
             highlighted: loggedInLabel != null,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 顶栏的内容来源胶囊：显示当前来源名，点击打开切换面板。
+class _SourcePill extends StatelessWidget {
+  const _SourcePill({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppleSpace.md,
+          vertical: 6,
+        ),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.35),
+          borderRadius: BorderRadius.circular(AppleRadius.pill),
+          border: Border.all(color: Colors.white24, width: 0.5),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppleType.footnoteEmphasized.copyWith(
+                  color: Colors.white,
+                ),
+              ),
+            ),
+            const SizedBox(width: 3),
+            const Icon(
+              Icons.expand_more_rounded,
+              size: 15,
+              color: Colors.white70,
+            ),
+          ],
+        ),
       ),
     );
   }

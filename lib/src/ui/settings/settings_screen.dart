@@ -19,10 +19,12 @@ import '../../core/video_progress_store.dart';
 import '../../core/video_service.dart';
 import '../../core/qr_login.dart';
 import '../../design/apple_tokens.dart';
+import '../../design/apple_theme.dart';
 import '../../design/components/apple_controls.dart';
 import '../../design/components/apple_layout.dart';
 import '../mobile/qr_login_page.dart';
 import 'cookie_sheet.dart';
+import 'sms_login_sheet.dart';
 
 /// 设置页。
 class SettingsScreen extends StatefulWidget {
@@ -45,7 +47,22 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
+/// 应用内登录方式。
+enum _LoginMethod { qr, sms }
+
 class _SettingsScreenState extends State<SettingsScreen> {
+  /// 应用版本号（与 `pubspec.yaml` 的 `version:` 保持一致）。
+  ///
+  /// # 为什么是常量而不是运行时读取
+  ///
+  /// 运行时读真实 versionName 需要 `package_info_plus` 依赖。这里用一个
+  /// 常量 + 测试守护（`settings_version_test` 断言它与 pubspec 一致），
+  /// 避免为一个字符串引入插件。
+  ///
+  /// 之前这个值是硬编码的 `'1.0.0'`，而实际发布 0.9.0——
+  /// 用户报问题时说的版本号是错的，排查方向直接被带偏。
+  static const String _appVersion = '0.10.0';
+
   final Map<String, PlatformSession> _sessions = {};
   bool _loadingSessions = true;
 
@@ -328,8 +345,137 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  /// 连接账号。
+  ///
+  /// # 为什么先问「扫码还是短信」（实测 2026-10-23）
+  ///
+  /// 抖音的扫码登录被 4031 挡住（设备自证链路的死锁，见
+  /// `web_signer.sendSmsCode` 的说明），而短信登录可用。
+  ///
+  /// 但扫码不是"已废弃"——它依赖平台策略，可能某天恢复。
+  /// 所以不硬编码走哪条，而是**两个都给**，让用户选。
+  /// 只支持扫码的平台不弹选择，直接进扫码页。
   Future<void> _connect(PlatformAdapter adapter) async {
-    final login = adapter as QrLoginCapable;
+    final qrCapable = adapter is QrLoginCapable ? adapter : null;
+    final smsCapable = adapter is SmsLoginCapable ? adapter : null;
+
+    if (qrCapable == null && smsCapable == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${adapter.displayName} 不支持应用内登录，请用导入。')),
+        );
+      }
+      return;
+    }
+
+    // 只有一条路时不弹选择
+    final method = (qrCapable != null && smsCapable != null)
+        ? await _pickLoginMethod(adapter.displayName)
+        : (smsCapable != null ? _LoginMethod.sms : _LoginMethod.qr);
+    if (method == null || !mounted) return;
+
+    final ok = method == _LoginMethod.sms
+        ? await _connectViaSms(adapter, smsCapable as SmsLoginCapable)
+        : await _connectViaQr(adapter, qrCapable as QrLoginCapable);
+
+    if (ok == true) {
+      await _loadSessions();
+      widget.onSessionChanged?.call();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已连接 ${adapter.displayName}')),
+        );
+      }
+    }
+  }
+
+  /// 选择登录方式。
+  Future<_LoginMethod?> _pickLoginMethod(String platformName) {
+    return showModalBottomSheet<_LoginMethod>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final c = AppleColors.of(ctx);
+        return Container(
+          margin: const EdgeInsets.all(AppleSpace.md),
+          decoration: BoxDecoration(
+            color: c.background,
+            borderRadius: BorderRadius.circular(AppleRadius.lg),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(AppleSpace.lg),
+                  child: Text(
+                    '${platformName} · 选择登录方式',
+                    style: AppleType.headline.copyWith(color: c.label),
+                  ),
+                ),
+                ListTile(
+                  leading: Icon(Icons.sms_outlined, color: c.blue),
+                  title: const Text('短信验证码'),
+                  subtitle: const Text('输入手机号接收验证码'),
+                  onTap: () => Navigator.pop(ctx, _LoginMethod.sms),
+                ),
+                ListTile(
+                  leading: Icon(Icons.qr_code_rounded, color: c.blue),
+                  title: const Text('扫码登录'),
+                  subtitle: const Text('用手机 App 扫描二维码'),
+                  onTap: () => Navigator.pop(ctx, _LoginMethod.qr),
+                ),
+                const SizedBox(height: AppleSpace.sm),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// 短信登录。
+  Future<bool?> _connectViaSms(
+    PlatformAdapter adapter,
+    SmsLoginCapable capability,
+  ) async {
+    PlatformSession? pending;
+    final ok = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Theme(
+        data: AppleTheme.light(),
+        child: SmsLoginSheet(
+          platformName: adapter.displayName,
+          capability: capability,
+          onSucceeded: (r) {
+            // Cookie 由适配器在成功时快照带回
+            pending = PlatformSession(
+              platformId: adapter.id,
+              displayName: r.displayName?.isNotEmpty == true
+                  ? r.displayName!
+                  : '${adapter.displayName}用户',
+              userId: r.userId ?? '',
+              cookies: r.cookies,
+              loggedInAt: DateTime.now().toUtc().toIso8601String(),
+            );
+          },
+        ),
+      ),
+    );
+
+    if (ok != true || pending == null) return false;
+    await widget.vault.save(pending!);
+    return true;
+  }
+
+  /// 扫码登录（原有流程）。
+  Future<bool?> _connectViaQr(
+    PlatformAdapter adapter,
+    QrLoginCapable login,
+  ) async {
     final result = await Navigator.of(context).push<Object?>(
       MaterialPageRoute<Object?>(
         builder: (_) => QrLoginPage(
@@ -339,16 +485,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ),
     );
-
-    if (result != null) {
-      await _loadSessions();
-      widget.onSessionChanged?.call();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已连接 ${adapter.displayName}')),
-        );
-      }
-    }
+    return result != null;
   }
 
   Future<void> _disconnect(PlatformAdapter adapter) async {
@@ -600,7 +737,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
           leadingColor: c.gray,
           title: '视频融合',
           subtitle: '多平台视频聚合 · Apple 风格设计',
-          trailingText: '1.0.0',
+          // 版本号从构建信息读，不硬编码。
+          //
+          // 之前这里写死 '1.0.0'，而实际发布的是 0.9.0 —— 设置页显示的
+          // 版本和 APK 的真实 versionName 对不上，用户报问题时给了错版本。
+          trailingText: _appVersion,
         ),
         AppleListRow(
           leadingIcon: Icons.verified_user_outlined,

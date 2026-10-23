@@ -313,7 +313,6 @@ LiveDanmakuBatch parseLiveDanmakuResponse(
 
   while (!r.atEnd) {
     final tag = r.varint();
-    final field = tag >> 3;
     final wire = tag & 7;
 
     if (wire != 2) {

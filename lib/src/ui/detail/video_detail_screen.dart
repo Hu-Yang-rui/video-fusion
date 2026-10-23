@@ -46,7 +46,6 @@ import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
 import '../../core/video_service.dart';
 import '../../design/apple_tokens.dart';
-import '../../design/components/apple_controls.dart';
 import '../../design/components/video_widgets.dart';
 import '../../models/playback.dart';
 import '../../models/unified_video.dart';
@@ -719,15 +718,40 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
           const SizedBox(height: AppleSpace.lg),
 
           // ── 原平台入口 ──────────────────────────────
+          //
+          // 原来是个**全宽灰底大按钮**，视觉权重比评论入口还高——
+          // 但它是"离开本应用"的次要出口，不该是页面主操作。
+          // 现在降级为居中的一行小字链接，位置留在底部（需要时能找到）。
           Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: AppleSpace.pageInset,
             ),
-            child: AppleSecondaryButton(
-              label: '在原平台打开',
-              icon: Icons.open_in_new_rounded,
-              expand: true,
-              onPressed: () => widget.onOpenOriginal?.call(widget.video),
+            child: Center(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => widget.onOpenOriginal?.call(widget.video),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    vertical: AppleSpace.sm,
+                    horizontal: AppleSpace.md,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '在原平台打开',
+                        style: AppleType.footnote.copyWith(color: c.blue),
+                      ),
+                      const SizedBox(width: 3),
+                      Icon(
+                        Icons.open_in_new_rounded,
+                        size: 13,
+                        color: c.blue,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
           ),
         ],
@@ -977,12 +1001,19 @@ class _InteractionBar extends StatelessWidget {
     // 未登录时状态未知：文案显示"登录后可操作"，不显示"未点赞"
     final unknownHint = !state.known && !ctrl.isLoggedIn;
 
-    return Wrap(
-      spacing: AppleSpace.sm,
-      runSpacing: AppleSpace.sm,
-      children: [
-        if (caps.like)
-          _PillAction(
+    // # 为什么不再用 Wrap（真实观感问题）
+    //
+    // 原来所有动作塞进一个 Wrap，窄屏下自动折成两行：
+    //   点赞 / 收藏 / 投币
+    //   稍后再看 / 分享      ← 第二行左边挤着，右边空一大块
+    // 看起来像"排版没做完"。
+    //
+    // 现在拆成两层：
+    //  主操作（点赞/收藏/投币）→ 一行等宽铺满，是刷视频时高频用的
+    //  低频动作（稍后再看/分享）→ 右对齐小号文字，视觉权重明显更低
+    final primaryActions = <Widget>[
+      if (caps.like)
+        _PillAction(
             icon: state.liked
                 ? Icons.favorite_rounded
                 : Icons.favorite_border_rounded,
@@ -1026,22 +1057,42 @@ class _InteractionBar extends StatelessWidget {
             disabledReason: avail.reason.isEmpty ? null : avail.reason,
             onTap: () => ctrl.isLoggedIn ? _openCoin(context) : onOpenLogin(),
           ),
-        if (caps.watchLater)
-          _PillAction(
-            icon: state.watchLater
-                ? Icons.schedule_rounded
-                : Icons.schedule_outlined,
-            label: state.watchLater ? '已稍看' : '稍后再看',
-            active: state.watchLater,
-            activeColor: c.green,
-            busy: ctrl.watchLaterPending,
-            onTap: () =>
-                ctrl.isLoggedIn ? ctrl.toggleWatchLater() : onOpenLogin(),
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (primaryActions.isNotEmpty)
+          Row(
+            children: [
+              for (var i = 0; i < primaryActions.length; i++) ...[
+                if (i > 0) const SizedBox(width: AppleSpace.sm),
+                // 等宽铺满：有几个按钮就各占几分之一，不再参差不齐
+                Expanded(child: primaryActions[i]),
+              ],
+            ],
           ),
-        _PillAction(
-          icon: Icons.share_outlined,
-          label: '分享',
-          onTap: () => _share(context),
+        const SizedBox(height: AppleSpace.sm),
+        // 低频动作：右对齐的小号文字按钮，视觉权重明显低于主操作。
+        Row(
+          children: [
+            if (caps.watchLater)
+              _TextAction(
+                icon: state.watchLater
+                    ? Icons.schedule_rounded
+                    : Icons.schedule_outlined,
+                label: state.watchLater ? '已加入稍后再看' : '稍后再看',
+                active: state.watchLater,
+                onTap: () =>
+                    ctrl.isLoggedIn ? ctrl.toggleWatchLater() : onOpenLogin(),
+              ),
+            const Spacer(),
+            _TextAction(
+              icon: Icons.share_outlined,
+              label: '分享',
+              onTap: () => _share(context),
+            ),
+          ],
         ),
       ],
     );
@@ -1309,6 +1360,49 @@ class _PlayerPillButton extends StatelessWidget {
             fontSize: 13,
             color: filled ? Colors.black : Colors.white,
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 低频动作的文字按钮（无底色、小号）。
+///
+/// 与 [_PillAction] 的区别是**视觉权重**：稍后再看 / 分享一天用不了几次，
+/// 做成带底色的胶囊会和点赞/收藏抢注意力，还会把主操作挤到第二行。
+class _TextAction extends StatelessWidget {
+  const _TextAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.active = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 15, color: active ? c.blue : c.secondaryLabel),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: AppleType.footnote.copyWith(
+                color: active ? c.blue : c.secondaryLabel,
+              ),
+            ),
+          ],
         ),
       ),
     );

@@ -165,13 +165,19 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
     );
   }
 
-  /// 启动：选择首个可用来源 → 加载内容 → 后台恢复登录态。
+  /// 启动：优先选**混合流**（抖音 + B站）→ 加载内容 → 后台恢复登录态。
+  ///
+  /// 为什么默认混合而不是"第一个可用来源"：
+  /// `describeFeedSources()` 现在把混合流排在最前，但如果只按
+  /// "第一个 available" 取，一旦混合流因平台缺失返回 null，
+  /// 就会悄悄退化成单平台（用户看到的仍是"只有 B站"）。
+  /// 这里显式优先混合，退化时也能从 [_activeSource] 看出来。
   Future<void> _bootstrap() async {
     final sources = _service.describeFeedSources();
-    final firstUsable = sources.where((s) => s.available).toList();
-    final pick = firstUsable.isNotEmpty
-        ? firstUsable.first
-        : (sources.isNotEmpty ? sources.first : null);
+    final mixed = _service.mixedFeedSource;
+    final pick = mixed ??
+        sources.where((s) => s.available).firstOrNull ??
+        sources.firstOrNull;
 
     if (pick != null) {
       _activeSource = pick;
@@ -396,6 +402,7 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
           onOpenOriginal: _openOriginal,
           onOpenLinkIntake: _openLinkIntake,
           onOpenDetail: (v) => _openDetail(v),
+          activeSource: _activeSource,
           loggedInLabel: _loggedInLabel,
         ),
         discoverPage: DiscoverScreen(

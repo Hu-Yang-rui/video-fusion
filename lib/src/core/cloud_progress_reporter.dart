@@ -27,7 +27,6 @@ library;
 
 import 'dart:async';
 
-import '../adapters/platform_adapter.dart';
 import 'credential_vault.dart';
 import 'errors.dart';
 import 'logger.dart';

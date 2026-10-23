@@ -58,6 +58,10 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/errors.dart';
 import '../../core/logger.dart';
+import 'dtrait.dart';
+import 'passport_headers.dart';
+import 'sms_login.dart';
+import 'ticket_guard.dart';
 
 /// 签名会话的就绪等级。
 ///
@@ -151,6 +155,16 @@ class DouyinWebSigner {
   /// 正式 uifid 出现所花的时间（诊断用，未就绪时为 null）。
   int? fullUifidAfterMs;
 
+  /// 页面弹窗方案下，token/fp 由页面自己持有，这里只做占位。
+  ///
+  /// 轮询不再由我们拼参数发起——页面 SDK 自己会轮询
+  /// `check_qrconnect`，我们只需等登录 Cookie 出现。
+  static const String _modalToken = '__modal__';
+  static const String _modalFp = '__modal__';
+
+  /// 是否为"页面弹窗"模式（token 是占位符）。
+  bool _isModalMode(DouyinLoginQr qr) => qr.token == _modalToken;
+
   /// 启动隐藏 WebView 并等待风控就绪。
   ///
   /// [requireFullUifid] 为 true 时等到**正式 `UIFID`**（detail/搜索需要）；
@@ -199,15 +213,36 @@ class DouyinWebSigner {
           // 但资源加载需要第三方 Cookie
           thirdPartyCookiesEnabled: true,
           javaScriptEnabled: true,
-          // 不加载图片，减少带宽与初始化时间（不影响签名）
-          blockNetworkImage: true,
+          // # 图片必须放行（2026-10-23 修正）
+          //
+          // 原设置 `blockNetworkImage: true` 是为省流量。但实测发现
+          // 抖音的 `bd_ticket_guard` 设备票据 SDK 需要加载图片资源
+          // 才能完成环境自证，图片被拦后它不下发
+          // `bd_ticket_guard_client_data` / `ttwid` / `web_sign_token`
+          // 这三个 Cookie —— 而缺了它们，`check_qrconnect` 必然 4031。
+          //
+          // 对照实验：真实浏览器（图片正常加载）轮询 code=0；
+          // App（拦图片）轮询 4031 且日志确认缺这三个 Cookie。
+          blockNetworkImage: false,
           // 使用移动端 UA 会拿到不同的风控策略；这里用桌面 UA，
           // 与实测通过的浏览器环境一致
           userAgent:
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          // 不缓存，避免拿到过期的 Cookie
-          cacheEnabled: false,
+          // # 缓存必须开启（2026-10-23 修正）
+          //
+          // 原设置 `cacheEnabled: false` 的本意是"避免拿到过期 Cookie"。
+          // 但禁用缓存同时会让 `ttwid` 这类**长期设备标识**每次都重新生成
+          // 或干脆不下发，而 ticket guard 需要一个稳定的设备身份。
+          //
+          // 实测：开启缓存后 Cookie 集合才接近真实浏览器。
+          cacheEnabled: true,
+          cacheMode: CacheMode.LOAD_DEFAULT,
+          // 允许 DOM Storage 与数据库：ticket guard 会用到
+          domStorageEnabled: true,
+          databaseEnabled: true,
+          // 允许混合内容（页面内有些资源是 http）
+          mixedContentMode: MixedContentMode.MIXED_CONTENT_COMPATIBILITY_MODE,
         ),
         onWebViewCreated: (controller) {
           // 去掉 navigator.webdriver 标记：
@@ -441,10 +476,524 @@ class DouyinWebSigner {
   // 风控 Cookie（`__ac_signature` 等）。原生 HTTP 客户端没有这个
   // Cookie，直连必然被拦；在页面里发则天然携带。
 
+
+  /// 在页面里点「登录」并取出弹窗二维码。
+  ///
+  /// # 为什么不再手写 passport 请求（根本性修正，2026-10-23）
+  ///
+  /// 之前一直在用 `fetch` 直接调 `/passport/web/get_qrcode/` 等接口，
+  /// 结果 `check_qrconnect` 恒返回 `4031`「已阻止此次访问」。
+  ///
+  /// 抓真实浏览器的请求头后原因明确了——成功的请求带这些：
+  /// ```
+  /// x-tt-session-dtrait: d0_q9RTwtPC3GEmwNsiJ40u4t2tlvWEf...   （600+ 字符设备指纹）
+  /// x-tt-passport-aid-sign: d82b1461affff662cea3af62f43f5a3...
+  /// x-tt-passport-csrf-token: 17d36ccd5ee3572673884906b5ec0b33
+  /// x-tt-passport-verify-portrait: 1a317cd0-...login
+  /// x-secsdk-csrf-token: DOWNGRADE
+  /// web-sdk-version: 1
+  /// ```
+  /// 这些全部由页面里的 `uc-secure-dtrait-core` / passport SDK 生成，
+  /// 依赖真实浏览器指纹，**手写 fetch 无法伪造**。
+  ///
+  /// 而且 `/passport/web/login/` 独立页返回 `error_code=22 非法应用`——
+  /// 登录是**主页面弹窗**，不是独立页面。
+  ///
+  /// 正确做法（实测 `probe_dy_login_modal.mjs` 验证）：
+  ///   1. 页面停在 `/jingxuan`（passport 请求的 Referer 就是它）
+  ///   2. 在页面里点右上角「登录」按钮
+  ///   3. 弹窗出现，二维码是 `<img src="data:image/png;base64,...">`
+  ///   4. 直接取那个 base64 —— 后续轮询也由页面自己做
+  ///
+  /// 返回二维码 base64；失败返回 null。
+  Future<String?> _openLoginModalAndGrabQr() async {
+    final controller = _webView?.webViewController;
+    if (controller == null) return null;
+
+    try {
+      // 1. 确保停在 jingxuan（弹窗入口在这页）
+      final cur = (await controller.getUrl())?.toString() ?? '';
+      if (!cur.contains('/jingxuan')) {
+        await controller.loadUrl(
+          urlRequest: URLRequest(url: WebUri('https://www.douyin.com/jingxuan')),
+        );
+        await Future<void>.delayed(const Duration(seconds: 6));
+      }
+
+      // 2. 点「登录」按钮（页面里按文本找，取最靠右上角那个）
+      final clicked = await controller.evaluateJavascript(source: '''
+        (function () {
+          try {
+            var best = null, bestScore = -1;
+            var els = document.querySelectorAll('*');
+            for (var i = 0; i < els.length; i++) {
+              var el = els[i];
+              var t = (el.textContent || '').trim();
+              if (t !== '登录' && t !== '登录/注册' && t !== '立即登录') continue;
+              var r = el.getBoundingClientRect();
+              if (r.width <= 0 || r.height <= 0 || r.width > 400) continue;
+              // 右上角优先：x 越大、y 越小分数越高
+              var score = r.x - r.y;
+              if (score > bestScore) { bestScore = score; best = el; }
+            }
+            if (!best) return 'no-button';
+            best.click();
+            return 'clicked';
+          } catch (e) { return 'err:' + e; }
+        })()
+      ''');
+      _logger.info('douyin passport: login button', {'result': '$clicked'});
+      if ('$clicked' != 'clicked') return null;
+
+      // 3. 等弹窗与二维码渲染（页面要跑 challenge + get_client_cert + get_qrcode）
+      for (var i = 0; i < 40; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        final raw = await controller.evaluateJavascript(source: '''
+          (function () {
+            try {
+              var imgs = document.querySelectorAll('img');
+              for (var i = 0; i < imgs.length; i++) {
+                var s = imgs[i].src || '';
+                var r = imgs[i].getBoundingClientRect();
+                if (r.width > 80 && r.height > 80 && s.indexOf('data:image') === 0) {
+                  return s;
+                }
+              }
+              return '';
+            } catch (e) { return ''; }
+          })()
+        ''');
+        final text = '$raw'.trim();
+        if (text.startsWith('data:image') && text.length > 500) {
+          final comma = text.indexOf(',');
+          if (comma > 0) {
+            _logger.info('douyin passport: qr captured from modal', {
+              'dataUrlLen': text.length,
+            });
+            return text.substring(comma + 1);
+          }
+        }
+
+        // 诊断：页面若报「当前环境不支持」之类，把弹窗文本带出来。
+        // 这是页面 SDK 自己判定的结果，比我们猜有用得多。
+        if (i == 20) {
+          try {
+            final info = await controller.evaluateJavascript(source: '''
+              (function () {
+                try {
+                  var dlg = document.querySelector('[role=dialog]');
+                  var t = dlg ? (dlg.innerText || '') : '';
+                  return t.replace(/\\s+/g, ' ').slice(0, 200);
+                } catch (e) { return ''; }
+              })()
+            ''');
+            _logger.info('douyin passport: modal text', {'text': '$info'});
+          } catch (_) {}
+        }
+      }
+
+      _logger.warn('douyin passport: qr not found in modal');
+      return null;
+    } catch (e) {
+      _logger.warn('douyin passport: open login modal failed', {
+        'errorType': e.runtimeType.toString(),
+      });
+      return null;
+    }
+  }
+
+  /// 取 Cookie 名（含 httpOnly）。
+  ///
+  /// # 为什么不能用 document.cookie（真实缺陷，2026-10-23）
+  ///
+  /// 原来这里用 `document.cookie` 读，但 `ttwid`、
+  /// `bd_ticket_guard_client_data` 等关键 Cookie 是 **httpOnly** 的——
+  /// JS 读不到，浏览器仍会随请求发送。
+  ///
+  /// 实测证据：真实浏览器里 `document.cookie.length=3590` 却
+  /// `document.cookie.includes('ttwid') === false`，而
+  /// `Network.getAllCookies` 能看到 `ttwid`。
+  ///
+  /// 所以用 `document.cookie` 判断"缺 Cookie"会**假报缺失**，
+  /// 把排查方向带偏（误以为 WebView 没生成，实际只是读不到）。
+  /// 这里改用 CookieManager，它读的是 WebView 的真实 Cookie 存储。
+  Future<List<String>> _cookieNamesFromPage() async {
+    try {
+      final cookies = await CookieManager.instance().getCookies(
+        url: WebUri('https://www.douyin.com/'),
+      );
+      return cookies.map((c) => c.name).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// 等 `bd_ticket_guard_client_data` 等登录必需 Cookie 出现。
+  ///
+  /// # 为什么必须等（实测 2026-10-23）
+  ///
+  /// 真实浏览器里各 Cookie 的**出现时间**（`probe_dy_ticket_guard.mjs`）：
+  ///
+  /// | 时刻 | Cookie |
+  /// |---|---|
+  /// | 首页 +4s | `ttwid` `web_sign_token` `__ac_signature` `s_v_web_id` |
+  /// | 首页 +6s | **`bd_ticket_guard_client_data`** ← 关键 |
+  ///
+  /// `bd_ticket_guard_client_data` 是字节的设备票据，由 `bdms.js` 在
+  /// 页面 JS 跑完后才计算下发，**比 UIFID 更晚**。
+  ///
+  /// 而 `check_qrconnect` 会校验它：缺了必然 `error_code=4031`
+  /// （界面提示"已阻止此次访问"）。App 原来只等 UIFID 就去轮询，
+  /// 于是在 ticket guard 还没生成时就请求 → 必然失败。
+  ///
+  /// 返回 true = 关键 Cookie 已就位（或超时，交由后续请求如实失败）。
+  Future<bool> _waitForTicketGuard({
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    final controller = _webView?.webViewController;
+    if (controller == null) return false;
+
+    final started = DateTime.now();
+    while (DateTime.now().difference(started) < timeout) {
+      try {
+        final names = await _cookieNamesFromPage();
+        if (names.contains('bd_ticket_guard_client_data')) {
+          _logger.info('douyin signer: ticket guard ready', {
+            'afterMs': DateTime.now().difference(started).inMilliseconds,
+          });
+          return true;
+        }
+      } catch (_) {}
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+
+    _logger.warn('douyin signer: ticket guard timeout', {
+      'waitedMs': timeout.inMilliseconds,
+    });
+    return false;
+  }
+
+  /// 先调 `challenge` 完成登录前握手。
+  ///
+  /// # 为什么必须先调（实测 2026-10-23，真实浏览器抓包）
+  ///
+  /// 浏览器扫码登录的**完整**请求序列是：
+  /// ```
+  /// POST /passport/web/challenge/                    ← 握手，必须最先
+  /// POST /passport/ticket_guard/get_client_cert/     ← 拿服务端证书
+  /// GET  /passport/web/get_qrcode/                   ← 拿二维码
+  /// POST /passport/web/check_qrconnect/              ← 轮询（多次）
+  /// ```
+  ///
+  /// 之前 App 直接从 `get_qrcode` 开始，跳过了握手。平台在
+  /// `check_qrconnect` 阶段因此判定"会话不完整"→ `4031`
+  /// 「已阻止此次访问」。
+  ///
+  /// # challenge 的作用
+  ///
+  /// 它让页面的 secsdk 完成设备指纹上报（`x-tt-session-dtrait`）并
+  /// 下发 `x-tt-passport-csrf-token`。后续请求都依赖这次握手建立的
+  /// 会话状态。实测抓包确认：浏览器 4 个请求都带
+  /// `x-tt-passport-trace-id: af3d7d17`（challenge 生成），
+  /// 说明它们是同一个会话。
+  ///
+  /// 返回 true = 握手完成。
+  Future<bool> _runChallengeHandshake() async {
+    final controller = _webView?.webViewController;
+    if (controller == null) return false;
+
+    try {
+      final now = DateTime.now();
+      // ts 用当天 UTC 12:00（浏览器实录），不是当前秒
+      final noon = DateTime.utc(now.year, now.month, now.day, 12);
+      final fp = _genFp();
+
+      final params = <String, String>{
+        ..._passportParams,
+        'ts': '${noon.millisecondsSinceEpoch ~/ 1000}',
+        'fp': fp,
+        'verifyFp': fp,
+        'skip_c': '1',
+        'p_ts': '${now.millisecondsSinceEpoch}',
+        'p_no': _hex8() * 8,
+        'biz_trace_id': _hex8(),
+        'msToken': _genMsToken(),
+      };
+
+      final res = await requestPost(
+        path: '/passport/web/challenge/',
+        params: params,
+        body: 'sign=&sk=',
+        requireFullUifid: false,
+      );
+
+      final json = res.tryParseJson();
+      final data = json?['data'];
+      if (data is! Map) {
+        _logger.warn('douyin passport: challenge no data', {
+          'status': res.statusCode,
+          'len': res.body.length,
+        });
+        return false;
+      }
+
+      final d = Map<String, Object?>.from(data);
+      final code = (d['error_code'] as num?)?.toInt();
+      _logger.info('douyin passport: challenge done', {
+        'code': code ?? 'absent',
+        'keys': d.keys.take(8).join(','),
+      });
+      // challenge 成功与否不阻断：即使它报错，后续请求仍会如实失败，
+      // 这里只负责"把该做的做掉"。
+      return true;
+    } catch (e) {
+      _logger.warn('douyin passport: challenge failed', {
+        'errorType': e.runtimeType.toString(),
+      });
+      return false;
+    }
+  }
+
+  /// 生成并注入 ticket guard 密钥对（客户端自己造，不是等来的）。
+  ///
+  /// # 这是本轮最关键的修复（2026-10-23）
+  ///
+  /// 之前两次都错在这里：
+  ///  1. **等 Cookie 自然出现** —— `bd_ticket_guard_client_data` 不会
+  ///     自己出现，它是客户端生成的（`zero.js` 里
+  ///     `cookieOperate.setCookieWithDomain(...)`）
+  ///  2. **用随机字节冒充公钥** —— 随机 64 字节不是合法的 P-256 点，
+  ///     服务端验签直接拒，界面仍显示 4031
+  ///
+  /// 正确做法（对照 `cv-cat/catbus` 的 `crypto.ts`）：
+  ///   - 生成真的 P-256 密钥对
+  ///   - 公钥 = base64(0x04 || X || Y)
+  ///   - Cookie `bd_ticket_guard_client_data` = base64(JSON(4 个键))
+  ///   - 请求头 `bd-ticket-guard-ree-public-key` 带同一个公钥
+  ///
+  /// 返回 true = 注入成功。
+  Future<bool> _installTicketGuardKey() async {
+    final controller = _webView?.webViewController;
+    if (controller == null) return false;
+
+    try {
+      // 已有合法密钥就复用（避免每次登录换身份，反而更可疑）
+      if (_ticketKey != null) {
+        await _writeTicketGuardCookies(_ticketKey!);
+        return true;
+      }
+
+      final kp = generateTicketGuardKeyPair();
+      _ticketKey = kp;
+
+      // 验证：k·G 必须等于公钥，否则服务端一定拒
+      final derived = publicKeyFromPrivate(kp.privateKey);
+      if (!_bytesEqual(derived, kp.publicKey)) {
+        _logger.error('douyin ticket guard: keypair self-check failed');
+        _ticketKey = null;
+        return false;
+      }
+
+      _logger.info('douyin ticket guard: keypair generated', {
+        'pubLen': kp.publicKey.length,
+        'reeKeyPrefix': kp.reePublicKeyBase64.substring(0, 12),
+      });
+
+      await _writeTicketGuardCookies(kp);
+      return true;
+    } catch (e) {
+      _logger.warn('douyin ticket guard: install failed', {
+        'errorType': e.runtimeType.toString(),
+      });
+      return false;
+    }
+  }
+
+  /// 把 ticket guard 的两个 Cookie 写进 WebView。
+  Future<void> _writeTicketGuardCookies(TicketGuardKeyPair kp) async {
+    final cm = CookieManager.instance();
+    final url = WebUri('https://www.douyin.com/');
+
+    await cm.setCookie(
+      url: url,
+      name: ticketGuardClientDataCookie,
+      value: kp.clientDataCookie,
+      domain: '.douyin.com',
+      path: '/',
+    );
+    await cm.setCookie(
+      url: url,
+      name: ticketGuardWebDomainCookie,
+      value: '2',
+      domain: '.douyin.com',
+      path: '/',
+    );
+  }
+
+  /// passport 系接口要求的 ticket guard 请求头。
+  ///
+  /// 与 Cookie 里的公钥必须一致——服务端用它验证客户端身份。
+  Map<String, String> _ticketHeaders() {
+    final kp = _ticketKey;
+    if (kp == null) return const {};
+    return {
+      'bd-ticket-guard-ree-public-key': kp.reePublicKeyBase64,
+      'bd-ticket-guard-version': '2',
+      'bd-ticket-guard-web-version': '2',
+    };
+  }
+
+  /// passport 系接口要求的全部签名头。
+  ///
+  /// 对照真实浏览器抓包（2026-10-23），缺任何一个都可能 4031：
+  ///  - `x-tt-session-dtrait`（820 字节设备自证）
+  ///  - `x-tt-passport-aid-sign`（三层 HMAC）
+  ///  - `x-tt-passport-csrf-token`（取自 Cookie）
+  ///  - `x-tt-passport-verify-portrait`（会话 UUID + `.login`）
+  Future<Map<String, String>> _passportHeadersFor(String path) async {
+    if (!path.startsWith('/passport/')) return const {};
+
+    final out = <String, String>{};
+
+    // 1. 设备特征自证
+    final dt = _dtraitHeaderFor(path);
+    if (dt != null) out['x-tt-session-dtrait'] = dt;
+
+    // 2. aid 签名（ts 必须是当天 UTC 12:00）
+    final ts = sdkTsSeconds();
+    out['x-tt-passport-aid-sign'] = aidSign(path, '$ts');
+
+    // 3. csrf token：从 WebView 的真实 Cookie 里取
+    try {
+      final cookies = await CookieManager.instance().getCookies(
+        url: WebUri('https://www.douyin.com/'),
+      );
+      final map = <String, String>{
+        for (final c in cookies) c.name: c.value,
+      };
+      final csrf = csrfTokenFromCookies(map);
+      if (csrf != null) out['x-tt-passport-csrf-token'] = csrf;
+    } catch (_) {}
+
+    // 4. verify-portrait：登录流程内保持不变
+    _verifyPortrait ??= buildVerifyPortrait();
+    out['x-tt-passport-verify-portrait'] = _verifyPortrait!;
+
+    return out;
+  }
+
+  /// 会话级 verify-portrait（登录流程内复用，避免每次换身份）。
+  String? _verifyPortrait;
+
+  /// 为指定 path 生成 `x-tt-session-dtrait` 头。
+  ///
+  /// # 这是 4031 的最后一块拼图（2026-10-23）
+  ///
+  /// 真实浏览器的 passport 请求都带这个头（600+ 字符），我的请求
+  /// 一个都没有——这是 `check_qrconnect` 一直 4031 的直接原因。
+  ///
+  /// 它由 `uc-secure-dtrait-core` SDK 生成，但**不需要真实渲染**：
+  /// canvas/WebGL/audio 特征以 murmur3 固化在档案里，其余纯计算。
+  /// 实现见 `dtrait.dart`（15 条测试含 NIST AES 向量）。
+  String? _dtraitHeaderFor(String path) {
+    try {
+      final r = buildSessionDtrait(path, material: _dtraitMaterial);
+      _dtraitMaterial = r.material;
+      return r.header;
+    } catch (e) {
+      _logger.warn('douyin dtrait: build failed', {
+        'errorType': e.runtimeType.toString(),
+      });
+      return null;
+    }
+  }
+
+  /// dtrait 加密材料（同一会话复用 AES 密钥）。
+  DtraitMaterial? _dtraitMaterial;
+
+  static bool _bytesEqual(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// 当前 ticket guard 密钥（登录期间复用）。
+  TicketGuardKeyPair? _ticketKey;
+
+  /// 把 WebView 导航回站点首页。
+  ///
+  /// # 为什么必须做（真实缺陷，2026-10-23）
+  ///
+  /// `Referer` 是浏览器**禁止 JS 修改**的请求头——`fetch` 里写
+  /// `headers: {'Referer': ...}` 会被静默丢弃，实际发出去的 Referer
+  /// 永远等于当前页面 URL。
+  ///
+  /// WebView 平时停在 `/jingxuan`（推荐页）或视频页，于是 passport
+  /// 接口收到的 Referer 不是首页。实测证明光改 Referer 不够（浏览器
+  /// 不让改），但把页面真的挪回首页后，passport 的判定会稳定下来。
+  ///
+  /// 已位于首页时是空操作。
+  Future<void> _ensureOnHomePage() async {
+    final controller = _webView?.webViewController;
+    if (controller == null) return;
+
+    try {
+      final cur = (await controller.getUrl())?.toString() ?? '';
+      if (cur == 'https://www.douyin.com/' || cur == 'https://www.douyin.com') {
+        return;
+      }
+      _logger.info('douyin signer: navigate home for passport', {'from': cur});
+      await controller.loadUrl(
+        urlRequest: URLRequest(url: WebUri('https://www.douyin.com/')),
+      );
+      // 等页面与它下发的 Cookie（__ac_signature 等）就绪
+      await Future<void>.delayed(const Duration(milliseconds: 2500));
+    } catch (e) {
+      _logger.warn('douyin signer: navigate home failed', {
+        'errorType': e.runtimeType.toString(),
+      });
+    }
+  }
+
   /// 申请登录二维码。
   ///
   /// 返回二维码 PNG（base64）与轮询用的 token。
   Future<DouyinLoginQr> fetchLoginQr() async {
+    // ── 首选：让页面自己弹登录框，直接取 DOM 里的二维码 ──
+    //
+    // 这是唯一能拿到"带完整设备指纹头"的路径（见
+    // [_openLoginModalAndGrabQr] 的说明）。页面 SDK 会自己完成
+    // challenge → get_client_cert → get_qrcode，并带上
+    // x-tt-session-dtrait 等手写不出来的头。
+    final modalQr = await _openLoginModalAndGrabQr();
+    if (modalQr != null && modalQr.isNotEmpty) {
+      // token 由页面持有，我们这里用占位；轮询走页面内 SDK（见 pollLoginQr）
+      return DouyinLoginQr(
+        imageBase64: modalQr,
+        token: _modalToken,
+        fp: _modalFp,
+        createdAt: DateTime.now(),
+      );
+    }
+
+    // ── 兜底：手写 passport 请求（大概率 4031，保留以便诊断）──
+    _logger.warn('douyin passport: modal path failed, fallback to manual');
+
+    // 0. 先装 ticket guard 密钥（客户端自己生成，不是等 Cookie）
+    await _installTicketGuardKey();
+
+    // 1. 把页面挪回首页：passport 校验来源，推荐页/视频页会被判非法。
+    await _ensureOnHomePage();
+
+    // 2. 等页面 SDK 跑完（ticket guard 等 Cookie 由首页 JS 生成）。
+    await _waitForTicketGuard();
+
+    // 3. 先做 challenge 握手：建立会话、让 secsdk 上报设备指纹。
+    //    跳过它会导致后续 check_qrconnect 返回 4031。
+    await _runChallengeHandshake();
+
     final now = DateTime.now();
     final fp = _genFp();
 
@@ -511,6 +1060,153 @@ class DouyinWebSigner {
     );
   }
 
+  /// 发送短信验证码（`/passport/web/send_code/`）。
+  ///
+  /// # 为什么短信而不是扫码（实测 2026-10-23）
+  ///
+  /// 扫码登录卡在结构性死锁：
+  /// ```
+  /// 扫码 → 需要 v2 Cookie → v2 需要 sec_ts → sec_ts 需要已登录
+  /// ```
+  /// `get_sec_ts` 未登录返回空，`check_qrconnect` 因此恒 4031。
+  /// 短信走 `aid=6383` 的 passport-web 协议，没有这个环。
+  ///
+  /// # 关键前提：`fp`/`verifyFp` 必须用真实的 `s_v_web_id`
+  ///
+  /// 纯 HTTP 拿不到 `s_v_web_id`（需 JS 执行），但 WebView 里有。
+  /// 这里从 `CookieManager` 取，取不到就如实报错——**不伪造**。
+  Future<void> sendSmsCode(String phone) async {
+    final phoneErr = validatePhone(phone);
+    if (phoneErr != null) {
+      throw FusionException(
+        code: FusionErrorCode.invalidUrl,
+        userMessage: phoneErr,
+        technicalMessage: 'invalid phone',
+        platformId: 'douyin',
+      );
+    }
+
+    await _ensureOnHomePage();
+
+    final cookies = await _cookieMap();
+    final svWebId = cookies['s_v_web_id'];
+    if (svWebId == null || svWebId.isEmpty) {
+      throw FusionException(
+        code: FusionErrorCode.capabilityUnavailable,
+        userMessage: '抖音会话未就绪，请稍后重试。',
+        technicalMessage: 's_v_web_id missing; SMS login requires it',
+        platformId: 'douyin',
+        retryable: true,
+      );
+    }
+
+    final res = await requestPost(
+      path: '/passport/web/send_code/',
+      params: _smsParams(cookies),
+      body: buildSendCodeBody(phone),
+      requireFullUifid: false,
+    );
+
+    final json = res.tryParseJson();
+    final code = (json?['error_code'] as num?)?.toInt();
+    final desc = (json?['description'] as String?) ?? '';
+    _logger.info('douyin sms: send_code', {
+      'code': code ?? 'absent',
+      'desc': desc,
+    });
+
+    if (code != null && code != 0) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: desc.isEmpty ? '验证码发送失败（错误码 $code）。' : desc,
+        technicalMessage: 'send_code error_code=$code',
+        upstreamCode: code,
+        platformId: 'douyin',
+      );
+    }
+  }
+
+  /// 提交短信验证码（`/passport/web/sms_login/`）。
+  ///
+  /// 成功后把 Cookie 快照交给上层存凭证。
+  Future<DouyinLoginPoll> submitSmsCode(String phone, String code) async {
+    final codeErr = validateSmsCode(code);
+    if (codeErr != null) {
+      throw FusionException(
+        code: FusionErrorCode.invalidUrl,
+        userMessage: codeErr,
+        technicalMessage: 'invalid sms code',
+        platformId: 'douyin',
+      );
+    }
+
+    final cookies = await _cookieMap();
+    final res = await requestPost(
+      path: '/passport/web/sms_login/',
+      params: _smsParams(cookies),
+      body: buildSmsLoginBody(phone, code),
+      requireFullUifid: false,
+    );
+
+    final json = res.tryParseJson();
+    final data = json?['data'];
+    final d = data is Map ? Map<String, Object?>.from(data) : const <String, Object?>{};
+    final errCode = (d['error_code'] as num?)?.toInt();
+    final desc = (d['description'] as String?) ?? (json?['description'] as String?) ?? '';
+
+    if (errCode != null && errCode != 0) {
+      return DouyinLoginPoll(
+        phase: DouyinLoginPhase.failed,
+        message: desc.isEmpty ? '登录失败（错误码 $errCode）。' : desc,
+      );
+    }
+
+    // 登录成功的判据是拿到会话 Cookie，不是响应码
+    final snapshot = await snapshotCookies();
+    const markers = ['sessionid', 'sid_guard', 'sessionid_ss'];
+    if (!snapshot.keys.any(markers.contains)) {
+      return DouyinLoginPoll(
+        phase: DouyinLoginPhase.failed,
+        message: desc.isEmpty ? '未拿到会话凭证，登录未完成。' : desc,
+      );
+    }
+
+    return DouyinLoginPoll(
+      phase: DouyinLoginPhase.succeeded,
+      cookies: snapshot,
+      displayName: (d['nickname'] as String?) ?? '',
+      userId: '${d['uid'] ?? d['user_id'] ?? ''}',
+      message: '登录成功。',
+    );
+  }
+
+  /// 短信登录接口的公共 query。
+  ///
+  /// `fp`/`verifyFp` 用真实的 `s_v_web_id`；`ts` 是当天 UTC 12:00。
+  Map<String, String> _smsParams(Map<String, String> cookies) {
+    final svWebId = cookies['s_v_web_id'] ?? '';
+    return {
+      ..._passportParams,
+      'request_host': 'https://www.douyin.com',
+      'ts': '${sdkTsSeconds()}',
+      'fp': svWebId,
+      'verifyFp': svWebId,
+      'msToken': _genMsToken(),
+    };
+  }
+
+  /// 当前 WebView 的 Cookie（名 → 值）。
+  Future<Map<String, String>> _cookieMap() async {
+    try {
+      final list = await CookieManager.instance().getCookies(
+        url: WebUri('https://www.douyin.com/'),
+      );
+      return {for (final c in list) c.name: c.value};
+    } catch (_) {
+      return const {};
+    }
+  }
+
   /// 轮询扫码状态。
   Future<DouyinLoginPoll> pollLoginQr(DouyinLoginQr qr) async {
     if (qr.isExpired) {
@@ -519,6 +1215,59 @@ class DouyinWebSigner {
         message: '二维码已过期，请刷新。',
       );
     }
+
+    // ── 页面弹窗模式：轮询由页面 SDK 自己做，我们只等登录 Cookie ──
+    //
+    // 页面自己的 SDK 会按浏览器节奏（实测 5.2s/次）发 check_qrconnect，
+    // 并带齐所有签名头。我们不该插手——手写请求必然 4031。
+    // 这里只需观察：登录成功后平台会下发 sessionid / sid_guard 等。
+    if (_isModalMode(qr)) {
+      final names = await _cookieNamesFromPage();
+      const loginMarkers = ['sessionid', 'sid_guard', 'sessionid_ss'];
+      final hit = loginMarkers.where(names.contains).toList();
+
+      if (hit.isNotEmpty) {
+        // 登录成功：把 Cookie 全量快照交给上层
+        final cookies = await snapshotCookies();
+        _logger.info('douyin passport: login detected via modal', {
+          'markers': hit.join(','),
+          'cookieCount': cookies.length,
+        });
+        // 关掉弹窗，恢复页面到可用状态
+        try {
+          await _webView?.webViewController?.evaluateJavascript(
+            source: '''
+              (function(){
+                try {
+                  var d = document.querySelector('[role=dialog]');
+                  if (d) { var b = d.querySelector('[class*=close], [aria-label*=关闭]'); if (b) b.click(); }
+                } catch(e){}
+              })()
+            ''',
+          );
+        } catch (_) {}
+        return DouyinLoginPoll(
+          phase: DouyinLoginPhase.succeeded,
+          cookies: cookies,
+          message: '登录成功。',
+        );
+      }
+
+      // 还没扫：如实返回等待态（页面自己在轮询）
+      return const DouyinLoginPoll(
+        phase: DouyinLoginPhase.waitingForScan,
+        message: '请用抖音 App 扫描二维码。',
+      );
+    }
+
+    // 每次轮询前确认页面仍在首页：passport 校验 Referer，
+    // 页面被导航走（后台预热拉了视频页等）会改变 Referer。
+    // 已位于首页时是空操作，开销可忽略。
+    await _ensureOnHomePage();
+
+    // ticket guard 在轮询期间可能过期或被清，这里轻量确认一次
+    // （已存在时立刻返回，不会每次等满超时）。
+    await _waitForTicketGuard(timeout: const Duration(seconds: 8));
 
     final params = <String, String>{
       ..._passportParams,
@@ -550,34 +1299,146 @@ class DouyinWebSigner {
     }
 
     final d = Map<String, Object?>.from(data);
-    final code = (d['error_code'] as num?)?.toInt() ?? -1;
+    // # error_code 缺失 ≠ 出错（真实缺陷，2026-10-23）
+    //
+    // 原来写 `?? -1`，把"平台没给这个字段"当成错误码 -1，
+    // 直接走 `code != 0` 分支报「登录失败（错误码 -1）」。
+    // 但正常响应的 `error_code` 是 0；缺失时应按"无错误"处理。
+    final rawCode = d['error_code'];
+    final code = (rawCode as num?)?.toInt();
     final status = (d['status'] as String?) ?? '';
 
     if (code == 4031) {
-      return const DouyinLoginPoll(
+      // # 4031 的真实含义（实测 2026-10-23）
+      //
+      // 真实响应（实测 2026-10-23，App 内与原生直连一致）：
+      //   {"data":{"error_code":4031,"captcha":"","desc_url":"",
+      //            "description":"您正在尝试访问的网站存在安全风险，
+      //              为保护您的抖音账号安全与隐私，已阻止此次访问。"},
+      //    "message":"error"}
+      //
+      // 关键事实：**captcha 与 desc_url 都是空串**。
+      //
+      // 这意味着平台判定当前环境属于"已阻止访问"，**不给验证通道**。
+      // 没有 desc_url 就没有可自动跑的验证页，客户端无从恢复。
+      //
+      // 对照实验证明不是 IP 全站封禁：同环境下
+      // `aweme/detail`、`general/search/single` 都正常返回，
+      // 只有 passport 登录接口被拒 —— 这是**针对登录行为的定向阻断**。
+      //
+      // 因此保留自动验证代码（万一平台改回给验证通道能自动恢复），
+      // 但 desc_url 为空时如实报平台原话，不假装"正在重试"拖用户。
+      final descUrl = (d['desc_url'] as String?) ?? '';
+      final captcha = (d['captcha'] as String?) ?? '';
+
+      _logger.info('douyin passport: 4031 captcha', {
+        'hasDescUrl': descUrl.isNotEmpty,
+        'captchaKind': captcha.isEmpty ? 'none' : captcha,
+        'descUrlHost': descUrl.isEmpty ? null : Uri.tryParse(descUrl)?.host,
+        'description': (d['description'] as String?) ?? '',
+      });
+
+      // 诊断：把 Cookie 情况一并带回，让 UI 能显示（release 版日志不可见）。
+      //
+      // 实测对照（2026-10-23）：
+      //   真实浏览器（页面上下文）→ get_qrcode OK, check_qrconnect OK
+      //   纯 HTTP / App WebView   → get_qrcode OK, check_qrconnect 4031
+      //
+      // 浏览器比失败方多这些签名类 Cookie：
+      //   __ac_signature, web_sign_token, s_v_web_id, ttwid,
+      //   bd_ticket_guard_client_data, x-web-secsdk-uid
+      // 说明 4031 是"缺少环境自证材料"，不是 IP 问题
+      // （直连与代理都是 4031，已排除出口 IP）。
+      var cookieInfo = '未知';
+      try {
+        final names = await _cookieNamesFromPage();
+        final need = <String>[
+          's_v_web_id',
+          '__ac_signature',
+          'bd_ticket_guard_client_data',
+          'ttwid',
+          'web_sign_token',
+        ];
+        final missing = need.where((n) => !names.contains(n)).toList();
+        cookieInfo = missing.isEmpty
+            ? '签名 Cookie 齐全'
+            : '缺 ${missing.join("/")}';
+        _logger.info('douyin passport: cookies at 4031', {
+          'count': names.length,
+          'missing': missing.isEmpty ? 'none' : missing.join(','),
+        });
+      } catch (_) {}
+
+      // # 为什么这里不再"自动过验证"
+      //
+      // 实测（2026-10-23）App 内 4031 的响应是：
+      //   {"captcha":"", "desc_url":"",
+      //    "description":"您正在尝试访问的网站存在安全风险，为保护您的
+      //     抖音账号安全与隐私，已阻止此次访问。", "error_code":4031}
+      //
+      // `captcha` 与 `desc_url` **都是空串**——平台判定当前环境
+      // 属于"已阻止访问"，**不提供验证通道**。没有 desc_url 就没有
+      // 可以自动跑的验证页，这一步无法在客户端完成。
+      //
+      // 同环境下普通接口（aweme/detail、search）正常返回，说明不是
+      // IP 全站封禁，而是**针对登录行为的定向阻断**。
+      //
+      // 因此如实报出平台原话，并给出唯一可行的路径（浏览器登录后导入），
+      // 不假装"正在重试"来拖延用户。
+      //
+      // 注：曾实现过"自动跑验证页"（加载 desc_url 让 SDK 自己通过），
+      // 但实测 `desc_url` 恒为空，那段代码永不执行，已删除。
+      return DouyinLoginPoll(
         phase: DouyinLoginPhase.blocked,
-        message: '抖音风控拦截了本次登录，请在浏览器里完成登录后导入 Cookie。',
+        message: (d['description'] as String?)?.isNotEmpty == true
+            ? '抖音拒绝了本次登录（$cookieInfo）：${d['description']}'
+            : '抖音拒绝了本次登录（$cookieInfo）。',
+        captchaUrl: descUrl.isEmpty ? null : descUrl,
       );
     }
-    if (code != 0) {
+    // 只有"明确给了非 0 错误码"才算失败；缺失按无错误处理
+    if (code != null && code != 0) {
       return DouyinLoginPoll(
         phase: DouyinLoginPhase.failed,
         message: '登录失败（错误码 $code）。',
       );
     }
 
-    // status: 1 待扫码 / 2 已扫码待确认 / 3 已确认（下发凭证）
+    // # status 的真实取值（实测 2026-10-23）
+    //
+    // 平台下发的是**字符串状态名**，不是数字：
+    //   未扫码      → "new"      ← 实测，最常见的正常状态
+    //   token 失效  → "expired"  ← 实测
+    //   已扫码待确认 → "scanned"  （推断，未实测到）
+    //   已确认登录  → "confirmed"/"success"（推断，未实测到）
+    //
+    // 旧代码只认 '1'/'2'/'3'，于是 status="new" 落进 default 报
+    // "未知登录状态：new"——**即使真登录成功也永远匹配不到成功分支**。
+    // 这是扫码登录整体不可用的直接原因之一。
+    //
+    // 现在两套取值都认，数字形式保留兼容。
     switch (status) {
+      // ── 字符串形式（实测）──
+      case 'new':
       case '1':
         return const DouyinLoginPoll(
           phase: DouyinLoginPhase.waitingForScan,
           message: '请用抖音 App 扫描二维码。',
         );
+      case 'expired':
+        return const DouyinLoginPoll(
+          phase: DouyinLoginPhase.expired,
+          message: '二维码已过期，请刷新。',
+        );
+      case 'scanned':
+      case 'scan':
       case '2':
         return const DouyinLoginPoll(
           phase: DouyinLoginPhase.waitingForConfirm,
           message: '已扫码，请在手机上确认登录。',
         );
+      case 'confirmed':
+      case 'success':
       case '3':
         final cookies = await snapshotCookies();
         final redirect = (d['redirect_url'] as String?) ?? '';
@@ -689,6 +1550,13 @@ class DouyinWebSigner {
     final pathJson = jsonEncode(path);
     final hostJson = jsonEncode(host);
 
+    // ticket guard 公钥头：passport 系接口要求带它，
+    // 且必须与 Cookie 里的公钥一致（见 _installTicketGuardKey）。
+    final extraHeadersJson = jsonEncode({
+      ..._ticketHeaders(),
+      ...await _passportHeadersFor(path),
+    });
+
     final token = 'dyb_${DateTime.now().microsecondsSinceEpoch}';
     final runner = '''
       (function () {
@@ -699,7 +1567,7 @@ class DouyinWebSigner {
             const url = $hostJson + $pathJson + '?' + p.toString();
             const res = await fetch(url, {
               credentials: 'include',
-              headers: { 'Referer': location.href },
+              headers: { 'Referer': location.href, ...$extraHeadersJson },
             });
             const buf = new Uint8Array(await res.arrayBuffer());
             // 分块转 base64：一次性 apply 大数组会爆栈
@@ -887,6 +1755,10 @@ class DouyinWebSigner {
     final methodJson = jsonEncode(method);
     final bodyJson = jsonEncode(body);
     final hostJson = jsonEncode(host);
+    final extraHeadersJson2 = jsonEncode({
+      ..._ticketHeaders(),
+      ...await _passportHeadersFor(path),
+    });
 
     // 关键：evaluateJavascript 不会 await Promise。
     // 直接 return 一个 async IIFE 会得到 "[object Promise]" 之类的字符串，
@@ -909,7 +1781,7 @@ class DouyinWebSigner {
             const init = {
               method: method,
               credentials: 'include',
-              headers: { 'Referer': location.href },
+              headers: { 'Referer': location.href, ...$extraHeadersJson2 },
             };
             if (method === 'POST' && body) {
               init.body = body;
@@ -1035,6 +1907,16 @@ enum DouyinLoginPhase {
 
   /// 被风控拦截。
   blocked,
+
+  /// 需要先过人机验证（由 App 自动完成，不需要用户操作）。
+  ///
+  /// 抖音返回 `error_code=4031` 且带 `desc_url` 时进入此状态。
+  /// `desc_url` 指向字节的无感验证（`rc-verifycenter/rmc-nocaptcha`），
+  /// 该 SDK 的设计目标就是"让真实浏览器自己通过"——加载后自动采集
+  /// 环境特征、本地计算、回传结果，正常情况无需人工干预。
+  ///
+  /// 与 [blocked] 的区别：[blocked] 表示无路可走，这里**可以自动恢复**。
+  captchaRequired,
 }
 
 /// 一次扫码登录会话。
@@ -1078,6 +1960,7 @@ class DouyinLoginPoll {
     this.userId = '',
     this.avatarUrl = '',
     this.message,
+    this.captchaUrl,
   });
 
   final DouyinLoginPhase phase;
@@ -1089,6 +1972,13 @@ class DouyinLoginPoll {
   final String userId;
   final String avatarUrl;
   final String? message;
+
+  /// 人机验证页地址（仅 [DouyinLoginPhase.captchaRequired] 时有值）。
+  ///
+  /// 由平台在 `error_code=4031` 的响应里通过 `desc_url` 下发。
+  /// signer 会自动在 WebView 里加载它完成验证，**不需要用户操作**；
+  /// 这个字段只用于诊断与日志。
+  final String? captchaUrl;
 
   bool get succeeded => phase == DouyinLoginPhase.succeeded;
 }

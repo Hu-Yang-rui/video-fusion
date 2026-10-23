@@ -1045,10 +1045,148 @@ class VideoService {
   /// 这是唯一的"内容来源"清单入口。UI 层不得硬编码任何平台判断。
   List<FeedSource> describeFeedSources() {
     final out = <FeedSource>[];
+    // 混合流排在最前：默认进来就能看到两个平台的内容，
+    // 而不是被固定在某一个平台（这正是之前"只有 B站"的观感来源）。
+    final mix = mixedFeedSource;
+    if (mix != null) out.add(mix);
     for (final adapter in _registry.adapters) {
       out.addAll(adapter.feedSources);
     }
     return out;
+  }
+
+  /// 混合流来源的固定 id。
+  static const String mixedFeedSourceId = 'mix:douyin+bilibili';
+
+  /// 参与混合流的平台（按此顺序交错）。
+  ///
+  /// 用户明确要求：默认抖音 + B站两个平台混合播放。
+  /// 红果是短剧（竖屏短内容为主、集数多），混进竖滑流会让
+  /// "刷短视频"的体验被整剧打断，因此默认不参与。
+  static const List<String> mixedFeedPlatforms = ['douyin', 'bilibili'];
+
+  /// 混合流来源；两个平台都不可用时返回 null（UI 不显示死入口）。
+  FeedSource? get mixedFeedSource {
+    final available = mixedFeedPlatforms
+        .map((id) => _registry.byId(id))
+        .whereType<PlatformAdapter>()
+        .where((a) => a.feedSources.isNotEmpty)
+        .toList();
+    if (available.isEmpty) return null;
+    final names = available.map((a) => a.displayName).join(' + ');
+    return FeedSource(
+      id: mixedFeedSourceId,
+      adapterId: 'mix',
+      label: '混合',
+      description: '$names 交错播放（抖音 + B站）',
+    );
+  }
+
+  /// 判断某个来源 id 是否是混合流。
+  bool isMixedFeedSource(String sourceId) => sourceId == mixedFeedSourceId;
+
+  /// 拉取一页混合流：并发拉两个平台，再**交错合并**。
+  ///
+  /// # 为什么交错而不是先放完 A 再放 B
+  ///
+  /// 用户要的是"混合播放"：如果按平台分段拼接，前 20 条全是抖音、
+  /// 后 20 条全是 B站，滑到第 21 条才换平台，体感上仍是"两个独立的流"。
+  /// 交错（A1 B1 A2 B2 …）才真正是混着刷。
+  ///
+  /// # 单平台失败怎么办
+  ///
+  /// 一个平台挂了不该让整个混合流失败——另一个平台的条目照常返回，
+  /// 失败原因放进 notes。两个都失败才返回 error。
+  Future<FeedFetchResult> _fetchMixedFeed(FeedRequest request) async {
+    final adapters = mixedFeedPlatforms
+        .map((id) => _registry.byId(id))
+        .whereType<PlatformAdapter>()
+        .where((a) => a.feedSources.isNotEmpty)
+        .toList();
+
+    if (adapters.isEmpty) {
+      return FeedFetchResult(
+        sourceId: mixedFeedSourceId,
+        error: FusionException(
+          code: FusionErrorCode.capabilityUnavailable,
+          userMessage: '当前没有可混合播放的平台。',
+          technicalMessage: 'no adapters available for mixed feed',
+        ),
+      );
+    }
+
+    // 每个平台取它的第一个可用来源（推荐流优先）
+    final results = await Future.wait(
+      adapters.map((a) async {
+        final source = a.feedSources.firstWhere(
+          (s) => s.available,
+          orElse: () => a.feedSources.first,
+        );
+        try {
+          final page = await a.fetchFeed(request, sourceId: source.id);
+          return MapEntry<PlatformAdapter, FeedPage?>(a, page);
+        } on FusionException catch (e) {
+          _logger.warn('mixed feed: platform failed', {
+            'platform': a.id,
+            'code': e.code.name,
+          });
+          return MapEntry<PlatformAdapter, FeedPage?>(a, null);
+        } catch (e) {
+          _logger.warn('mixed feed: platform failed', {
+            'platform': a.id,
+            'errorType': e.runtimeType.toString(),
+          });
+          return MapEntry<PlatformAdapter, FeedPage?>(a, null);
+        }
+      }),
+    );
+
+    final ok = results.where((e) => e.value != null).toList();
+    if (ok.isEmpty) {
+      return FeedFetchResult(
+        sourceId: mixedFeedSourceId,
+        error: FusionException(
+          code: FusionErrorCode.networkError,
+          userMessage: '两个平台的内容都没能加载出来，请稍后重试。',
+          technicalMessage: 'all platforms failed in mixed feed',
+          retryable: true,
+        ),
+      );
+    }
+
+    // 交错合并：轮流从每个平台取一条
+    final lists = ok.map((e) => e.value!.items).toList();
+    final merged = <UnifiedVideo>[];
+    final seen = <String>{};
+    final maxLen = lists.map((l) => l.length).reduce((a, b) => a > b ? a : b);
+    for (var i = 0; i < maxLen; i++) {
+      for (final list in lists) {
+        if (i < list.length) {
+          final v = list[i];
+          if (seen.add(v.id)) merged.add(v);
+        }
+      }
+    }
+
+    final failedNames = results
+        .where((e) => e.value == null)
+        .map((e) => e.key.displayName)
+        .toList();
+
+    return FeedFetchResult(
+      sourceId: mixedFeedSourceId,
+      page: FeedPage(
+        items: merged,
+        // 任一平台还有更多就继续翻（各平台游标独立，这里用"有任一 true"）
+        hasMore: ok.any((e) => e.value!.hasMore),
+        adapterId: 'mix',
+        upstreamEndpoint: 'mix(douyin,bilibili)',
+        notes: [
+          '混合播放：${ok.map((e) => e.key.displayName).join(' + ')}',
+          if (failedNames.isNotEmpty) '${failedNames.join('、')} 本次未返回内容',
+        ],
+      ),
+    );
   }
 
   /// 拉取一页推荐流。
@@ -1059,6 +1197,11 @@ class VideoService {
     String sourceId, {
     FeedRequest request = const FeedRequest(),
   }) async {
+    // 混合流走独立路径：它没有单一 owner 适配器。
+    if (isMixedFeedSource(sourceId)) {
+      return _fetchMixedFeed(request);
+    }
+
     PlatformAdapter? owner;
     for (final adapter in _registry.adapters) {
       if (adapter.feedSources.any((s) => s.id == sourceId)) {
@@ -1304,8 +1447,17 @@ class VideoService {
           if (seen.add(w)) merged.add(w);
           if (merged.length >= 10) break;
         }
-      } catch (_) {
-        // 静默：联想词失败不影响输入
+      } catch (e) {
+        // 联想词失败不打断输入，但**必须留下痕迹**。
+        //
+        // 之前这里是 `catch (_)` 全静默，结果模拟器上联想词一直不出现，
+        // logcat 里一条记录都没有——没法判断是"平台没给候选"
+        // 还是"WebView 会话没起来"。AGENTS.md 4.2 要求失败可归因。
+        _logger.warn('search suggestions failed', {
+          'platform': a.id,
+          'errorType': e.runtimeType.toString(),
+          if (e is FusionException) 'code': e.code.name,
+        });
       }
       if (merged.length >= 10) break;
     }

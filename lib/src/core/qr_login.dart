@@ -121,3 +121,26 @@ abstract class QrLoginCapable {
   /// 轮询扫码状态。
   Future<QrLoginPollResult> pollQrChallenge(QrLoginChallenge challenge);
 }
+
+/// 支持**短信验证码**登录的平台。
+///
+/// # 为什么与 [QrLoginCapable] 分开
+///
+/// 扫码和短信是两条独立通道，可用性也不同：
+///  - 扫码依赖平台的设备自证链路（抖音上被 4031 挡住）
+///  - 短信只需手机号 + 验证码，不依赖设备票据
+///
+/// 一个平台可能只有其中一条可用，所以分成两个接口，
+/// UI 据此决定显示「扫码登录」还是「短信登录」。
+abstract class SmsLoginCapable {
+  /// 发送验证码到指定手机号。
+  ///
+  /// 号码或平台拒绝时抛 [FusionException]，**不静默失败**。
+  Future<void> sendLoginSmsCode(String phone);
+
+  /// 提交验证码。
+  ///
+  /// 成功时 `phase == succeeded` 且带回会话 Cookie；
+  /// 失败时如实返回原因（验证码错误、过期、风控等）。
+  Future<QrLoginPollResult> submitLoginSmsCode(String phone, String code);
+}

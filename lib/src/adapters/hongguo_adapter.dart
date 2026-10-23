@@ -134,10 +134,18 @@ class HongguoAdapter extends PlatformAdapter {
     supportsNativePlayback: true,
     supportsOfficialEmbed: false,
     supportsExternalFallback: true,
-    maxQualityWithoutAuth: '360p',
+    // 实测：签名链路给 5 档（360p/480p/540p/720p/1080p），
+    // 不是"仅 360p"。这里如实标最高档。
+    maxQualityWithoutAuth: '1080p',
     notes: [
-      '数据来自官网服务端渲染页面，不需要签名或登录',
-      '播放直链仅验证过 360p',
+      // 这三条曾经全是错的，2026-10-23 逐项实测后修正：
+      //  - 旧文案"不需要签名或登录" → 实际要六头签名
+      //  - 旧文案"播放直链仅验证过 360p" → 实际 5 档全实测可播
+      //  - 旧文案漏了搜索 → 已实现
+      '数据来自官网服务端渲染页面 + 签名接口（六头签名：'
+          'khronos/ladon/argus/gorgon/helios/medusa），无需登录',
+      '播放直链实测 5 档可播（360p / 480p / 540p / 720p / 1080p）',
+      '支持搜索（官网 /api/search/result/，实测 totalCount 200+）',
       '红果是短剧平台，无点赞/投币/评论/私信等社交功能',
     ],
   );

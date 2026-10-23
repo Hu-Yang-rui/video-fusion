@@ -93,7 +93,7 @@ class _CachedPlayback {
       .toIso8601String();
 }
 
-class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
+class DouyinAdapter implements PlatformAdapter, QrLoginCapable, SmsLoginCapable {
   DouyinAdapter({
     required FusionHttpClient http,
     FusionLogger? logger,
@@ -204,6 +204,9 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       // 风控被拦不是"失败可重试"，而是换路径的信号
       DouyinLoginPhase.blocked => QrLoginPhase.failed,
       DouyinLoginPhase.failed => QrLoginPhase.failed,
+      // 验证由 signer 在 WebView 内自动完成，不需要用户操作。
+      // 这一轮按"等待扫码"返回，让 UI 继续轮询。
+      DouyinLoginPhase.captchaRequired => QrLoginPhase.waitingForScan,
     };
 
     return QrLoginPollResult(
@@ -213,6 +216,33 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       userId: result.userId.isEmpty ? null : result.userId,
       displayName: result.displayName.isEmpty ? null : result.displayName,
       avatarUrl: result.avatarUrl.isEmpty ? null : result.avatarUrl,
+    );
+  }
+
+  // ── 短信验证码登录 ──────────────────────────────────────────
+  //
+  // 扫码登录卡在结构性死锁（见 web_signer 里 sendSmsCode 的说明）：
+  //   v2 Cookie 需要 sec_ts，而 sec_ts 需要已登录。
+  // 短信走 aid=6383 的 passport-web 协议，没有这个环。
+
+  /// 发送短信验证码。
+  @override
+  Future<void> sendLoginSmsCode(String phone) =>
+      _ensureSigner.sendSmsCode(phone);
+
+  /// 提交验证码完成登录；成功时返回会话 Cookie。
+  @override
+  Future<QrLoginPollResult> submitLoginSmsCode(
+    String phone,
+    String code,
+  ) async {
+    final r = await _ensureSigner.submitSmsCode(phone, code);
+    return QrLoginPollResult(
+      phase: r.succeeded ? QrLoginPhase.succeeded : QrLoginPhase.failed,
+      message: r.message,
+      cookies: r.cookies,
+      userId: r.userId.isEmpty ? null : r.userId,
+      displayName: r.displayName.isEmpty ? null : r.displayName,
     );
   }
 
@@ -744,9 +774,6 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     await _signer?.dispose();
     _signer = null;
   }
-
-  /// Web 端接口的 origin。
-  static const String _webHost = 'https://www.douyin.com';
 
   // ── 写操作公共通道（v0.5.0）──────────────────────────────────
   //
