@@ -12,6 +12,7 @@
 ///  - B 站 DASH 分离流：视频轨与音频轨分别以直链加载，由本内核自行合成。
 library;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'dart:async';
 
 import 'package:media_kit/media_kit.dart';
@@ -313,8 +314,11 @@ class FusionPlayerController {
           // 场景下不可靠：mpv 会停在"已加载未解复用"状态，
           // 表现为 duration 有值但 position 永远为 0、无 vd-/ao- 线程。
           // 直接以 play:true 打开，让 mpv 自行进入解码流程。
+          debugPrint('[player] opening ${Uri.tryParse(url)?.host}: '
+              '${url.length > 80 ? "${url.substring(0, 80)}..." : url}');
           await _player.open(Media(url, httpHeaders: headers), play: true);
           opened = true;
+          debugPrint('[player] opened ok');
           _logger.info('player: media opened', {
             'host': Uri.tryParse(url)?.host ?? '?',
             'hasAudio': source.audioStreamUrl != null,
@@ -322,6 +326,7 @@ class FusionPlayerController {
           break;
         } catch (e) {
           lastError = e;
+          debugPrint('[player] open failed: $e');
           _logger.warn('video url failed, trying fallback', {
             'host': Uri.tryParse(url)?.host ?? '?',
             'error': '$e',

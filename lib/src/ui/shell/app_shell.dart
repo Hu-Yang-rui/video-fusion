@@ -332,6 +332,9 @@ class AppShellState extends State<AppShell>
                       currentIndex: _index,
                       onChanged: goTo,
                       items: items,
+                      // 推荐页是纯黑全屏视频流：底栏改用深色玻璃，
+                      // 不用浅灰实心块压住内容。
+                      overMedia: currentTab == AppTab.feed,
                     ),
                   ),
                 ),

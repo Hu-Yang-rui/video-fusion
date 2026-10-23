@@ -21,6 +21,7 @@ import '../../core/errors.dart';
 import '../../core/http_client.dart';
 import '../../core/logger.dart';
 import 'hongguo_signer.dart';
+import 'spade_decoder.dart';
 
 /// 一个清晰度档位。
 class HongguoQuality {
@@ -431,11 +432,32 @@ class HongguoMediaClient {
     if (items == null || items.isEmpty) return null;
 
     final qualities = <HongguoQuality>[];
+    // 解密所需的种子。没有它就拿不到明文地址。
+    final keySeed = (info['key_seed'] as String?) ?? '';
+    const decoder = SpadeDecoder();
+
     for (final item in items) {
       if (item is! Map) continue;
 
-      final url = (item['main_url'] as String?) ?? '';
+      var url = (item['main_url'] as String?) ?? '';
       if (url.isEmpty) continue;
+
+      // main_url 是加密串（`a8 ?? 01 00` 开头），必须解密才是可用地址。
+      // 直接交给播放器会得到「时长 0 + 一直转圈」——它根本不是 URL。
+      if (!url.startsWith('http')) {
+        final plain = keySeed.isEmpty
+            ? null
+            : decoder.decryptSpadeUrl(mainUrl: url, keySeed: keySeed);
+        if (plain == null || !plain.startsWith('http')) {
+          _logger.debug('hongguo media: url decrypt failed', {
+            'definition': item['definition'],
+            'hasSeed': keySeed.isNotEmpty,
+            'prefix': url.length > 8 ? url.substring(0, 8) : url,
+          });
+          continue;
+        }
+        url = plain;
+      }
 
       // ByteVC2 声明自己为 bvc2 且不带 avcC/hvcC，播放器只识别到音轨；
       // 只有 ByteVC1（HEVC）能播。

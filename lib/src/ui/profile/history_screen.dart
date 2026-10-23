@@ -150,17 +150,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
         ),
       );
 
-  static String _title(String videoId) {
-    final i = videoId.indexOf(':');
-    if (i < 0) return videoId;
-    final platform = switch (videoId.substring(0, i)) {
-      'bilibili' => 'B 站',
-      'douyin' => '抖音',
-      final p => p,
-    };
-    return '$platform · ${videoId.substring(i + 1)}';
-  }
-
   static String _fmt(Duration d) {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');

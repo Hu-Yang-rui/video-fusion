@@ -185,10 +185,44 @@ class ImSession {
   /// 用于列表展示的标题：群聊用群名，单聊留给上层用 user_infos 补昵称。
   String get displayTitle => groupName ?? '用户 $talkerId';
 
-  /// 时间戳 → DateTime（秒级）。
-  DateTime? get sessionTime => sessionTs > 0
-      ? DateTime.fromMillisecondsSinceEpoch(sessionTs * 1000)
-      : null;
+  /// 时间戳 → DateTime。
+  ///
+  /// # 为什么不能直接 `sessionTs * 1000`
+  ///
+  /// 服务端这个字段的**单位不固定**。实测 B 站私信会话下发的是纳秒
+  /// （19 位，如 `1792654060610109000`），而消息体里是秒。按秒处理会
+  /// 溢出 Dart 的毫秒范围，抛 `RangeError` 把整个列表渲染打挂
+  /// （表现为「私信内容一片灰」）。
+  ///
+  /// 这里按数量级判断单位：秒 / 毫秒 / 微秒 / 纳秒都能正确还原。
+  DateTime? get sessionTime => tsToDateTime(sessionTs);
+
+  /// 按数量级把时间戳还原成 DateTime。
+  ///
+  /// 返回值一定落在 Dart 的合法区间内，任何异常值都返回 null，
+  /// 不让它把上层 UI 带崩。
+  static DateTime? tsToDateTime(int raw) {
+    if (raw <= 0) return null;
+    // 数量级：秒(10) / 毫秒(13) / 微秒(16) / 纳秒(19)
+    int ms;
+    if (raw < 100000000000) {
+      // < 1e11：按秒
+      ms = raw * 1000;
+    } else if (raw < 100000000000000) {
+      // < 1e14：按毫秒
+      ms = raw;
+    } else if (raw < 100000000000000000) {
+      // < 1e17：按微秒
+      ms = raw ~/ 1000;
+    } else {
+      // 纳秒
+      ms = raw ~/ 1000000;
+    }
+    // Dart 的合法区间：±8640000000000000
+    const limit = 8640000000000000;
+    if (ms.abs() > limit) return null;
+    return DateTime.fromMillisecondsSinceEpoch(ms);
+  }
 
   ImSession copyWith({
     int? unreadCount,
@@ -523,7 +557,13 @@ class ImMessage {  const ImMessage({
   /// 消息类型（安全映射，未知类型落到 [ImMessageType.unknown]）。
   ImMessageType get type => ImMessageType.fromRaw(msgType);
 
-  DateTime get sentAt => DateTime.fromMillisecondsSinceEpoch(timestamp * 1000);
+  /// 发送时间。
+  ///
+  /// 与 [ImSession.sessionTime] 同源问题：字段单位不固定，直接乘 1000
+  /// 会在纳秒值上溢出并抛 `RangeError`。
+  DateTime get sentAt =>
+      ImSession.tsToDateTime(timestamp) ??
+      DateTime.fromMillisecondsSinceEpoch(0);
 
   /// 是否为"我"发出的消息。
   bool isMine(int myUid) => senderUid == myUid;

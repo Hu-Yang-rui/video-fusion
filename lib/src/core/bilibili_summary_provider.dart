@@ -58,7 +58,6 @@ library;
 import 'dart:convert';
 
 import '../adapters/bilibili/wbi_signer.dart';
-import '../core/errors.dart';
 import '../core/http_client.dart';
 import '../core/logger.dart';
 import '../models/video_summary.dart';

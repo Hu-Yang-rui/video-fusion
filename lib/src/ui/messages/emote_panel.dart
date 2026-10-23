@@ -27,7 +27,6 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../design/apple_tokens.dart';
-import '../../design/components/apple_layout.dart';
 import '../../models/im.dart';
 
 class EmotePanel extends StatefulWidget {

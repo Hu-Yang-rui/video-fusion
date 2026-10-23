@@ -411,12 +411,23 @@ class AppleTabBar extends StatelessWidget {
     required this.currentIndex,
     required this.onChanged,
     this.blurEnabled = true,
+    this.overMedia = false,
   });
 
   final List<AppleTabItem> items;
   final int currentIndex;
   final ValueChanged<int> onChanged;
   final bool blurEnabled;
+
+  /// 底栏是否浮在**深色媒体内容**（全屏视频流）之上。
+  ///
+  /// 为 true 时改用深色半透明底 + 白色图标：
+  ///
+  ///  - 浅灰实心底压在纯黑视频上会像一块贴上去的板子，视觉重量过大；
+  ///  - 顶部 0.5px 分割线在深色背景上会变成一条明显的黑边。
+  ///
+  /// 所以这里去掉分割线、改用深色玻璃，让内容继续做视觉主体。
+  final bool overMedia;
 
   @override
   Widget build(BuildContext context) {
@@ -428,10 +439,17 @@ class AppleTabBar extends StatelessWidget {
     // 这里把手势放在最内层的 GestureDetector，背景只是绘制层。
     final content = Container(
       decoration: BoxDecoration(
-        color: blurEnabled
-            ? c.secondaryGroupedBackground.withValues(alpha: 0.82)
-            : c.secondaryGroupedBackground,
-        border: Border(top: BorderSide(color: c.separator, width: 0.5)),
+        color: overMedia
+            // 深色玻璃：透明度更低，靠模糊维持可读性，
+            // 不用实心色块压住视频。
+            ? Colors.black.withValues(alpha: blurEnabled ? 0.34 : 0.72)
+            : blurEnabled
+                ? c.secondaryGroupedBackground.withValues(alpha: 0.82)
+                : c.secondaryGroupedBackground,
+        // 浮在媒体上时不画分割线：深色背景上 0.5px 灰线会变成黑边。
+        border: overMedia
+            ? null
+            : Border(top: BorderSide(color: c.separator, width: 0.5)),
       ),
       padding: EdgeInsets.only(bottom: bottomInset),
       child: SizedBox(
@@ -444,6 +462,7 @@ class AppleTabBar extends StatelessWidget {
                   item: items[i],
                   selected: i == currentIndex,
                   onTap: () => onChanged(i),
+                  overMedia: overMedia,
                 ),
               ),
           ],
@@ -455,7 +474,10 @@ class AppleTabBar extends StatelessWidget {
 
     return ClipRect(
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        filter: ImageFilter.blur(
+          sigmaX: overMedia ? 24 : 20,
+          sigmaY: overMedia ? 24 : 20,
+        ),
         child: content,
       ),
     );
@@ -480,16 +502,22 @@ class _TabItem extends StatelessWidget {
     required this.item,
     required this.selected,
     required this.onTap,
+    this.overMedia = false,
   });
 
   final AppleTabItem item;
   final bool selected;
   final VoidCallback onTap;
+  final bool overMedia;
 
   @override
   Widget build(BuildContext context) {
     final c = AppleColors.of(context);
-    final tint = selected ? c.blue : c.secondaryLabel;
+    // 浮在深色媒体上时，未选中项用白色高透明度而不是浅灰——
+    // 浅灰在黑底上对比过低，看起来像"禁用"状态。
+    final tint = selected
+        ? (overMedia ? Colors.white : c.blue)
+        : (overMedia ? Colors.white.withValues(alpha: 0.62) : c.secondaryLabel);
 
     return GestureDetector(
       onTap: onTap,

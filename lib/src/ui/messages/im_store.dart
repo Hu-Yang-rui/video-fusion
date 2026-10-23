@@ -179,7 +179,12 @@ class ImStore extends ChangeNotifier {
       _session = await _vault
           .load(platformId)
           .timeout(const Duration(seconds: 5));
-    } catch (_) {
+      debugPrint(
+        '[im] init platform=$platformId '
+        'session=${_session == null ? "null" : "uid=${_session!.userId}"}',
+      );
+    } catch (e) {
+      debugPrint('[im] init failed: $e');
       _session = null;
     }
     notifyListeners();
@@ -221,11 +226,13 @@ class ImStore extends ChangeNotifier {
     }
 
     try {
+      debugPrint('[im] loadSessions start (refresh=$refresh)');
       final page = await _service.fetchImSessions(
         platformId,
         session: s,
         endTs: refresh ? 0 : _nextEndTs,
       );
+      debugPrint('[im] fetchImSessions ok: ${page.items.length} 条');
       if (refresh) _sessions.clear();
       // 去重：同一 talkerId 只保留一条（服务端可能因时间相近重复下发）
       final existing = _sessions.map((e) => e.talkerId).toSet();
@@ -246,8 +253,14 @@ class ImStore extends ChangeNotifier {
         return b.sessionTs.compareTo(a.sessionTs);
       });
 
+      // 列表已经可渲染：先通知一次，别让用户等昵称/未读。
+      debugPrint('[im] _sessions.length=${_sessions.length} '
+          'loading=$sessionsLoading loggedIn=${_session != null}');
+      notifyListeners();
+
       // 补昵称/头像（一次批量请求）
       await _ensureUserInfos(_sessions.map((e) => e.talkerId).toList());
+      debugPrint('[im] userInfos ok');
 
       // 未读汇总（失败不影响列表）
       try {
@@ -256,11 +269,13 @@ class ImStore extends ChangeNotifier {
         // 未读拿不到就不显示红点，不阻断列表
       }
     } on FusionException catch (e) {
+      debugPrint('[im] sessions FusionException: ${e.code} ${e.userMessage}');
       sessionsError = e;
       if (e.code == FusionErrorCode.loginRequired) {
         _session = null;
       }
     } catch (e) {
+      debugPrint('[im] sessions error: $e');
       sessionsError = normalizeError(e, platformId: platformId);
     } finally {
       sessionsLoading = false;

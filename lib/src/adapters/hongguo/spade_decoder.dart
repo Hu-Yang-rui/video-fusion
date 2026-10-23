@@ -152,28 +152,81 @@ class SpadeDecoder {
     return key;
   }
 
-  /// 用 AES-CBC 解密 spade 载荷得到明文地址。
+  /// 解密 `main_url` 得到明文播放地址。
   ///
-  /// [spade] 原始 base64；[key] 16 字节；[iv] 16 字节。
+  /// [mainUrl] 是接口给的加密串；[keySeed] 是 `video_info.data.key_seed`
+  /// （base64，44 字符左右）。
+  ///
+  /// 算法：
+  ///  1. 自定义 base64 解码，头部必须是 `a8 ?? 01 00`
+  ///  2. `h = SHA512(SHA512(seed) + CONSTANTS)`（双层，常量 128 字节）
+  ///  3. AES-128-CBC，key = `h[0:16]`，iv = `h[16:32]`，数据从第 4 字节开始
+  ///  4. 去 PKCS7 填充，再去尾部 `\0`
   String? decryptSpadeUrl({
-    required String spade,
-    required List<int> key,
-    required List<int> iv,
+    required String mainUrl,
+    required String keySeed,
   }) {
-    final raw = decodeSpadeBase64(spade);
-    if (raw.isEmpty || raw.length % 16 != 0) return null;
+    final raw = decodeSpadeBase64(mainUrl);
+    if (raw.length < 20) return null;
+    // 头部：a8 ?? 01 00
+    if (raw[0] != 0xA8 || raw[2] != 0x01 || raw[3] != 0x00) return null;
 
-    final plain = aesCbcDecrypt(key, iv, raw);
+    final seed = decodeSpadeBase64(keySeed);
+    if (seed.isEmpty) return null;
+
+    final h = _sha512(_join(_sha512(seed), _urlConstants));
+    if (h.length < 32) return null;
+
+    // 密文长度必须是 16 的倍数
+    final bodyLen = (raw.length - 4) ~/ 16 * 16;
+    if (bodyLen <= 0) return null;
+    final body = raw.sublist(4, 4 + bodyLen);
+
+    final plain = aesCbcDecrypt(
+      h.sublist(0, 16),
+      h.sublist(16, 32),
+      body,
+    );
     if (plain == null) return null;
 
+    // 去 PKCS7 填充
     var end = plain.length;
+    final padding = plain[end - 1];
+    if (padding >= 1 && padding <= 16 && padding <= end) {
+      end -= padding;
+    }
+    // 去尾部 \0
     while (end > 0 && plain[end - 1] == 0) {
       end--;
     }
-    if (end == 0) return null;
+    if (end <= 0) return null;
 
     return utf8.decode(plain.sublist(0, end), allowMalformed: true);
   }
+
+  /// URL 解密用的 64 字节常量。
+  static final Uint8List _urlConstants = Uint8List.fromList(const <int>[
+    0x4d, 0xd4, 0xc2, 0xe6, 0xb8, 0x31, 0x62, 0x09,
+    0x0e, 0x52, 0xb3, 0xc7, 0xa6, 0x73, 0x3b, 0xa4,
+    0x1c, 0xb2, 0x46, 0x2b, 0x82, 0x9a, 0xb5, 0x8a,
+    0x19, 0x6b, 0x39, 0xdb, 0x57, 0x17, 0x75, 0x24,
+    0xf4, 0x9b, 0xaf, 0x7f, 0x08, 0xe8, 0xd6, 0x8d,
+    0x26, 0xa7, 0x2e, 0x37, 0xc1, 0xa9, 0x5a, 0x2f,
+    0x1f, 0x05, 0xa5, 0x18, 0x92, 0xae, 0xf2, 0x94,
+    0x97, 0x32, 0xb6, 0x2a, 0x38, 0xaa, 0xdd, 0x58,
+  ]);
+
+  /// 拼接两段字节。
+  static Uint8List _join(List<int> a, List<int> b) {
+    final out = Uint8List(a.length + b.length);
+    out.setRange(0, a.length, a);
+    out.setRange(a.length, out.length, b);
+    return out;
+  }
+
+  /// SHA-512 摘要。
+  static Uint8List _sha512(List<int> data) =>
+      Uint8List.fromList(crypto.sha512.convert(data).bytes);
 
   static int _popcount(int v) {
     var n = 0;

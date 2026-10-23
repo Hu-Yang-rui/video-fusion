@@ -319,7 +319,7 @@ void main() {
         throwsA(isA<FusionException>().having(
           (e) => e.userMessage,
           'userMessage',
-          contains('暂无可播放的公开源'),
+          contains('暂时取不到播放地址'),
         )),
         reason: '不能返回一个注定 404 的播放地址',
       );

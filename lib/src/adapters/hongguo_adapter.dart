@@ -4,6 +4,7 @@
 /// 搜索、评论、点赞、投币、收藏、私信、直播均不支持。
 library;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import '../core/errors.dart';
 import '../core/http_client.dart';
 import '../core/logger.dart';
@@ -39,8 +40,17 @@ class HongguoAdapter extends PlatformAdapter {
   /// 尝试取完整清晰度；失败返回 null。
   Future<HongguoEpisodeMedia?> _tryFetchMainSource(String vid) async {
     try {
-      return await _mediaClient.fetchEpisodeMedia(vid);
+      final media = await _mediaClient.fetchEpisodeMedia(vid);
+      _logger.debug('hongguo: signed source ok', {
+        'vid': vid,
+        'qualities': media.qualities.length,
+        'highest': media.highest?.label,
+      });
+      return media;
     } catch (e) {
+      // 保留到 logcat：签名链路失败是最常见的播放故障，
+      // 只在 logger 里记会导致 release 版完全看不到原因。
+      debugPrint('[hongguo] signed source failed: $e');
       _logger.warn('hongguo: main source failed, falling back to 360p', {
         'vid': vid,
         'error': '$e'.split('\n').first,
@@ -353,32 +363,11 @@ class HongguoAdapter extends PlatformAdapter {
           )
         : detail.episodes.first;
 
-    // 关键：官网 360p 不是每集都有（实测第 8、9、13–18、21–29 集 404）。
-    // 不能假设"拿到 vid 就能播"，先探测。
-    final playable = await isEpisodePlayable(ep.vid);
-    if (!playable) {
-      throw FusionException(
-        code: FusionErrorCode.upstreamError,
-        userMessage:
-            '第 ${ep.index} 集暂无可播放的公开源。'
-            '红果官网只对部分集数开放公开播放（实测约前 7 集及零星几集），'
-            '其余需要官方 APP。',
-        technicalMessage:
-            '360p HEAD returned non-2xx for vid=${ep.vid} '
-            '(seriesId=$seriesId, episode=${ep.index}); '
-            '官网公开源覆盖不完整，非本项目实现缺陷',
-        platformId: id,
-        retryable: false,
-        diagnostics: {
-          'seriesId': seriesId,
-          'episode': ep.index,
-          'vid': ep.vid,
-          'note': '官网公开 360p 仅覆盖部分集数',
-        },
-      );
-    }
-
-    // 优先取完整清晰度；失败则降级到官网 360p。
+    // 先走签名链路拿完整清晰度（全量覆盖，含 1080P）。
+    //
+    // 顺序很重要：以前是先探测「官网 360p」，探测不到就直接抛错，
+    // 导致签名链路根本没机会执行。官网 360p 只覆盖零星几集，
+    // 而签名链路是全量覆盖，必须先试后者。
     final media = await _tryFetchMainSource(ep.vid);
     if (media != null && !media.isEmpty) {
       final wanted = request.preferQuality;
@@ -416,7 +405,30 @@ class HongguoAdapter extends PlatformAdapter {
       }
     }
 
-    // 兜底：官网 360p
+    // 降级：官网 360p。
+    //
+    // 官网公开源不是每集都有（实测第 8、9、13–18、21–29 集 404），
+    // 所以这里先探测再用，避免把 404 当成播放源交给播放器。
+    final playable = await isEpisodePlayable(ep.vid);
+    if (!playable) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '第 ${ep.index} 集暂时取不到播放地址，请稍后重试。',
+        technicalMessage:
+            'both paths failed for vid=${ep.vid} '
+            '(seriesId=$seriesId, episode=${ep.index}): '
+            'signed video_model returned no source, '
+            'and official 360p HEAD returned non-2xx',
+        platformId: id,
+        retryable: true,
+        diagnostics: {
+          'seriesId': seriesId,
+          'episode': ep.index,
+          'vid': ep.vid,
+        },
+      );
+    }
+
     return NativePlaybackSource(
       videoId: videoId,
       videoStreamUrl: ep.playUrl,
