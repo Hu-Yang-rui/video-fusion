@@ -226,6 +226,87 @@ class HongguoParser {
     return out;
   }
 
+  /// 解析**搜索接口**返回的 JSON（不是 HTML）。
+  ///
+  /// 接口：`GET /api/search/result/?query={关键词}&page={页码}`
+  ///
+  /// # 实测（2026-10-23，`query=总裁`）
+  ///
+  /// 响应结构：
+  /// ```json
+  /// {
+  ///   "searchList": [
+  ///     {"doc_type":23, "name":"总裁是我前女友",
+  ///      "keyword":"7688352674999176254",
+  ///      "video_data":{"series_id":"...","series_title":"...",
+  ///                    "series_cover":"https://...","episode_cnt":95,
+  ///                    "series_intro":"...", ...}}
+  ///   ],
+  ///   "totalCount": 204, "pageNum": 1, "totalPages": 21, "hasMore": true
+  /// }
+  /// ```
+  ///
+  /// 三个必须知道的坑：
+  ///  1. 剧集信息在 **`video_data` 子对象**里，不在条目顶层；
+  ///     顶层的 `name` 是搜索命中的展示名，`series_title` 才是剧名。
+  ///  2. 字段名是 `series_cover`（不是分类页的 `series_cover_pc`）。
+  ///  3. 每页**固定 10 条**，`count` 参数不生效；分页用 `page`。
+  ///
+  /// 解析失败或空列表返回空（由适配器决定报"没搜到"还是"解析失败"）。
+  SearchParseResult parseSearchResult(String body) {
+    final Map<String, Object?> root;
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is! Map) return SearchParseResult.empty;
+      root = Map<String, Object?>.from(decoded);
+    } catch (_) {
+      return SearchParseResult.empty;
+    }
+
+    final rawList = root['searchList'];
+    final out = <HongguoSeries>[];
+    final seen = <String>{};
+    if (rawList is List) {
+      for (final item in rawList) {
+        if (item is! Map) continue;
+        final entry = Map<String, Object?>.from(item);
+
+        // 剧集数据在 video_data 里；没有就跳过（可能是演员/话题命中）
+        final vd = entry['video_data'];
+        if (vd is! Map) continue;
+        final v = Map<String, Object?>.from(vd);
+
+        final seriesId = _str(v['series_id']);
+        if (seriesId == null || seriesId.isEmpty) continue;
+        if (!seen.add(seriesId)) continue;
+
+        final title = _str(v['series_title']) ??
+            _str(v['series_name']) ??
+            _str(entry['name']) ??
+            '';
+        if (title.isEmpty) continue;
+
+        out.add(
+          HongguoSeries(
+            seriesId: seriesId,
+            title: title,
+            coverUrl: _str(v['series_cover']) ?? _str(v['series_cover_pc']),
+            description: _str(v['series_intro']),
+            episodeCount: _toInt(v['episode_cnt']),
+          ),
+        );
+      }
+    }
+
+    return SearchParseResult(
+      items: out,
+      totalCount: _toInt(root['totalCount']) ?? 0,
+      pageNum: _toInt(root['pageNum']) ?? 1,
+      totalPages: _toInt(root['totalPages']) ?? 1,
+      hasMore: root['hasMore'] == true,
+    );
+  }
+
   /// 兜底：解析顶层 `video_list`（首页只有 9 部时可能走这里）。
   List<HongguoSeries> _parseTopLevelVideoList(String html) {
     final raw = _extractJsonArray(html, 'video_list');
@@ -373,4 +454,41 @@ class HongguoParser {
     if (v is String) return int.tryParse(v);
     return null;
   }
+}
+
+/// 搜索接口的解析结果（含分页信息）。
+///
+/// 与 [HongguoSeries] 列表分开返回：搜索结果需要 `totalCount` / `hasMore`
+/// 才能正确渲染"共 N 部，还有更多"，只返回列表会丢掉这些。
+class SearchParseResult {
+  const SearchParseResult({
+    required this.items,
+    required this.totalCount,
+    required this.pageNum,
+    required this.totalPages,
+    required this.hasMore,
+  });
+
+  static const SearchParseResult empty = SearchParseResult(
+    items: [],
+    totalCount: 0,
+    pageNum: 1,
+    totalPages: 1,
+    hasMore: false,
+  );
+
+  final List<HongguoSeries> items;
+
+  /// 平台口径的命中总数（实测 `query=总裁` → 204）。
+  final int totalCount;
+
+  /// 当前页（从 1 开始，平台回显）。
+  final int pageNum;
+
+  final int totalPages;
+
+  /// 平台是否声明还有下一页。
+  final bool hasMore;
+
+  bool get isEmpty => items.isEmpty;
 }

@@ -1096,13 +1096,76 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
     );
   }
 
+  /// 互动状态（关注态 + 统计数）。
+  ///
+  /// # 本轮修复（2026-10-23）
+  ///
+  /// 旧实现直接 `return InteractionState.unknown`，于是关注按钮永远显示
+  /// "关注"（哪怕已关注过），关注成功后 `refreshState()` 读回仍是 unknown，
+  /// 按钮不变化 → 用户看到"点了没反应"。
+  ///
+  /// 实测（aweme/detail 真实响应）author 对象含 `follow_status`（0 = 未关注），
+  /// 与 B站 `archive/relation.attention` 同语义，随详情一并下发、无需额外请求。
+  ///
+  /// # 为什么 known 仍按"能否确认"给，而不是一律 true
+  ///
+  /// UI 直接用 `state.liked` / `state.favorited` 渲染按钮高亮
+  /// （`video_detail_screen` 的 `active: state.liked`）。抖音这份数据里
+  /// **只有关注态与统计数**，点赞/收藏的"我"状态不在这里——若把
+  /// known 设 true 又不填 liked/favorited，已点赞的视频会显示成未点赞。
+  ///
+  /// 所以：**只在能确认关注态时**返回 known=true，并**如实只声称关注态**。
+  /// 调用方（控制器）另有 `following` 单独消费路径，点赞/收藏的未知
+  /// 仍表现为 unknown（不冒充"未点赞"）。
   @override
   Future<InteractionState> fetchInteractionState(
     String platformVideoId, {
     PlatformSession? session,
     int? aid,
-  }) async =>
-      InteractionState.unknown;
+  }) async {
+    if (session == null) return InteractionState.unknown;
+
+    try {
+      final json = await _writeRequest(
+        path: '/aweme/v1/web/aweme/detail/',
+        params: {'aweme_id': platformVideoId},
+        method: 'GET',
+      );
+      final detail = json['aweme_detail'];
+      if (detail is! Map) return InteractionState.unknown;
+      final d = Map<String, Object?>.from(detail);
+      final author = d['author'] is Map
+          ? Map<String, Object?>.from(d['author'] as Map)
+          : const <String, Object?>{};
+
+      final followStatus = (author['follow_status'] as num?)?.toInt();
+      if (followStatus == null) return InteractionState.unknown;
+
+      final stats = d['statistics'] is Map
+          ? Map<String, Object?>.from(d['statistics'] as Map)
+          : const <String, Object?>{};
+
+      // known 保持 false：这份响应里**没有**"我是否点赞/收藏"的字段，
+      // 设 true 会让 UI 把 liked/favorited 的默认 false 当成
+      // "未点赞/未收藏"（详情页用 `active: state.liked` 控制高亮）。
+      //
+      // 关注态单独用 followKnown 声明——它才是这份数据能确认的部分。
+      return InteractionState(
+        known: false,
+        followKnown: true,
+        liked: false,
+        coined: 0,
+        favorited: false,
+        following: followStatus != 0,
+        likeCount: (stats['digg_count'] as num?)?.toInt(),
+        commentCount: (stats['comment_count'] as num?)?.toInt(),
+      );
+    } on FusionException {
+      return InteractionState.unknown;
+    } catch (_) {
+      return InteractionState.unknown;
+    }
+  }
 
   @override
   Future<InteractionResult> setLike(
@@ -2192,6 +2255,91 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
   @override
   bool get supportsSearch => true;
 
+  /// 搜索联想词：抖音**匿名可用**。
+  ///
+  /// # 实测（2026-10-23，probe_dy_search_state.mjs）
+  ///
+  /// 同一批探测里，四个搜索结果端点全部 `2483 请先登录`：
+  /// ```
+  /// general/search/single  code=2483
+  /// general/search/stream  code=2483
+  /// search/item            code=2483
+  /// discover/search        code=2483
+  /// ```
+  /// 但 `search/sug` **`code=0`**，返回 22148 字节真实候选词：
+  /// ```json
+  /// {"sug_list":[{"content":"猫粮","sug_type":"",
+  ///               "word_record":{"words_content":"猫粮",...}, ...}]}
+  /// ```
+  ///
+  /// 所以未登录时搜索框不该是死的——至少能给候选词，点一个再提示登录。
+  /// 这是本轮在"搜索"上能真正交付的增量。
+  @override
+  bool get supportsSearchSuggestions => true;
+
+  /// 拉取搜索联想词（匿名可用）。
+  ///
+  /// 接口：`GET /aweme/v1/web/search/sug/?keyword={前缀}`
+  /// 取 `sug_list[].content`，去重后返回。
+  @override
+  Future<List<String>> fetchSearchSuggestions(String query) async {
+    final keyword = query.trim();
+    if (keyword.isEmpty) return const [];
+
+    final DouyinCommentResponse response;
+    {
+      final signer = _ensureSigner;
+      // 联想词不需要 full UIFID（实测 temp 级别即可），
+      // 这样冷启动时也能立刻给候选。
+      final ready = await signer.ensureReady();
+      if (!ready) {
+        throw FusionException(
+          code: FusionErrorCode.capabilityUnavailable,
+          userMessage: '抖音会话初始化未完成，暂时无法获取联想词。',
+          technicalMessage:
+              'sug requires session; readiness=${signer.readiness.name}',
+          platformId: id,
+          retryable: true,
+        );
+      }
+      response = await signer.request(
+        path: '/aweme/v1/web/search/sug/',
+        params: {..._detailParams(''), 'keyword': keyword},
+      );
+    }
+
+    final json = response.tryParseJson();
+    if (json == null) {
+      // 联想词是"锦上添花"：解析失败返回空，不打断用户输入。
+      return const [];
+    }
+    final code = json['status_code'];
+    if (code != 0) {
+      // 同理：不因为联想词失败就弹错。但也不谎报有结果。
+      return const [];
+    }
+
+    final list = json['sug_list'];
+    if (list is! List) return const [];
+    final out = <String>[];
+    final seen = <String>{};
+    for (final raw in list) {
+      if (raw is! Map) continue;
+      final m = Map<String, Object?>.from(raw);
+      final word = _nullableString(m['content'])?.trim() ??
+          (_nullableString(
+            m['word_record'] is Map
+                ? (m['word_record'] as Map)['words_content']
+                : null,
+          ))?.trim();
+      if (word == null || word.isEmpty) continue;
+      if (!seen.add(word)) continue;
+      out.add(word);
+      if (out.length >= 10) break; // 下拉最多 10 条，够用且省流量
+    }
+    return out;
+  }
+
   @override
   Future<FeedPage> searchVideos(
     String query, {
@@ -2800,9 +2948,21 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable {
       description: _nullableString(raw['desc']),
       author: VideoAuthor(
         name: _nullableString(author['nickname']),
-        platformAuthorId: _nullableString(author['uid']),
+        // 必须是 sec_uid，不是 uid。
+        //
+        // 实测（2026-10-23，aweme/detail 真实响应）：author 里两个都在，
+        // `uid=3890515065704004`（纯数字）、`sec_uid=MS4wLjABAAAA...`。
+        // 但 `commit/follow/user` 认的是 **sec_user_id**（bundle 调用点
+        // 传的就是 sec_uid）。以前这里填 uid，导致从**推荐流/搜索**点关注
+        // 必然失败——而详情页走另一条映射填的是 sec_uid，所以详情页能用、
+        // 信息流不能用，表现成"有时候关注得上，有时候点了没反应"。
+        platformAuthorId: _nullableString(author['sec_uid']) ??
+            _nullableString(author['uid']),
         avatarUrl: _firstUrlIn(author['avatar_thumb']) ??
             _firstUrlIn(author['avatar_medium']),
+        profileUrl: _nullableString(author['sec_uid']) != null
+            ? 'https://www.douyin.com/user/${author['sec_uid']}'
+            : null,
       ),
       coverUrl: coverUrl,
       durationSeconds: durationSec,

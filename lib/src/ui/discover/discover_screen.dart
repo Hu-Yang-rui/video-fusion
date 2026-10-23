@@ -61,6 +61,19 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   bool _searchMode = false;
   String _query = '';
 
+  /// 当前搜索联想词（输入时实时更新）。
+  ///
+  /// 实测：抖音的 `search/sug` 匿名可用，而搜索结果接口要登录
+  /// （`2483 请先登录`）。所以未登录时这里仍能给候选词——
+  /// 用户点一个候选词再看到"需要登录"，比整个搜索框是死的要好。
+  List<String> _suggestions = const [];
+
+  /// 联想词请求代际号：快速输入时丢弃过期响应，避免候选词串台。
+  int _sugGeneration = 0;
+
+  /// 联想词防抖定时器。
+  Timer? _sugDebounce;
+
   /// 请求代际号：每次"换来源 / 换关键词 / 刷新"递增。
   ///
   /// # 为什么必须有它（真实缺陷）
@@ -168,9 +181,40 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
 
   @override
   void dispose() {
+    _sugDebounce?.cancel();
     _scroll.dispose();
     _searchCtrl.dispose();
     super.dispose();
+  }
+
+  /// 输入变化 → 防抖拉联想词。
+  ///
+  /// 防抖 300ms：实测抖音 sug 接口单次 ~22KB，逐字符发会把输入框
+  /// 打成请求风暴。代际号保证快速输入时候选词不会串台。
+  void _onSearchChanged(String value) {
+    _sugDebounce?.cancel();
+    final text = value.trim();
+    if (text.isEmpty) {
+      if (_suggestions.isNotEmpty) setState(() => _suggestions = const []);
+      return;
+    }
+    _sugDebounce = Timer(const Duration(milliseconds: 300), () async {
+      final gen = ++_sugGeneration;
+      final words = await widget.service.fetchSearchSuggestions(text);
+      // 过期响应丢弃（用户已经改了输入）
+      if (!mounted || gen != _sugGeneration) return;
+      setState(() => _suggestions = words);
+    });
+  }
+
+  /// 点候选词：填进输入框并直接搜。
+  void _applySuggestion(String word) {
+    _searchCtrl.text = word;
+    setState(() {
+      _suggestions = const [];
+      _query = word;
+    });
+    _performSearch(word);
   }
 
   /// 网格代理：按**内容实际高度**算每格高度，而不是写死宽高比。
@@ -263,26 +307,86 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                   AppleSpace.pageInset,
                   AppleSpace.md,
                 ),
-                child: TextField(
-                  controller: _searchCtrl,
-                  autofocus: true,
-                  textInputAction: TextInputAction.search,
-                  style: AppleType.body.copyWith(color: c.label),
-                  decoration: InputDecoration(
-                    hintText: '搜索视频',
-                    prefixIcon: Icon(
-                      Icons.search_rounded,
-                      size: 20,
-                      color: c.secondaryLabel,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    TextField(
+                      controller: _searchCtrl,
+                      autofocus: true,
+                      textInputAction: TextInputAction.search,
+                      style: AppleType.body.copyWith(color: c.label),
+                      decoration: InputDecoration(
+                        hintText: '搜索视频',
+                        prefixIcon: Icon(
+                          Icons.search_rounded,
+                          size: 20,
+                          color: c.secondaryLabel,
+                        ),
+                        isDense: true,
+                      ),
+                      onChanged: _onSearchChanged,
+                      onSubmitted: (q) {
+                        final text = q.trim();
+                        if (text.isEmpty) return;
+                        setState(() {
+                          _suggestions = const [];
+                          _query = text;
+                        });
+                        _performSearch(text);
+                      },
                     ),
-                    isDense: true,
-                  ),
-                  onSubmitted: (q) {
-                    final text = q.trim();
-                    if (text.isEmpty) return;
-                    setState(() => _query = text);
-                    _performSearch(text);
-                  },
+                    // 联想词下拉。
+                    //
+                    // 未登录也有内容：抖音的 sug 接口匿名可用，
+                    // 而搜索结果接口要登录。给候选词比给一个死搜索框好。
+                    if (_suggestions.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: AppleSpace.xs),
+                        child: Material(
+                          color: c.secondaryGroupedBackground,
+                          borderRadius:
+                              BorderRadius.circular(AppleRadius.md),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              for (final w in _suggestions.take(8))
+                                InkWell(
+                                  onTap: () => _applySuggestion(w),
+                                  borderRadius:
+                                      BorderRadius.circular(AppleRadius.md),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: AppleSpace.md,
+                                      vertical: AppleSpace.sm,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          Icons.search_rounded,
+                                          size: 15,
+                                          color: c.tertiaryLabel,
+                                        ),
+                                        const SizedBox(
+                                            width: AppleSpace.sm),
+                                        Expanded(
+                                          child: Text(
+                                            w,
+                                            maxLines: 1,
+                                            overflow:
+                                                TextOverflow.ellipsis,
+                                            style: AppleType.footnote
+                                                .copyWith(color: c.label),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
 

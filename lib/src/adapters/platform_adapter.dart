@@ -186,6 +186,30 @@ abstract class PlatformAdapter {
     );
   }
 
+  /// 是否支持**搜索联想词**（输入时的候选提示）。
+  ///
+  /// 与 [supportsSearch] 分开，因为两者的登录要求常常不同：
+  /// 抖音的搜索结果接口要登录（`2483 请先登录`），但联想词接口
+  /// **匿名可用**（实测 `code=0`）。UI 据此在未登录时也能给候选词，
+  /// 而不是整个搜索框都是死的。
+  bool get supportsSearchSuggestions => false;
+
+  /// 拉取搜索联想词。
+  ///
+  /// [query] 是用户已输入的前缀。返回候选词列表（纯文本，已去重）。
+  ///
+  /// 不支持时抛 `unsupportedPlatform`；**返回空列表表示"这个前缀没有
+  /// 候选词"**（平台确实没给），不是"能力不可用"。
+  Future<List<String>> fetchSearchSuggestions(String query) {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持搜索联想。',
+      technicalMessage:
+          'Adapter $id does not implement fetchSearchSuggestions',
+      platformId: id,
+    );
+  }
+
   // ── 互动能力 ────────────────────────────────────────────────
 
   /// 是否支持读取评论列表。

@@ -203,6 +203,7 @@ class InteractionState {
     this.commentCount,
     this.favoritedFolderIds = const [],
     this.following = false,
+    this.followKnown = false,
     this.watchLater = false,
   });
 
@@ -259,14 +260,32 @@ class InteractionState {
 
   /// 是否已关注该视频的 UP 主。
   ///
-  /// 来源字段（实测 2026-10-19）：
+  /// 来源字段（实测）：
   ///  - B 站：`/x/web-interface/archive/relation` 的 `data.attention`（bool）。
   ///    该键**实测存在**，与 `favorite`/`like` 同批返回，因此关注状态
   ///    不需要额外请求。
+  ///  - 抖音：`aweme/detail` 的 `author.follow_status`（实测 2026-10-23，
+  ///    0 = 未关注）。抖音没有独立的 relation 端点，关注态随详情下发。
   ///
-  /// 仅在 [known] 为 true 时有意义；[InteractionState.unknown] 里它是
-  /// false，**表示"不知道"**，UI 不得据此渲染成"未关注"。
+  /// 仅在 [followKnown] 为 true 时有意义。**不要用 [known] 判断**——
+  /// 有的平台（抖音）能确认关注态却确认不了点赞/收藏态，
+  /// 用 [known] 会把点赞按钮误报成"未点赞"。
   final bool following;
+
+  /// [following] 是否是**平台确认过的**值。
+  ///
+  /// # 为什么和 [known] 分开
+  ///
+  /// 各平台能确认的字段不一样：抖音的 `aweme/detail` 里有
+  /// `author.follow_status`（关注态可信），但**没有**"我是否点赞/收藏"
+  /// 的字段。若为了关注态把 [known] 设成 true，UI 就会把
+  /// `liked=false` / `favorited=false` 当成"未点赞/未收藏"渲染
+  /// （`video_detail_screen` 直接用 `active: state.liked` 控制高亮），
+  /// 已点赞的视频会显示成没点过。
+  ///
+  /// 所以关注态单独一位：UI 渲染关注按钮看 [followKnown]，
+  /// 渲染点赞/收藏仍看 [known]。
+  final bool followKnown;
 
   /// 该视频是否已在"稍后再看"列表里。
   ///
@@ -290,6 +309,7 @@ class InteractionState {
     int? commentCount,
     List<int>? favoritedFolderIds,
     bool? following,
+    bool? followKnown,
     bool? watchLater,
   }) =>
       InteractionState(
@@ -304,6 +324,7 @@ class InteractionState {
         favoritedFolderIds:
             favoritedFolderIds ?? this.favoritedFolderIds,
         following: following ?? this.following,
+        followKnown: followKnown ?? this.followKnown,
         watchLater: watchLater ?? this.watchLater,
       );
 }

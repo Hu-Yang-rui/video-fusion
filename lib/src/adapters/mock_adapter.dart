@@ -69,6 +69,19 @@ class MockAdapter implements PlatformAdapter {
   bool get supportsSearch => false;
 
   @override
+  bool get supportsSearchSuggestions => false;
+
+  @override
+  Future<List<String>> fetchSearchSuggestions(String query) async {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '模拟平台不支持搜索联想。',
+      technicalMessage: 'MockAdapter does not implement fetchSearchSuggestions',
+      platformId: id,
+    );
+  }
+
+  @override
   Future<FeedPage> searchVideos(
     String query, {
     int page = 1,

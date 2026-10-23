@@ -351,6 +351,25 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
   @override
   bool get supportsSearch => true;
 
+  /// 搜索联想词：**未实测**，如实声明不支持。
+  ///
+  /// B站确实有 `/x/web-interface/search/suggest` 之类的能力，但本项目
+  /// 没有对它做过实测验证（AGENTS.md：未实测的能力不声明为可用）。
+  /// UI 据此不给候选词下拉，但搜索结果本身照常可用。
+  @override
+  bool get supportsSearchSuggestions => false;
+
+  @override
+  Future<List<String>> fetchSearchSuggestions(String query) async {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持搜索联想。',
+      technicalMessage: 'bilibili search suggestions not implemented '
+          '(endpoint exists but not verified by this project)',
+      platformId: id,
+    );
+  }
+
   /// 搜索视频。
   ///
   /// 实测确认（2026-10，未登录）：
@@ -2577,6 +2596,9 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
         favoritedFolderIds: const [],
         // attention = 是否已关注 UP 主（同批返回，无需额外请求）
         following: _toBool(d['attention']),
+        // B站的 relation 一次给全（点赞/收藏/关注都在），
+        // 所以关注态与 known 同步可信。
+        followKnown: true,
       );
     } on FusionException {
       rethrow;

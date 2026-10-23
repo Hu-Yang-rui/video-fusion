@@ -98,10 +98,8 @@ class HongguoAdapter extends PlatformAdapter {
   // ── 能力声明：只声明实测可用的 ────────────────────────────
   //
   // 其余 supports* 走接口默认值 false，UI 自动隐藏入口。
-  // 搜索未验证 → false；无评论/互动/直播/弹幕/私信 → 默认 false。
-
-  @override
-  bool get supportsSearch => false;
+  // 无评论/互动/直播/弹幕/私信 → 默认 false。
+  // 搜索已实现（2026-10-23），见下方 searchVideos。
 
   @override
   bool get supportsComments => false;
@@ -729,22 +727,172 @@ class HongguoAdapter extends PlatformAdapter {
     return categoryLabels.containsKey(slug) ? slug : null;
   }
 
-  // ── 搜索：如实不支持 ─────────────────────────────────────
+  // ── 搜索 ─────────────────────────────────────────────────
 
+  /// 红果支持搜索。
+  ///
+  /// 实测（2026-10-23）：官网确实有公开搜索接口，之前"未找到"是因为
+  /// 只翻了解包产物、没看页面 HTML 里的 `_SdkGlueInit` 配置。
+  /// 那个配置里明写着允许路径：
+  /// ```
+  /// bdms:{paths:{include:["^/api/search/result/?$",
+  ///                       "^/api/search/suggestion/?$"]}}
+  /// ```
+  @override
+  bool get supportsSearch => true;
+
+  /// 搜索剧集。
+  ///
+  /// 接口：`GET /api/search/result/?query={关键词}&page={页码}`
+  ///
+  /// # 实测参数语义（2026-10-23，`query=总裁`）
+  ///
+  /// | 参数 | 结果 |
+  /// |---|---|
+  /// | `query=` | ✅ 正确（返回 `totalCount=204, totalPages=21`） |
+  /// | `keyword=` / `q=` | ❌ `400 invalid_query` |
+  /// | `page=2` | ✅ 生效（pageNum=2，首条换成另一部剧） |
+  /// | `pageNum=2` | ❌ **不生效**（仍回 pageNum=1、同一批数据） |
+  /// | `offset=20` | ❌ 不生效（与 offset=0 完全一样） |
+  /// | `count=20` | ❌ 不生效（每页固定 10 条） |
+  ///
+  /// `pageNum` / `offset` 这两个"看起来该能用"的参数都会**静默失败**
+  /// （HTTP 200 + 同一页数据），是这次踩到的主要坑——照搬响应字段名
+  /// 当请求参数就会这样。真正生效的是 `page`。
+  ///
+  /// 关键词上限 30 字符（超出返回 `400 invalid_query`），本地先拦。
   @override
   Future<FeedPage> searchVideos(
     String query, {
     int page = 1,
     int pageSize = 20,
-  }) async => throw FusionException(
-    code: FusionErrorCode.unsupportedPlatform,
-    userMessage: '红果短剧暂不支持搜索。',
-    technicalMessage:
-        'hongguo: no verified public search endpoint '
-        '(官网未找到搜索接口)',
-    platformId: id,
-    retryable: false,
-  );
+  }) async {
+    final keyword = query.trim();
+    if (keyword.isEmpty) {
+      throw FusionException(
+        code: FusionErrorCode.invalidUrl,
+        userMessage: '请输入搜索关键词。',
+        technicalMessage: 'empty query',
+        platformId: id,
+      );
+    }
+    if (keyword.length > 30) {
+      throw FusionException(
+        code: FusionErrorCode.invalidUrl,
+        userMessage: '搜索词过长（最多 30 个字）。',
+        technicalMessage: 'query length ${keyword.length} > 30',
+        platformId: id,
+      );
+    }
+
+    final safePage = page < 1 ? 1 : page;
+    // pageSize 只是契约参数：平台每页固定 10 条，count 不生效。
+    // 不谎报——把实际条数写进 notes。
+    final url = '$_origin/api/search/result/'
+        '?query=${Uri.encodeQueryComponent(keyword)}&page=$safePage';
+
+    final started = DateTime.now();
+    final res = await _http.get(
+      url,
+      headers: {
+        'User-Agent': _webUa,
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Referer': '$_origin/',
+      },
+      platformId: id,
+      timeout: const Duration(seconds: 20),
+    );
+
+    if (res.statusCode == 400) {
+      // 平台自己的 invalid_query 也是 400，但本地已经拦了空/超长，
+      // 走到这里说明是别的形态问题，如实报。
+      throw FusionException(
+        code: FusionErrorCode.invalidUrl,
+        userMessage: '搜索词被平台拒绝，请换一个试试。',
+        technicalMessage: 'search returned HTTP 400: '
+            '${res.body.substring(0, res.body.length.clamp(0, 160))}',
+        httpStatus: 400,
+        platformId: id,
+      );
+    }
+    if (res.statusCode != 200) {
+      throw FusionException(
+        code: FusionErrorCode.upstreamError,
+        userMessage: '红果搜索暂时不可用（HTTP ${res.statusCode}）。',
+        technicalMessage: 'search HTTP ${res.statusCode}',
+        httpStatus: res.statusCode,
+        platformId: id,
+        retryable: res.statusCode >= 500,
+      );
+    }
+
+    final parsed = _parser.parseSearchResult(res.body);
+    if (parsed.isEmpty) {
+      // 区分"没搜到"与"解析失败"：平台给了 totalCount>0 却解析不出条目，
+      // 说明结构变了，不能伪装成"没有结果"。
+      if (parsed.totalCount > 0) {
+        throw FusionException(
+          code: FusionErrorCode.parseError,
+          userMessage: '搜索结果解析失败，接口结构可能已变化。',
+          technicalMessage:
+              'parseSearchResult returned 0 items but totalCount='
+              '${parsed.totalCount} (body=${res.body.length} bytes)',
+          platformId: id,
+          retryable: false,
+        );
+      }
+      return FeedPage(
+        items: const [],
+        hasMore: false,
+        adapterId: id,
+        upstreamEndpoint: 'GET $_origin/api/search/result/',
+        notes: ['没有找到「$keyword」相关的短剧。'],
+      );
+    }
+
+    final now = DateTime.now().toIso8601String();
+    final items = parsed.items.map((s) {
+      return UnifiedVideo(
+        id: '$id:${s.seriesId}',
+        platformId: id,
+        platformVideoId: s.seriesId,
+        originalUrl: '$_origin/player/${s.seriesId}',
+        canonicalUrl: '$_origin/player/${s.seriesId}',
+        title: s.title,
+        description: s.description,
+        author: const VideoAuthor(name: '红果短剧'),
+        coverUrl: s.coverUrl,
+        fetchedAt: now,
+        availability: VideoAvailability.available,
+        playbackModes: const [PlaybackMode.native],
+        diagnostics: VideoDiagnostics(
+          adapterId: id,
+          upstreamEndpoint: 'GET $_origin/api/search/result/',
+          fromCache: false,
+          fetchDurationMs: DateTime.now().difference(started).inMilliseconds,
+          notes: [
+            '搜索「$keyword」',
+            if (s.episodeCount != null) '共 ${s.episodeCount} 集',
+            '第 ${parsed.pageNum}/${parsed.totalPages} 页',
+          ],
+        ),
+      );
+    }).toList();
+
+    return FeedPage(
+      items: items,
+      // 平台给了 hasMore，同时用页码兜底（两者都成立才算还有）
+      hasMore: parsed.hasMore && parsed.pageNum < parsed.totalPages,
+      adapterId: id,
+      upstreamEndpoint: 'GET $_origin/api/search/result/',
+      notes: [
+        '共 ${parsed.totalCount} 部相关短剧',
+        // 如实说明：平台每页固定 10 条，pageSize 参数不生效
+        '每页 ${parsed.items.length} 条（平台固定 10 条/页）',
+      ],
+    );
+  }
 
   // ── 内部 ──────────────────────────────────────────────────
 

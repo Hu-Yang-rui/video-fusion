@@ -372,7 +372,10 @@ class InteractionController extends ChangeNotifier {
   Future<void> reloadSession() async {
     final before = _session?.userId;
     await _loadSession();
-    if (_session?.userId == before && _state.known && _session != null) {
+    // "已有服务端状态"要看**任一**可确认位：抖音能确认关注态但确认不了
+    // 点赞态（known=false），只看 known 会让它每次都重复请求。
+    final hasState = _state.known || _state.followKnown;
+    if (_session?.userId == before && hasState && _session != null) {
       // 登录态没变且已有服务端状态：不重复请求
       return;
     }

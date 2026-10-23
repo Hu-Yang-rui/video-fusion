@@ -1,7 +1,36 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// ── 发布签名 ────────────────────────────────────────────────────
+//
+// # 为什么必须有真证书
+//
+// 以前 release 用的是 `signingConfigs.getByName("debug")`，即
+// `CN=Android Debug` 调试证书。部分系统（尤其国产 ROM）会拒绝安装
+// debug 签名的 release 包，报「无证书 / 证书无效 / 应用未签名」。
+// 用 `apksigner verify --print-certs` 可以确认：
+//   Signer #1 certificate DN: C=US, O=Android, CN=Android Debug
+//
+// # 凭据怎么放
+//
+// `android/key.properties`（**不入库**，见 .gitignore）：
+//   storeFile=video-fusion-release.jks
+//   storePassword=...
+//   keyAlias=video-fusion
+//   keyPassword=...
+//
+// 文件缺失时回退到 debug 签名，保证 `flutter build` 不因缺凭据直接失败
+// （CI / 新克隆的仓库仍能构建出可运行的包），但会在日志里明确警告。
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keystoreProperties = Properties()
+val hasReleaseKeystore = keystorePropertiesFile.exists()
+if (hasReleaseKeystore) {
+    keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
 }
 
 android {
@@ -11,6 +40,30 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+
+                // # 必须显式开启 v1（JAR）签名
+                //
+                // AGP 8 默认只出 v2/v3，v1 是 false。实测
+                // `apksigner verify --verbose` 显示：
+                //   Verified using v1 scheme: false
+                //   Verified using v2 scheme: true
+                //
+                // Android 7.0（API 24）以下**只认 v1**，没有 v1 的包
+                // 在这些设备上会报"应用未签名/解析包失败"。
+                // 开启 v1 后 v2 仍保留，两条路都能装。
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
     }
 
     defaultConfig {
@@ -41,9 +94,17 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // 有真证书就用真证书；缺失时回退 debug（并警告），
+            // 不让"缺凭据"把构建彻底堵死。
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                logger.warn(
+                    "⚠️ android/key.properties 缺失 → release 回退 debug 签名。" +
+                        "debug 签名的包在部分机型上会被拒绝安装（提示无证书）。"
+                )
+                signingConfigs.getByName("debug")
+            }
 
             // R8 混淆。
             //

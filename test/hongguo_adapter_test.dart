@@ -93,8 +93,10 @@ void main() {
       expect(a.supportsFavorite, isFalse);
       expect(a.supportsLive, isFalse);
       expect(a.supportsVideoDanmaku, isFalse);
-      // 搜索未验证
-      expect(a.supportsSearch, isFalse);
+      // 搜索已实现（2026-10-23 实测 /api/search/result/ 可用）
+      expect(a.supportsSearch, isTrue);
+      // 联想词未实测 → 如实不支持
+      expect(a.supportsSearchSuggestions, isFalse);
     });
 
     test('播放能力声明为原生播放', () {
@@ -261,10 +263,12 @@ void main() {
   });
 
   group('红果适配器：不支持的能力如实抛错', () {
-    test('搜索抛 unsupportedPlatform，不返回空列表', () async {
+    test('联想词抛 unsupportedPlatform（搜索本身已支持）', () async {
       final a = buildAdapter();
+      // 搜索已实现（见 hongguo_search_test.dart）；这里换成联想词，
+      // 它才是本平台仍未实测的能力。
       expect(
-        () => a.searchVideos('测试'),
+        () => a.fetchSearchSuggestions('测试'),
         throwsA(isA<FusionException>()
             .having((e) => e.code, 'code', FusionErrorCode.unsupportedPlatform)),
       );

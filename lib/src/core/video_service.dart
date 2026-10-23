@@ -1277,6 +1277,41 @@ class VideoService {
   /// 并行请求所有支持搜索的平台，合并结果。
   /// **单个平台失败不影响其它平台**：失败记录在 [SearchResult.failures] 中，
   /// 成功的结果照常返回。
+  /// 拉取搜索联想词（跨平台合并）。
+  ///
+  /// # 为什么合并而不是按平台分开
+  ///
+  /// 用户输入时不关心候选词来自哪个平台。抖音匿名可用（实测 code=0）、
+  /// B站未实现、红果没有该概念——合并后能拿到什么就给什么。
+  ///
+  /// **失败一律吞掉**：联想词是"锦上添花"，任何平台的失败都不该
+  /// 打断用户输入或弹错误。返回空列表表示"没有候选"，不是"出错"。
+  Future<List<String>> fetchSearchSuggestions(String query) async {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) return const [];
+
+    final adapters = _registry.adapters
+        .where((a) => a.supportsSearchSuggestions)
+        .toList();
+    if (adapters.isEmpty) return const [];
+
+    final merged = <String>[];
+    final seen = <String>{};
+    for (final a in adapters) {
+      try {
+        final words = await a.fetchSearchSuggestions(trimmed);
+        for (final w in words) {
+          if (seen.add(w)) merged.add(w);
+          if (merged.length >= 10) break;
+        }
+      } catch (_) {
+        // 静默：联想词失败不影响输入
+      }
+      if (merged.length >= 10) break;
+    }
+    return merged;
+  }
+
   Future<SearchResult> searchVideos(
     String query, {
     int page = 1,
