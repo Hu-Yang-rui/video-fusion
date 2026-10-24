@@ -244,7 +244,9 @@ void main() {
         reason: '直链要么来自 CDN，要么是官网 360p 兜底；'
             '实际: ${native.videoStreamUrl} (档位 ${native.quality!.label})',
       );
-    });
+      // 兜底路径会对官网源发真实 HEAD（不走注入的假客户端），
+      // 所以这两条按网络用例归类，不参与离线回归基线。
+    }, tags: 'network');
 
     test('指定集数（{seriesId}#{index}）', () async {
       if (readFixture('hongguo_player.html') == null) return;
@@ -259,7 +261,7 @@ void main() {
       expect(source, isNotNull);
       final native = source as NativePlaybackSource;
       expect(native.videoStreamUrl, startsWith('http'));
-    });
+    }, tags: 'network');
   });
 
   group('红果适配器：不支持的能力如实抛错', () {

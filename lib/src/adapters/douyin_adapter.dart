@@ -1,45 +1,14 @@
 /// 抖音（Douyin）平台适配器。
 ///
-/// # ⚠️ 能力现状（2026-10 实测，务必阅读）
+/// 两条通道：
+///  - **读接口**（详情 / 搜索 / 评论 / 推荐 / 热榜 / 弹幕）走隐藏 WebView
+///    的页面上下文——平台要求 `UIFID` 等只能由 JS 下发的 Cookie，
+///    裸 HTTP 会被 Argus 拦在签名校验之前。
+///  - **短信登录**走纯 HTTP（`douyin/passport_client.dart`），
+///    不加载任何页面。
 ///
-/// 本适配器的**链接识别**与**短链展开**已完整实现并通过真实网络验证。
-/// 但**元数据获取在当前环境下不可用**，原因是平台侧的强制访问控制，
-/// 而非本适配器实现缺陷。实测证据：
-///
-/// ```
-/// GET https://www.douyin.com/aweme/v1/web/aweme/detail/?...&aweme_id=...
-/// → HTTP 403
-/// → body: "Blocked by ArgusSecurityPlugin Uifid Not Found"
-/// ```
-///
-/// 关键点：该响应在**签名校验之前**就被 Argus 风控拦截，因此
-/// **即使 `a_bogus` 签名完全正确也无法通过**。放行还需要服务端签发的
-/// `UIFID_TEMP` Cookie，而该 Cookie 只下发给真实浏览器环境
-/// （需要驱动浏览器并执行平台的风控 JS）。
-///
-/// 驱动浏览器以获取风控 Cookie，属于**规避平台访问控制措施**，
-/// 已超出本项目"合法、合规、可验证"的边界（见需求三），因此**不实现**。
-///
-/// 其它已验证失效/不可用的路径：
-///  - `iesdouyin.com/web/api/v2/aweme/iteminfo/` → 200 但响应体长度为 0（接口已停用）
-///  - `www.douyin.com/oembed` → 404（不存在）
-///  - `iesdouyin.com/share/video/{id}` 分享页 → 200，但内嵌 `_ROUTER_DATA`
-///    仅含渲染上下文（ua / query / serverToken 等），**不含任何视频数据**
-///  - `ttwid.bytedance.com/ttwid/union/register/` → 404（研究报告中记录的匿名注册端点已失效）
-///
-/// # 仍然可用的能力
-///
-///  - **链接识别**：`www.douyin.com/video/{id}`、`v.douyin.com/{code}` 短链、
-///    `/share/video/{id}` 等形态均可正确提取 aweme_id。
-///  - **官方嵌入播放**：`open.douyin.com/player/video?vid={id}` 返回 200，
-///    无 `X-Frame-Options` / CSP 限制，可作为官方嵌入播放入口。
-///
-/// # 签名与凭证
-///
-/// `a_bogus` 由本仓库内的纯 Dart 实现产出，不依赖外部服务。
-///
-/// 本适配器**不携带**任何 Cookie、`UIFID_TEMP`、`ttwid`、账号令牌，
-/// 也不生成伪造的设备指纹。
+/// 写操作（点赞/收藏/关注/发评论）接口可达，缺的是登录态：
+/// 未登录一律 `code=8`，适配器如实映射成 `loginRequired`。
 library;
 
 import 'dart:convert';
@@ -58,6 +27,7 @@ import '../models/unified_video.dart';
 import '../models/video_danmaku.dart';
 import 'douyin/live_client.dart';
 import 'douyin/live_danmaku_http.dart';
+import 'douyin/passport_client.dart';
 import 'douyin/web_signer.dart';
 import 'platform_adapter.dart';
 
@@ -122,30 +92,17 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable, SmsLoginCapable 
   @override
   String get shortLabel => '抖音';
 
-  // ── 互动能力：全部不可用 ────────────────────────────────────
+  // ── 互动能力 ────────────────────────────────────────────────
   //
-  // 抖音的点赞/评论/收藏接口与 aweme/detail 同属 Argus 保护范围，
-  // 实测未登录时均被拦截在签名校验之前。
-  // 因此如实声明为不支持，UI 不渲染这些按钮——而不是渲染后点了报错。
+  // 读接口匿名可得（评论/楼中楼）；写接口需登录态。
 
   @override
   bool get supportsComments => true;
 
   // ── 扫码登录 ────────────────────────────────────────────────
   //
-  // 抖音扫码登录已在纯 Dart 中完整实现（不使用 WebView）：
-  //
-  //  - `get_qrcode` 只需要固定参数 + 设备指纹，返回 base64 二维码
-  //  - `check_qrconnect` 需要 `a_bogus` 签名 + **token 放在 POST body 里**
-  //  - `a_bogus` 由 `douyin/_abogus.dart` 纯 Dart 实现（含 SM3）
-  //
-  // 实测：`get_qrcode` 与 `check_qrconnect` 均返回 `error_code: 0`。
-
-  /// 扫码登录走隐藏 WebView 的页面上下文。
-  ///
-  /// passport 接口会校验页面 JS 算出的风控 Cookie。
-  /// 原生 HTTP 客户端没有这个 Cookie，直连会被风控拦下；
-  /// 在页面里发请求则天然携带。
+  // 二维码由隐藏 WebView 的页面上下文申请与轮询：
+  // passport 接口校验页面 JS 算出的风控 Cookie，裸 HTTP 拿不到。
   @override
   Future<QrLoginChallenge> requestQrChallenge() async {
     final signer = _ensureSigner;
@@ -219,16 +176,21 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable, SmsLoginCapable 
     );
   }
 
-  // ── 短信验证码登录 ──────────────────────────────────────────
+  // ── 短信验证码登录（**纯 HTTP**，不加载任何 WebView）────────
   //
-  // 扫码登录卡在结构性死锁（见 web_signer 里 sendSmsCode 的说明）：
-  //   v2 Cookie 需要 sec_ts，而 sec_ts 需要已登录。
-  // 短信走 aid=6383 的 passport-web 协议，没有这个环。
+  // 整条链路走 `DouyinPassportClient`（纯 Dart HttpClient），
+  // 不加载任何页面。**必须复用同一个实例**：cookie jar 就是登录状态机，
+  // 发码与提交验证码换实例等于换会话。
+
+  DouyinPassportClient? _passport;
+
+  DouyinPassportClient get _passportLogin =>
+      _passport ??= DouyinPassportClient(logger: _logger);
 
   /// 发送短信验证码。
   @override
   Future<void> sendLoginSmsCode(String phone) =>
-      _ensureSigner.sendSmsCode(phone);
+      _passportLogin.sendSmsCode(phone);
 
   /// 提交验证码完成登录；成功时返回会话 Cookie。
   @override
@@ -236,28 +198,18 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable, SmsLoginCapable 
     String phone,
     String code,
   ) async {
-    final r = await _ensureSigner.submitSmsCode(phone, code);
+    final cookies = await _passportLogin.submitSmsCode(phone, code);
     return QrLoginPollResult(
-      phase: r.succeeded ? QrLoginPhase.succeeded : QrLoginPhase.failed,
-      message: r.message,
-      cookies: r.cookies,
-      userId: r.userId.isEmpty ? null : r.userId,
-      displayName: r.displayName.isEmpty ? null : r.displayName,
+      phase: QrLoginPhase.succeeded,
+      message: '登录成功。',
+      cookies: cookies,
     );
   }
 
   // ── 直播 ────────────────────────────────────────────────────
   //
-  // 2026-10-18 实测：`webcast.amemv.com/webcast/feed/` **匿名可用**，
-  // 无需 X-Argus / a_bogus 签名，也无需登录。
-  //
-  // 这推翻了此前"抖音直播接口受 Argus 保护、无公开端点"的结论。
-  // 该结论当时只查了 `/aweme/` 系接口，没查 webcast 系。
-  //
-  // 实测数据（一次请求）：HTTP 200、status_code=0、472KB、
-  // 6 个直播间、**6/6 带可播放的 HLS 地址**。
-  //
-  // 详细的接口陷阱与不可用路径见 `douyin/live_client.dart` 顶部注释。
+  // `webcast.amemv.com/webcast/feed/` 匿名可用，不需要签名或登录。
+  // 接口陷阱见 `douyin/live_client.dart`。
 
   DouyinLiveClient? _liveClient;
 
@@ -3176,19 +3128,10 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable, SmsLoginCapable 
       };
 
 
-  /// 构造 aweme/detail 的查询参数。
-  ///
-  /// 参数集合参考 Evil0ctal/Douyin_TikTok_Download_API 的 web 客户端画像，
-  /// 使用固定的、非账号态的浏览器指纹字段。**不包含任何凭证**。
   /// Argus 风控拦截的统一错误。
   ///
-  /// # 本轮修正（2026-10-19）
-  ///
-  /// 旧实现写的是 `requiredCookie: 'UIFID_TEMP'`、`signatureSufficient: false`，
-  /// 且注释断言"放行需服务端签发的 UIFID_TEMP Cookie"——**这是错的**。
-  ///
-  /// 实测：`UIFID_TEMP` 只够评论；detail 需要**正式 `UIFID`**。
-  /// 签名（`a_bogus`）本身是够的，缺的是**会话等级**。
+  /// `UIFID_TEMP` 只够评论，detail 需要正式 `UIFID`；
+  /// `a_bogus` 签名本身是够的，缺的是会话等级。
   FusionException _argusBlockedError(String body) {
     final isUifid = body.contains('Uifid');
     return FusionException(

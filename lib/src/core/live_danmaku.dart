@@ -342,7 +342,7 @@ class LiveDanmakuClient {
       final uname = d['uname']?.toString();
       return LiveMessage(
         type: LiveMessageType.gift,
-        text: '\$uname 送出 \$giftName ×\$giftCount',
+        text: '$uname 送出 $giftName ×$giftCount',
         receivedAt: now,
         uname: uname,
         giftName: giftName,
@@ -359,7 +359,7 @@ class LiveDanmakuClient {
       if (uname == null || uname.isEmpty) return null;
       return LiveMessage(
         type: LiveMessageType.memberEnter,
-        text: '\$uname 进入直播间',
+        text: '$uname 进入直播间',
         receivedAt: now,
         uname: uname,
         uid: (d['uid'] as num?)?.toInt(),

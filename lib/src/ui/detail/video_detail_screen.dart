@@ -35,20 +35,26 @@
 ///  - 与竖滑流的差异：这里支持完整播放、进度恢复、清晰度、全屏
 library;
 
-import 'package:flutter/foundation.dart' show debugPrint;
 import 'dart:async';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../../adapters/platform_adapter.dart';
+import '../../core/app_settings.dart';
 import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
+import '../../core/seek_preview.dart';
 import '../../core/video_service.dart';
 import '../../design/apple_tokens.dart';
+import '../../design/components/player_overlays.dart';
 import '../../design/components/video_widgets.dart';
 import '../../models/playback.dart';
+import '../../models/subtitles.dart';
 import '../../models/unified_video.dart';
+import '../../player/picture_in_picture.dart';
 import '../../player/player_controller.dart';
 import '../interaction/interaction_controller.dart';
 import '../interaction/interaction_registry.dart';
@@ -62,6 +68,7 @@ class VideoDetailScreen extends StatefulWidget {
     required this.service,
     this.vault,
     this.interactions,
+    this.settings,
     this.onOpenOriginal,
     this.onOpenLogin,
     this.initialPosition,
@@ -70,6 +77,10 @@ class VideoDetailScreen extends StatefulWidget {
 
   final UnifiedVideo video;
   final VideoService service;
+
+  /// 应用设置：`autoPlayNext` 决定短剧看完是否自动播下一集。
+  /// 为 null 时按"不连播"处理（不猜用户意图）。
+  final AppSettings? settings;
 
   /// 凭证保险库。为 null 时详情页不显示评论入口
   /// （评论需要登录态判断，没有 vault 就无法确定能力）。
@@ -124,6 +135,18 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
     super.initState();
     _resolveAndLoad();
     _bindInteraction();
+    unawaited(_loadListing());
+    unawaited(_loadEnhancements());
+    // 原生侧在系统 PiP 回调里推状态：用户从小窗点 × 返回时，
+    // 本页的小窗按钮必须复位，否则图标一直停在"已进小窗"的错态。
+    _pip.addListener(_onPipChanged);
+  }
+
+  final PictureInPicture _pip = PictureInPicture.instance;
+
+  void _onPipChanged() {
+    if (!mounted) return;
+    setState(() => _pipActive = _pip.isActive);
   }
 
   void _bindInteraction() {
@@ -217,12 +240,16 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
     // 再 dispose 播放器，最后才换引用。
     _teardownPlayer();
 
-    final player = FusionPlayerController();
+    final player = FusionPlayerController(settings: widget.settings);
     _player = player;
     _sub = player.stream.listen((s) {
       if (!mounted) return;
+      final wasCompleted = _snapshot.phase == PlayerPhase.completed;
       setState(() => _snapshot = s);
       widget.onProgressChanged?.call(s.position, s.duration);
+      if (!wasCompleted && s.phase == PlayerPhase.completed) {
+        _onPlaybackCompleted();
+      }
     });
 
     await player.load(source);
@@ -275,9 +302,270 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
     });
   }
 
+  // ── 选集与自动连播 ──────────────────────────────────────────
+
+  /// 播完时尝试连播下一集。
+  ///
+  /// 三个条件缺一不可：开了连播、这视频确实属于某部剧的分集、
+  /// 且还有下一集。任一不满足就什么都不做——不弹"已播完"也不假装切换。
+  void _onPlaybackCompleted() {
+    if (widget.settings?.autoPlayNext != true) return;
+    final listing = _listing;
+    if (listing == null || !listing.hasNext) return;
+    unawaited(_switchEpisode(listing.next));
+  }
+
+  /// 当前视频的分集列表（null = 该平台/该视频没有分集概念）。
+  EpisodeListing? _listing;
+  bool _loadingListing = false;
+
+  /// 拉取分集列表。只在真正支持的平台下拉一次，失败静默（不挡播放）。
+  Future<void> _loadListing() async {
+    if (_loadingListing || _listing != null) return;
+    // 见 platform_adapter.dart：只有声明 EpisodeListCapable 的适配器有选集。
+    final Object? adapter = widget.service.registry.byId(widget.video.platformId);
+    if (adapter is! EpisodeListCapable) return;
+    _loadingListing = true;
+    try {
+      _listing = await adapter
+          .listEpisodesFor(widget.video.platformVideoId)
+          .timeout(const Duration(seconds: 10));
+      if (mounted) setState(() {});
+    } catch (_) {
+      // 选集是增强信息，拉不到只是不显示选集，绝不影响播放
+    } finally {
+      _loadingListing = false;
+    }
+  }
+
+  /// 切到某一集：换视频并重解析。
+  ///
+  /// 用 pushReplacement 而不是 push：连播时如果堆栈里塞了 30 个详情页，
+  /// 返回键要按 30 次才出得去。
+  Future<void> _switchEpisode(UnifiedVideo? target) async {
+    final video = target;
+    if (video == null) return;
+    if (!mounted) return;
+    final nav = Navigator.of(context);
+    await nav.pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => VideoDetailScreen(
+          video: video,
+          service: widget.service,
+          vault: widget.vault,
+          interactions: widget.interactions,
+          settings: widget.settings,
+          onOpenOriginal: widget.onOpenOriginal,
+          onOpenLogin: widget.onOpenLogin,
+          onProgressChanged: widget.onProgressChanged,
+        ),
+      ),
+    );
+  }
+
   void _toggleControls() {
     setState(() => _showControls = !_showControls);
     if (_showControls) _scheduleHideControls();
+  }
+
+  // ── 画中画 ──────────────────────────────────────────────────
+
+  bool _pipActive = false;
+
+  /// 点小窗按钮：请求进入画中画。
+  ///
+  /// 失败必须如实提示（多数 ROM 需在系统设置里允许小窗），
+  /// 不能改了图标状态让用户以为已经进了小窗。
+  /// 成功后不手动改 _pipActive——由原生侧的 PiP 回调统一驱动，
+  /// 避免"我们以为进了、系统其实没进"的两套状态。
+  Future<void> _onPictureInPicture() async {
+    final player = _player;
+    if (player == null) return;
+    final ok = await player.enterPictureInPicture();
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('这台设备未允许本应用使用小窗播放，可在系统设置里开启。'),
+        ),
+      );
+    }
+  }
+
+  // ── 字幕与进度条预览 ────────────────────────────────────────
+  //
+  // 两项都只有 B站给得出（见 VideoService.supportsSubtitlesFor）。
+  // 取不到就什么都不显示：不给一个点了没反应的按钮。
+
+  SpriteSheetSpec? _sprite;
+  List<SubtitleTrackInfo> _subtitleTracks = const [];
+
+  /// 选中的字幕语言；null = 关闭字幕。
+  String? _subtitleLan;
+  List<SubtitleCue> _subtitleCues = const [];
+
+  bool _loadingEnhancements = false;
+
+  /// 已解码的拼图（按拼图序号）。一张 4800×2700 ≈ 50 MB，
+  /// 所以最多留两张，切走就 dispose。
+  final Map<int, ui.Image> _sheetCache = {};
+  final Set<int> _sheetInFlight = {};
+
+  SubtitleTrackInfo? get _activeSubtitleTrack {
+    final lan = _subtitleLan;
+    if (lan == null) return null;
+    for (final t in _subtitleTracks) {
+      if (t.lan == lan) return t;
+    }
+    return null;
+  }
+
+  SubtitleCue? get _currentCue =>
+      _subtitleLan == null ? null : cueAt(_subtitleCues, _snapshot.position);
+
+  /// 进页面后取字幕列表与拼图数据。
+  ///
+  /// 两者都是增强信息：任何一步失败都只是不显示，不影响播放，
+  /// 也不弹错误——用户不需要知道"缩略图没取到"。
+  Future<void> _loadEnhancements() async {
+    if (_loadingEnhancements) return;
+    if (!widget.service.supportsSubtitlesFor(widget.video.platformId)) return;
+    _loadingEnhancements = true;
+    try {
+      final session = await widget.vault?.load(widget.video.platformId);
+      final sprite = await widget.service.fetchSeekPreview(widget.video);
+      if (!mounted) return;
+      if (sprite != null) setState(() => _sprite = sprite);
+
+      final tracks = await widget.service
+          .fetchSubtitleTracks(widget.video, session: session)
+          .timeout(const Duration(seconds: 15));
+      if (!mounted) return;
+      setState(() => _subtitleTracks = tracks);
+    } catch (_) {
+      // 增强信息失败不打扰用户
+    } finally {
+      _loadingEnhancements = false;
+    }
+  }
+
+  /// 取某张拼图并解码（同一张只解码一次）。
+  Future<ui.Image?> _loadSheet(int index) async {
+    final spec = _sprite;
+    if (spec == null || index < 0 || index >= spec.sheetUrls.length) {
+      return null;
+    }
+    final cached = _sheetCache[index];
+    if (cached != null) return cached;
+    if (_sheetInFlight.contains(index)) return null;
+    _sheetInFlight.add(index);
+    try {
+      final bytes = await widget.service
+          .fetchSeekPreviewSheet(spec.sheetUrls[index])
+          .timeout(const Duration(seconds: 20));
+      if (bytes == null || bytes.isEmpty) return null;
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      final image = frame.image;
+      // 只留两张：长视频有 13 张拼图，全留着会吃掉几百 MB。
+      final keep = <int>{index};
+      if (_lastSheetIndex != null) keep.add(_lastSheetIndex!);
+      for (final key in _sheetCache.keys.toList()) {
+        if (keep.contains(key)) continue;
+        _sheetCache.remove(key)?.dispose();
+      }
+      _lastSheetIndex = index;
+      _sheetCache[index] = image;
+      return image;
+    } catch (_) {
+      return null;
+    } finally {
+      _sheetInFlight.remove(index);
+    }
+  }
+
+  int? _lastSheetIndex;
+
+  /// 切换字幕（null = 关闭）。
+  Future<void> _selectSubtitle(String? lan) async {
+    if (lan == null) {
+      setState(() {
+        _subtitleLan = null;
+        _subtitleCues = const [];
+      });
+      return;
+    }
+    final track = _activeSubtitleTrack ?? _trackFor(lan);
+    if (track == null) return;
+    setState(() => _subtitleLan = lan);
+    final cues = await widget.service.fetchSubtitleCues(track);
+    if (!mounted || _subtitleLan != lan) return;
+    setState(() => _subtitleCues = cues);
+  }
+
+  SubtitleTrackInfo? _trackFor(String lan) {
+    for (final t in _subtitleTracks) {
+      if (t.lan == lan) return t;
+    }
+    return null;
+  }
+
+  /// 字幕菜单。只有平台真的给了字幕轨才出现。
+  Widget? _buildSubtitleMenu() {
+    if (_subtitleTracks.isEmpty) return null;
+    final active = _subtitleLan;
+    return PopupMenuButton<String>(
+      tooltip: '字幕',
+      color: const Color(0xE61C1C1E),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppleRadius.sm),
+      ),
+      onSelected: (v) => unawaited(_selectSubtitle(v.isEmpty ? null : v)),
+      itemBuilder: (context) => [
+        for (final item in <(String, String)>[
+          ('', '关闭字幕'),
+          for (final t in _subtitleTracks) (t.lan, t.displayLabel),
+        ])
+          PopupMenuItem(
+            value: item.$1,
+            height: 40,
+            child: Row(
+              children: [
+                if (item.$1 == (active ?? ''))
+                  const Icon(Icons.check_rounded, size: 16, color: Colors.white)
+                else
+                  const SizedBox(width: 16),
+                const SizedBox(width: 8),
+                Text(
+                  item.$2,
+                  style: AppleType.footnote.copyWith(color: Colors.white),
+                ),
+              ],
+            ),
+          ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.all(6),
+        child: Icon(
+          active == null
+              ? Icons.subtitles_off_rounded
+              : Icons.subtitles_rounded,
+          size: 24,
+          color: Colors.white,
+        ),
+      ),
+    );
+  }
+
+  /// 拖动时的缩略图。没有拼图数据时返回 null，进度条行为与原来一致。
+  Widget? _buildSeekPreview(double seconds) {
+    final spec = _sprite;
+    if (spec == null) return null;
+    return SpriteSeekPreview(
+      spec: spec,
+      seconds: seconds,
+      loader: _loadSheet,
+    );
   }
 
   Future<void> _toggleFullscreen() async {
@@ -301,6 +589,10 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
   void dispose() {
     _controlsTimer?.cancel();
     _sub?.cancel();
+    for (final image in _sheetCache.values) {
+      image.dispose();
+    }
+    _sheetCache.clear();
     if (_holdsRef) {
       // 交还给登记表：引用归零时由登记表统一 dispose，
       // 这里直接 dispose 会破坏推荐流仍在使用的同一会话。
@@ -493,6 +785,14 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
               child: const SizedBox.expand(),
             ),
           ),
+          // 字幕：自绘一层，不挂 mpv（理由见 subtitles.dart 顶部）。
+          // 未选字幕轨道时它自己渲染成空，不占位、不挡手势。
+          SubtitleOverlay(
+            cue: _currentCue,
+            cornerLabel: _activeSubtitleTrack == null
+                ? null
+                : '字幕：${_activeSubtitleTrack!.displayLabel}',
+          ),
           // 缓冲
           if (_snapshot.isBuffering)
             const Center(
@@ -524,7 +824,7 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
                   buffered: _snapshot.buffered,
                   isPlaying: _snapshot.phase == PlayerPhase.playing,
                   volume: _snapshot.volume,
-                  rate: 1.0,
+                  rate: _snapshot.rate,
                   onPlayPause: () {
                     player.playOrPause();
                     _scheduleHideControls();
@@ -536,8 +836,19 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
                   onSeekStart: () => _controlsTimer?.cancel(),
                   onSeekEnd: _scheduleHideControls,
                   onVolumeChanged: (v) => player.setVolume(v),
-                  onRateChanged: (r) => player.rawPlayer.setRate(r),
+                  onRateChanged: (r) {
+                    // 同时写回设置：详情页选的倍速下次进来还在。
+                    unawaited(player.setRate(r));
+                    final s = widget.settings;
+                    if (s != null) s.playbackRate = r;
+                  },
                   onFullscreen: _toggleFullscreen,
+                  // 只有真接了小窗通道的平台才给按钮；桌面上不装这个图标
+                  onPictureInPicture:
+                      _pip.isSupported ? _onPictureInPicture : null,
+                  pipActive: _pipActive,
+                  seekPreview: _sprite == null ? null : _buildSeekPreview,
+                  subtitleMenu: _buildSubtitleMenu(),
                   title: widget.video.title,
                   subtitle: widget.video.author.name,
                 ),
@@ -662,6 +973,13 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
                   onOpenLogin: widget.onOpenLogin ?? () {},
                 ),
               ),
+            ),
+
+          // ── 选集（短剧 / 多 P 平台才有）──────────────────
+          if (_listing != null && _listing!.total > 1)
+            _EpisodeSection(
+              listing: _listing!,
+              onPick: (target) => unawaited(_switchEpisode(target)),
             ),
 
           // ── 简介（无卡片）────────────────────────────
@@ -968,6 +1286,138 @@ class _VideoDetailScreenState extends State<VideoDetailScreen> {
     final local = dt.toLocal();
     return '${local.year}-${local.month.toString().padLeft(2, '0')}-'
         '${local.day.toString().padLeft(2, '0')}';
+  }
+}
+
+/// 选集区块：横滑集数 + 当前集高亮。
+///
+/// 行高 40 的紧凑格子：一部短剧可能上百集，用 GridView 会让详情页
+/// 长到没法滚。当前集必须滚进视野，否则打开第 60 集看到的还是 1–20。
+///
+/// 用 [ScrollController] 定偏移而不是 `initialScrollIndex`：后者要求
+/// `itemExtent` 且本 SDK 的 ListView 未暴露该参数。
+class _EpisodeSection extends StatefulWidget {
+  const _EpisodeSection({required this.listing, required this.onPick});
+
+  final EpisodeListing listing;
+  final void Function(UnifiedVideo target) onPick;
+
+  /// 与 build 里 itemExtent 保持一致（44 宽 + 8 间距）。
+  static const double _itemExtent = 52;
+
+  @override
+  State<_EpisodeSection> createState() => _EpisodeSectionState();
+}
+
+class _EpisodeSectionState extends State<_EpisodeSection> {
+  late final ScrollController _scroll;
+
+  /// 已对齐过的集下标。避免每次 build 都把用户的手动滚动拽回去。
+  int? _alignedIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll = ScrollController(
+      initialScrollOffset: _offsetFor(widget.listing.currentIndex),
+    );
+    _alignedIndex = widget.listing.currentIndex;
+  }
+
+  /// 让当前集落在视口偏左位置，而不是贴着左边缘。
+  double _offsetFor(int index) =>
+      (index * _EpisodeSection._itemExtent - 60)
+          .clamp(0, double.infinity)
+          .toDouble();
+
+  @override
+  void didUpdateWidget(_EpisodeSection old) {
+    super.didUpdateWidget(old);
+    final i = widget.listing.currentIndex;
+    if (i == _alignedIndex) return;
+    _alignedIndex = i;
+    if (_scroll.hasClients) {
+      _scroll.jumpTo(_offsetFor(i));
+    }
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    final listing = widget.listing;
+    return Padding(
+      padding: const EdgeInsets.only(top: AppleSpace.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppleSpace.pageInset,
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${listing.seriesTitle} · 全 ${listing.total} 集',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppleType.subheadlineEmphasized
+                        .copyWith(color: c.label),
+                  ),
+                ),
+                Text(
+                  '第 ${listing.currentIndex + 1} 集',
+                  style: AppleType.footnote.copyWith(color: c.secondaryLabel),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: AppleSpace.sm),
+          SizedBox(
+            height: 40,
+            child: ListView.builder(
+              controller: _scroll,
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppleSpace.pageInset,
+              ),
+              scrollDirection: Axis.horizontal,
+              itemExtent: _EpisodeSection._itemExtent,
+              itemCount: listing.episodes.length,
+              itemBuilder: (context, i) {
+                final ep = listing.episodes[i];
+                final isCurrent = i == listing.currentIndex;
+                return GestureDetector(
+                  onTap: isCurrent ? null : () => widget.onPick(ep),
+                  child: Container(
+                    width: 44,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: isCurrent ? c.blue : c.fill,
+                      borderRadius: BorderRadius.circular(AppleRadius.xs),
+                    ),
+                    child: Text(
+                      '${i + 1}',
+                      style: AppleType.subheadline.copyWith(
+                        color: isCurrent ? Colors.white : c.secondaryLabel,
+                        fontWeight: isCurrent
+                            ? FontWeight.w600
+                            : FontWeight.normal,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

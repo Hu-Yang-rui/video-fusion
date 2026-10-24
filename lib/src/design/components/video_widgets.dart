@@ -441,6 +441,8 @@ class PlayerControlBar extends StatelessWidget {
     required this.onSeek,
     this.onSeekStart,
     this.onSeekEnd,
+    this.seekPreview,
+    this.subtitleMenu,
     this.volume,
     this.onVolumeChanged,
     this.rate,
@@ -449,6 +451,8 @@ class PlayerControlBar extends StatelessWidget {
     this.currentQuality,
     this.onQualityChanged,
     this.onFullscreen,
+    this.onPictureInPicture,
+    this.pipActive = false,
     this.title,
     this.subtitle,
     this.trailing,
@@ -462,6 +466,14 @@ class PlayerControlBar extends StatelessWidget {
   final ValueChanged<Duration> onSeek;
   final VoidCallback? onSeekStart;
   final VoidCallback? onSeekEnd;
+
+  /// 拖动进度条时浮出的缩略图。参数是**当前拖到的秒数**，返回 null 就不显示。
+  /// 为 null 时进度条行为与原来完全一致（平台没给拼图数据就别传）。
+  final Widget? Function(double seconds)? seekPreview;
+
+  /// 字幕选择菜单（平台给得出字幕列表时才传）。为 null 时不显示字幕按钮。
+  final Widget? subtitleMenu;
+
   final double? volume;
   final ValueChanged<double>? onVolumeChanged;
   final double? rate;
@@ -470,6 +482,13 @@ class PlayerControlBar extends StatelessWidget {
   final PlaybackQuality? currentQuality;
   final ValueChanged<PlaybackQuality>? onQualityChanged;
   final VoidCallback? onFullscreen;
+
+  /// 进入画中画。为 null 时不渲染小窗按钮（平台不支持就不出现，
+  /// 而不是出现一个点了没反应的按钮）。
+  final VoidCallback? onPictureInPicture;
+
+  /// 当前是否已在画中画。
+  final bool pipActive;
   final String? title;
   final String? subtitle;
   final Widget? trailing;
@@ -529,6 +548,7 @@ class PlayerControlBar extends StatelessWidget {
             onSeek: onSeek,
             onSeekStart: onSeekStart,
             onSeekEnd: onSeekEnd,
+            previewBuilder: seekPreview,
           ),
           const SizedBox(height: AppleSpace.xs),
           // 时间
@@ -562,6 +582,8 @@ class PlayerControlBar extends StatelessWidget {
                 size: 28,
               ),
               const Spacer(),
+              // 字幕（平台给得出字幕列表时才出现，见详情页的取数逻辑）
+              if (subtitleMenu != null) subtitleMenu!,
               // 倍速
               if (rate != null && onRateChanged != null)
                 _RateMenu(
@@ -582,6 +604,14 @@ class PlayerControlBar extends StatelessWidget {
                 _VolumeMenu(
                   volume: volume!,
                   onChanged: onVolumeChanged!,
+                ),
+              if (onPictureInPicture != null)
+                _CtlIcon(
+                  icon: pipActive
+                      ? Icons.picture_in_picture_alt_rounded
+                      : Icons.picture_in_picture_alt_outlined,
+                  onTap: onPictureInPicture!,
+                  size: 24,
                 ),
               if (onFullscreen != null)
                 _CtlIcon(
@@ -616,6 +646,7 @@ class _ProgressScrubber extends StatefulWidget {
     required this.onSeek,
     this.onSeekStart,
     this.onSeekEnd,
+    this.previewBuilder,
   });
 
   final int position;
@@ -625,8 +656,24 @@ class _ProgressScrubber extends StatefulWidget {
   final VoidCallback? onSeekStart;
   final VoidCallback? onSeekEnd;
 
+  /// 拖动时在指针上方浮出的预览。参数是**当前拖到的秒数**，返回 null 不显示。
+  final Widget? Function(double seconds)? previewBuilder;
+
   @override
   State<_ProgressScrubber> createState() => _ProgressScrubberState();
+}
+
+/// 预览浮层宽度（拼图单格 480×270 等比到 168 宽）。
+///
+/// 写死是为了让"夹在轨道内"的定位可被单测断言，
+/// 不依赖 builder 具体返回什么。
+const double kSeekPreviewWidth = 168;
+
+/// 让预览水平中心落在进度指针上，并夹在轨道 [0, trackWidth-width] 内。
+double seekPreviewLeft(double trackWidth, double progress) {
+  final center = trackWidth * progress;
+  final max = (trackWidth - kSeekPreviewWidth).clamp(0.0, double.infinity);
+  return (center - kSeekPreviewWidth / 2).clamp(0.0, max);
 }
 
 class _ProgressScrubberState extends State<_ProgressScrubber> {
@@ -675,6 +722,9 @@ class _ProgressScrubberState extends State<_ProgressScrubber> {
             child: Center(
               child: Stack(
                 alignment: Alignment.centerLeft,
+                // 预览浮层画在轨道**上方**（22px 之外），必须关掉裁剪，
+                // 否则会被这个矮 Stack 直接切掉看不见。
+                clipBehavior: Clip.none,
                 children: [
                   // 轨道
                   Container(
@@ -721,6 +771,15 @@ class _ProgressScrubberState extends State<_ProgressScrubber> {
                           ],
                         ),
                       ),
+                    ),
+                  // 拖动预览：浮在指针上方（clipBehavior 已放行溢出）。
+                  // previewBuilder 为空时一个像素都不占，行为与原来一致。
+                  if (_dragging && widget.previewBuilder != null)
+                    Positioned(
+                      bottom: 30,
+                      left: seekPreviewLeft(w, progress),
+                      child: widget.previewBuilder!(pos / 1000.0) ??
+                          const SizedBox.shrink(),
                     ),
                 ],
               ),

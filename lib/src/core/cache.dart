@@ -119,7 +119,6 @@ class TtlCache<T> {
 
   void clear() {
     _entries.clear();
-    _evictions += 0;
   }
 
   /// 主动清理过期条目。

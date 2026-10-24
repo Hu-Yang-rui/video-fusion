@@ -1298,3 +1298,49 @@ abstract class NumericVideoIdCapable {
   /// 解析数字视频 ID。平台没有该概念或解析失败时返回 null。
   Future<int?> resolveNumericVideoId(String platformVideoId);
 }
+
+/// 能列出「分集」的适配器（短剧 / 多 P 视频）。
+///
+/// 与 [PlatformAdapter] 分开：后者被 `implements` 时要求实现全部成员，
+/// 加一个方法会连带改所有适配器与测试替身。理由同 [NumericVideoIdCapable]。
+abstract class EpisodeListCapable {
+  /// 用**当前这一集**的 `platformVideoId` 反查整部剧。
+  ///
+  /// 传入的可能是复合标识（如 `seriesId#7`），解析由适配器负责——
+  /// 平台标识格式是适配器的知识，UI 不该知道。
+  /// 没有分集概念或解析失败返回 null。
+  Future<EpisodeListing?> listEpisodesFor(String platformVideoId);
+}
+
+/// 一次分集列举的结果。
+class EpisodeListing {
+  const EpisodeListing({
+    required this.episodes,
+    required this.currentIndex,
+    required this.seriesTitle,
+  });
+
+  /// 全部分集，按集数升序。每项都有**自己**的 `platformVideoId`，
+  /// 否则连播时进度会串线（见 `hongguo/playback_id.dart`）。
+  final List<UnifiedVideo> episodes;
+
+  /// 当前集在 [episodes] 里的下标（0 基）。找不到时为 0。
+  final int currentIndex;
+
+  /// 剧名（不含集数后缀），用于选集面板标题。
+  final String seriesTitle;
+
+  UnifiedVideo get current => episodes[currentIndex];
+
+  /// 下一集；已是最后一集时返回 null。
+  UnifiedVideo? get next =>
+      currentIndex + 1 < episodes.length ? episodes[currentIndex + 1] : null;
+
+  /// 上一集；已是第一集时返回 null。
+  UnifiedVideo? get previous =>
+      currentIndex > 0 ? episodes[currentIndex - 1] : null;
+
+  int get total => episodes.length;
+  bool get hasNext => next != null;
+  bool get hasPrevious => previous != null;
+}

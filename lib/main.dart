@@ -25,6 +25,7 @@ import 'src/adapters/douyin_adapter.dart';
 import 'src/adapters/hongguo_adapter.dart';
 import 'src/adapters/mock_adapter.dart';
 import 'src/adapters/platform_registry.dart';
+import 'src/core/app_settings.dart';
 import 'src/core/credential_vault.dart';
 import 'src/core/cloud_progress_reporter.dart';
 import 'src/core/http_client.dart';
@@ -78,6 +79,9 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
   late final FeedController _feedController;
   late final PlatformRegistry _registry;
   late final VideoProgressStore _progressStore;
+
+  /// 应用设置（主题 / 连播 / 倍速）。
+  late final AppSettings _settings;
 
   /// 云端播放进度旁路上报器。
   ///
@@ -134,7 +138,8 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
     final http = FusionHttpClient(logger: logger);
     final secureStore = FlutterSecureStore();
 
-    // 抖音的签名与登录都在应用内隐藏 WebView 里完成，不需要额外装配。
+    // 抖音：读接口走隐藏 WebView 的会话签名；短信登录走纯 HTTP
+    // （`DouyinPassportClient`），不加载页面。
 
     _registry = PlatformRegistry(adapters: [
       BilibiliAdapter(http: http, logger: logger),
@@ -163,6 +168,8 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
       vault: _vault,
       logger: logger,
     );
+    _settings = AppSettings(storage: SharedPreferencesStore());
+    unawaited(_settings.load());
   }
 
   /// 启动：优先选**混合流**（抖音 + B站）→ 加载内容 → 后台恢复登录态。
@@ -322,6 +329,7 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
           service: _service,
           vault: _vault,
           interactions: _interactions,
+          settings: _settings,
           onOpenOriginal: _openOriginal,
           onOpenLogin: _openLogin,
           initialPosition: resumeAt,
@@ -367,6 +375,7 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
           registry: _registry,
           vault: _vault,
           progressStore: _progressStore,
+          settings: _settings,
           onSessionChanged: _restoreSession,
         ),
       ),
@@ -383,61 +392,71 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: '视频融合',
-      navigatorKey: _navigatorKey,
-      debugShowCheckedModeBanner: false,
-      theme: AppleTheme.light(),
-      darkTheme: AppleTheme.dark(),
-      themeMode: ThemeMode.light,
-      home: AppShell(
-        key: _shellKey,
-        feedPage: FeedScreen(
-          controller: _feedController,
-          service: _service,
-          vault: _vault,
-          interactions: _interactions,
-          onOpenSourcePicker: _openSourcePicker,
-          onOpenLogin: _openLogin,
-          onOpenOriginal: _openOriginal,
-          onOpenLinkIntake: _openLinkIntake,
-          onOpenDetail: (v) => _openDetail(v),
-          activeSource: _activeSource,
-          loggedInLabel: _loggedInLabel,
-        ),
-        discoverPage: DiscoverScreen(
-          service: _service,
-          onOpenVideo: (v) => _openDetail(v),
-          onOpenSourcePicker: _openSourcePicker,
-          onOpenLinkIntake: _openLinkIntake,
-        ),
-        dramaPage: DramaScreen(
-          service: _service,
-          onOpenVideo: (v) => _openDetail(v),
-        ),
-        // 短视频页切走时暂停、切回时恢复（用户主动暂停过则不恢复）。
-        onFeedVisibilityChanged: (visible) {
-          unawaited(_feedController.setPageActive(visible));
+    return ListenableBuilder(
+      listenable: _settings,
+      builder: (context, _) => MaterialApp(
+        title: '视频融合',
+        navigatorKey: _navigatorKey,
+        debugShowCheckedModeBanner: false,
+        theme: AppleTheme.light(),
+        darkTheme: AppleTheme.dark(),
+        // 跟随系统 + 可在设置里强制浅/深
+        themeMode: switch (_settings.themeMode) {
+          ThemeModeChoice.system => ThemeMode.system,
+          ThemeModeChoice.light => ThemeMode.light,
+          ThemeModeChoice.dark => ThemeMode.dark,
         },
-        // 直播页：只在平台确实声明 supportsLive 时注入，
-        // 否则不出现空页面。
-        livePage: _livePage(),
-        // 消息页：只在平台确实支持私信时注入（当前仅 B 站）。
-        // 与直播同理，不支持时不渲染标签，避免点进去空白。
-        messagesPage: _messagesPage(),
-        profilePage: ProfileScreen(
-          service: _service,
-          registry: _registry,
-          vault: _vault,
-          progressStore: _progressStore,
-          sessionRevision: _sessionRevision,
-          onOpenVideo: (v) => _openDetail(v),
-          onResumeVideo: (v, at) => _openDetail(v, resumeAt: at),
-          onOpenSettings: _openSettings,
-          onOpenLogin: _openSettings,
-          // 消息入口指向底部标签页（同一份 store，未读不会不一致）
-          onOpenMessages: () => _shellKey.currentState?.goToTab(AppTab.messages),
-          unreadCount: _imStore.unreadTotal,
+        home: AppShell(
+          key: _shellKey,
+          feedPage: FeedScreen(
+            controller: _feedController,
+            service: _service,
+            vault: _vault,
+            settings: _settings,
+            interactions: _interactions,
+            onOpenSourcePicker: _openSourcePicker,
+            onOpenLogin: _openLogin,
+            onOpenOriginal: _openOriginal,
+            onOpenLinkIntake: _openLinkIntake,
+            onOpenDetail: (v) => _openDetail(v),
+            activeSource: _activeSource,
+            loggedInLabel: _loggedInLabel,
+          ),
+          discoverPage: DiscoverScreen(
+            service: _service,
+            onOpenVideo: (v) => _openDetail(v),
+            onOpenSourcePicker: _openSourcePicker,
+            onOpenLinkIntake: _openLinkIntake,
+          ),
+          dramaPage: DramaScreen(
+            service: _service,
+            onOpenVideo: (v) => _openDetail(v),
+          ),
+          // 短视频页切走时暂停、切回时恢复（用户主动暂停过则不恢复）。
+          onFeedVisibilityChanged: (visible) {
+            unawaited(_feedController.setPageActive(visible));
+          },
+          // 直播页：只在平台确实声明 supportsLive 时注入，
+          // 否则不出现空页面。
+          livePage: _livePage(),
+          // 消息页：只在平台确实支持私信时注入（当前仅 B 站）。
+          // 与直播同理，不支持时不渲染标签，避免点进去空白。
+          messagesPage: _messagesPage(),
+          profilePage: ProfileScreen(
+            service: _service,
+            registry: _registry,
+            vault: _vault,
+            progressStore: _progressStore,
+            sessionRevision: _sessionRevision,
+            onOpenVideo: (v) => _openDetail(v),
+            onResumeVideo: (v, at) => _openDetail(v, resumeAt: at),
+            onOpenSettings: _openSettings,
+            onOpenLogin: _openSettings,
+            // 消息入口指向底部标签页（同一份 store，未读不会不一致）
+            onOpenMessages: () =>
+                _shellKey.currentState?.goToTab(AppTab.messages),
+            unreadCount: _imStore.unreadTotal,
+          ),
         ),
       ),
     );

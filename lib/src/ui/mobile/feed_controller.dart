@@ -17,6 +17,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../../core/app_settings.dart';
 import '../../core/errors.dart';
 import '../../core/logger.dart';
 import '../../core/video_service.dart';
@@ -159,7 +160,7 @@ class FeedController extends ChangeNotifier {
   /// 初始化播放内核（在页面 initState 调用）。
   void initPlayer() {
     if (_player != null) return;
-    final p = FusionPlayerController(logger: _logger);
+    final p = FusionPlayerController(logger: _logger, settings: _settings);
     _player = p;
     _snapshotSub = p.stream.listen((snap) {
       final prev = _snapshot;
@@ -171,9 +172,24 @@ class FeedController extends ChangeNotifier {
       // 位置/缓冲等高频字段不触发。
       final structuralChange = prev.phase != snap.phase ||
           prev.errorMessage != snap.errorMessage ||
-          prev.errorDetail != snap.errorDetail;
+          prev.errorDetail != snap.errorDetail ||
+          // 长按加速的角标要随起随消，不能等下一次相位变化才更新。
+          prev.boosting != snap.boosting;
       if (structuralChange) notifyListeners();
     });
+    // 内核在换源后会被 mpv 重置回 1.0×，这里挂上设置里的倍速。
+    final s = _settings;
+    if (s != null) unawaited(p.setRate(s.playbackRate));
+  }
+
+  AppSettings? _settings;
+
+  /// 接上应用设置：立即套用默认倍速，之后由 FusionPlayerController 跟随。
+  void attachSettings(AppSettings? settings) {
+    _settings = settings;
+    final p = _player;
+    final s = settings;
+    if (p != null && s != null) unawaited(p.setRate(s.playbackRate));
   }
 
   // ── 内容加载 ────────────────────────────────────────────────
@@ -576,8 +592,22 @@ class FeedController extends ChangeNotifier {
   }
 
   Future<void> setRate(double r) async {
-    await _player?.rawPlayer.setRate(r);
+    await _player?.setRate(r);
   }
+
+  /// 长按临时加速（松手用 [endBoost] 结束）。
+  Future<void> beginBoost([double rate = 3.0]) async {
+    await _player?.beginBoost(rate);
+  }
+
+  Future<void> endBoost() async => _player?.endBoost();
+
+  /// 进入画中画。返回 false = 设备不支持或被 ROM 拒绝。
+  Future<bool> enterPictureInPicture() async =>
+      await _player?.enterPictureInPicture() ?? false;
+
+  /// 是否处于画中画（小窗期间不得因生命周期暂停播放）。
+  bool get inPictureInPicture => _player?.pictureInPicture.isActive ?? false;
 
   /// 离开页面时释放内核。
   @override

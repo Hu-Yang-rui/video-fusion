@@ -20,6 +20,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../../core/app_settings.dart';
 import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
 import '../../core/video_service.dart';
@@ -28,6 +29,7 @@ import '../../design/components/video_widgets.dart';
 
 import '../../models/feed.dart' as feed_models;
 import '../../models/unified_video.dart';
+import '../../player/picture_in_picture.dart';
 import '../../player/player_controller.dart';
 import '../interaction/interaction_controller.dart';
 import '../interaction/interaction_registry.dart';
@@ -66,6 +68,7 @@ class FeedScreen extends StatefulWidget {
     required this.service,
     required this.vault,
     required this.interactions,
+    this.settings,
     required this.onOpenSourcePicker,
     required this.onOpenLogin,
     required this.onOpenOriginal,
@@ -88,6 +91,9 @@ class FeedScreen extends StatefulWidget {
   /// （在推荐流收藏后，进详情页仍显示未收藏）。现在由 App 顶层持有
   /// 登记表，按视频 ID 复用同一个控制器。
   final InteractionRegistry interactions;
+
+  /// 应用设置（默认倍速等）。为 null 时不套用持久化倍速。
+  final AppSettings? settings;
 
   final VoidCallback onOpenSourcePicker;
   final VoidCallback onOpenLogin;
@@ -225,6 +231,7 @@ class _FeedScreenState extends State<FeedScreen>
     // 所以回到前台不会把用户手动暂停的视频擅自恢复。
     WidgetsBinding.instance.addObserver(this);
     widget.controller.initPlayer();
+    widget.controller.attachSettings(widget.settings);
     _attachVideoController();
     _subscribeSnapshot();
     widget.controller.addListener(_onControllerChanged);
@@ -237,6 +244,9 @@ class _FeedScreenState extends State<FeedScreen>
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
       case AppLifecycleState.detached:
+        // 画中画期间不能停：进小窗时 Activity 走 onPause，
+        // 若在此暂停，小窗里就是一张静止画面（音画都停）。
+        if (_pip.isActive) return;
         unawaited(widget.controller.setPageActive(false));
       case AppLifecycleState.resumed:
         // 只有推荐页真的在前台时才恢复，否则切到「发现」页时
@@ -247,6 +257,8 @@ class _FeedScreenState extends State<FeedScreen>
         break;
     }
   }
+
+  final PictureInPicture _pip = PictureInPicture.instance;
 
   /// 推荐页是否处于前台。
   ///
@@ -375,6 +387,7 @@ class _FeedScreenState extends State<FeedScreen>
                 // 避免位置更新导致整个 PageView 子树重建。
                 isBuffering: _snap.isBuffering,
                 isPaused: _snap.phase == PlayerPhase.paused,
+                isBoosting: _snap.boosting,
                 interaction: _interactionFor(c.items[index]),
                 onRetry: c.retryCurrent,
                 onTogglePlay: c.togglePlay,
@@ -450,6 +463,7 @@ class _FeedStage extends StatelessWidget {
     required this.videoController,
     required this.isBuffering,
     required this.isPaused,
+    required this.isBoosting,
     required this.interaction,
     required this.onRetry,
     required this.onTogglePlay,
@@ -472,6 +486,9 @@ class _FeedStage extends StatelessWidget {
   /// 是否处于暂停态（低频布尔）。
   final bool isPaused;
 
+  /// 是否处于长按临时加速中（低频布尔）。
+  final bool isBoosting;
+
   /// 该视频的互动控制器（点赞/评论/投币/收藏）。
   final InteractionController interaction;
   final VoidCallback onRetry;
@@ -484,6 +501,9 @@ class _FeedStage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 长按画面 = 临时 3 倍速（抖音式），松手回到用户设定的倍速。
+    // 用 FeedScreenScope 拿控制器，不为一个手势往三层组件里透传回调。
+    final fc = FeedScreenScope.of(context);
     return GestureDetector(
       onTap: onTap,
       onDoubleTap: () {
@@ -491,6 +511,14 @@ class _FeedStage extends StatelessWidget {
         // 因此只给触觉反馈，不伪造"已点赞"的视觉状态。
         HapticFeedback.mediumImpact();
       },
+      onLongPressStart: fc == null || !isActive
+          ? null
+          : (_) {
+              HapticFeedback.lightImpact();
+              unawaited(fc.beginBoost());
+            },
+      onLongPressEnd: fc == null ? null : (_) => unawaited(fc.endBoost()),
+      onLongPressCancel: fc == null ? null : () => unawaited(fc.endBoost()),
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -598,6 +626,42 @@ class _FeedStage extends StatelessWidget {
               ),
             ),
 
+          // ── 长按加速指示 ──────────────────────────────────
+          if (state == FeedItemState.ready && isActive && isBoosting)
+            Positioned(
+              top: MediaQuery.paddingOf(context).top + 72,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(AppleRadius.pill),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.fast_forward_rounded,
+                          size: 15, color: Colors.white),
+                      SizedBox(width: 4),
+                      Text(
+                        '3× 快进中',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
           // ── 暂停指示（短视频必备视觉反馈）────────────────
           if (state == FeedItemState.ready &&
               !isBuffering &&
@@ -658,24 +722,25 @@ class _TopBar extends StatelessWidget {
           ],
         ),
       ),
-      // 左侧：当前内容来源（可点切换）；右侧：账号。
+      // # 顶栏三段式布局（2026-10-23 调整）
       //
-      // # 为什么把来源切换放回来
+      // 之前是「左来源 + 右账号 + 中间大片空白」，观感上不平衡：
+      // 两个元素分别贴边，中间空出一整块。
       //
-      // 上一版把「内容来源」从顶栏删掉了，理由是"属于工具语义、已移到发现页"。
-      // 但竖滑页是**默认首页**：用户一进来就在刷，不会先去发现页选平台，
-      // 结果只能刷到启动时默认的那一个源（B站），看起来像"只支持 B站"。
-      //
-      // 三个平台都声明了 feedSources（抖音推荐/热榜、红果首页/分类、
-      // B站推荐/热门/排行），能力一直在，缺的只是这个入口。
-      // 做成一个轻量的胶囊标签：不抢画面，但一眼能看到"现在在刷哪个平台"。
+      // 改成三段：左占位（与右侧账号等宽，保证来源胶囊视觉居中偏左）、
+      // 中间来源、右侧账号。这样胶囊不会贴边，也不压视频主体。
       child: Row(
         children: [
+          // 左侧占位：与右侧账号按钮同宽，让中间元素视觉平衡
+          const SizedBox(width: 38),
+          const SizedBox(width: AppleSpace.sm),
           if (activeSource != null)
-            Flexible(child: _SourcePill(
-              label: activeSource!.label,
-              onTap: onSwitchSource,
-            )),
+            Flexible(
+              child: _SourcePill(
+                label: activeSource!.label,
+                onTap: onSwitchSource,
+              ),
+            ),
           const Spacer(),
           _GlassIconButton(
             icon: loggedInLabel == null
@@ -1184,6 +1249,10 @@ class _ActionRail extends StatelessWidget {
   }
 
   void _showMore(BuildContext context) {
+    // 在**弹出前**取控制器：底部弹层挂在 Navigator 上，
+    // 弹层里的 context 拿不到推荐页的 InheritedWidget。
+    final fc = FeedScreenScope.of(context);
+    final pipSupported = PictureInPicture.instance.isSupported;
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -1228,6 +1297,24 @@ class _ActionRail extends StatelessWidget {
                   onOpenOriginal();
                 },
               ),
+              // 小窗播放：只有真接了 PiP 通道的平台才出现。
+              // 失败必须如实提示——不能把图标改成"已进小窗"糊过去。
+              if (pipSupported)
+                _SheetAction(
+                  icon: Icons.picture_in_picture_alt_outlined,
+                  label: '小窗播放',
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    final ok = await fc?.enterPictureInPicture() ?? false;
+                    if (!ok && context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('这台设备未允许本应用使用小窗播放，可在系统设置里开启。'),
+                        ),
+                      );
+                    }
+                  },
+                ),
               const SizedBox(height: AppleSpace.md),
             ],
           ),

@@ -6,10 +6,13 @@
 ///  - 单个平台的失败不得阻塞其它平台的可用内容。
 library;
 
+import 'dart:typed_data';
+
 import '../adapters/douyin/web_signer.dart';
 import '../adapters/platform_adapter.dart';
 import '../adapters/platform_registry.dart';
 import '../adapters/bilibili/im_upload_client.dart';
+import '../adapters/bilibili/subtitles.dart';
 import '../core/cache.dart';
 import '../core/credential_vault.dart';
 import '../core/errors.dart';
@@ -18,6 +21,7 @@ import '../core/logger.dart';
 import '../core/playback_policy.dart';
 import '../core/bilibili_translation_provider.dart';
 import '../core/douyin_translation_provider.dart';
+import '../core/seek_preview.dart';
 import '../core/translation_service.dart';
 import '../models/feed.dart';
 import '../models/translation.dart';
@@ -275,6 +279,63 @@ class VideoService {
     final adapter = _registry.byId(platformId);
     return adapter?.supportsFolderOwnershipScan ?? false;
   }
+
+  // ── 字幕与进度条预览 ────────────────────────────────────────
+  //
+  // 与翻译一样在**服务层**按平台路由（见 translateComment）：
+  // 往 PlatformAdapter 加成员会让所有 `implements` 它的适配器与测试替身
+  // 一起编译失败，而这些能力只有 B 站有。
+
+  /// 增强信息（字幕 / 拼图预览）客户端，延迟创建。
+  ///
+  /// 独立于 BilibiliAdapter：它只需要 bvid/aid/cid 三个 id，
+  /// 而适配器那个 5000 行的文件里同名的 cid 解析是私有的。
+  BilibiliSubtitleClient? _enhance;
+
+  BilibiliSubtitleClient get _enhanceClient =>
+      _enhance ??= BilibiliSubtitleClient(http: _httpClient, logger: _logger);
+
+  /// 该平台是否给得出 CC 字幕 / 拖动预览。
+  bool supportsSubtitlesFor(String platformId) => platformId == 'bilibili';
+
+  /// 列出某视频的可用字幕。
+  ///
+  /// **未登录返回空列表**（不是错误）：实测平台匿名就给 `subtitles: []`。
+  /// UI 要区分"没字幕"和"没登录"，自己看 session 是否存在。
+  Future<List<SubtitleTrackInfo>> fetchSubtitleTracks(
+    UnifiedVideo video, {
+    PlatformSession? session,
+  }) async {
+    if (!supportsSubtitlesFor(video.platformId)) return const [];
+    final ids = await _enhanceClient.resolveIds(video.platformVideoId);
+    if (ids == null) return const [];
+    // 用 resolveIds 回来的**规范 bvid**：platformVideoId 可能是 av 形式，
+    // 而 /x/player/wbi/v2 只认 bvid。
+    return _enhanceClient.list(
+      bvid: ids.bvid,
+      cid: ids.cid,
+      cookieHeader: session?.cookieHeader ?? '',
+    );
+  }
+
+  /// 拉一条字幕的正文（失败返回空列表，不打断播放）。
+  Future<List<SubtitleCue>> fetchSubtitleCues(SubtitleTrackInfo track) =>
+      _enhanceClient.fetchCues(track);
+
+  /// 取进度条拖动预览的拼图数据。
+  ///
+  /// 实测**匿名即可用**，所以不需要 session；平台没给（或该平台没有）返回 null，
+  /// UI 就不显示预览——不给一个点了没反应的进度条。
+  Future<SpriteSheetSpec?> fetchSeekPreview(UnifiedVideo video) async {
+    if (!supportsSubtitlesFor(video.platformId)) return null;
+    final ids = await _enhanceClient.resolveIds(video.platformVideoId);
+    if (ids == null) return null;
+    return _enhanceClient.fetchSprite(ids.aid);
+  }
+
+  /// 取一张拼图的原始字节（拼图是二进制 JPEG，不能按文本读）。
+  Future<Uint8List?> fetchSeekPreviewSheet(String url) =>
+      _enhanceClient.fetchSpriteBytes(url);
 
   // ── 私信（IM）──────────────────────────────────────────────
   //

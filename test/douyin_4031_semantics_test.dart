@@ -111,20 +111,31 @@ void main() {
     });
   });
 
-  group('登录前校正页面（Referer 修复）', () {
-    test('sendSmsCode 前也校正页面', () {
-      final idx = src.indexOf('Future<void> sendSmsCode(String phone)');
-      expect(idx, greaterThan(0), reason: '短信登录入口应存在');
-      final block = src.substring(idx, (idx + 900).clamp(0, src.length));
-      expect(block.contains('_ensureOnHomePage()'), isTrue);
+  group('短信登录已迁出 WebView（纯 HTTP）', () {
+    test('web_signer 不再有短信入口', () {
+      expect(
+        src.contains('sendSmsCode'),
+        isFalse,
+        reason: '短信登录改走 DouyinPassportClient，两条链路不能并存',
+      );
     });
 
-    test('注释说明 Referer 不能由 JS 设置', () {
-      expect(
-        src.contains('禁止 JS 修改') || src.contains('禁止修改'),
-        isTrue,
-        reason: '否则后人会再试一遍在 fetch 里改 Referer（无效）',
-      );
+    test('passport_client 提供发码与提交', () {
+      final client =
+          File('lib/src/adapters/douyin/passport_client.dart')
+              .readAsStringSync();
+      expect(client.contains('Future<void> sendSmsCode('), isTrue);
+      expect(client.contains('Future<Map<String, String>> submitSmsCode('),
+          isTrue);
+      expect(client.contains("'/passport/web/send_code/'"), isTrue);
+      expect(client.contains("'/passport/web/sms_login/'"), isTrue);
+    });
+
+    test('适配器把短信登录指向 passport_client', () {
+      final adapter = File('lib/src/adapters/douyin_adapter.dart')
+          .readAsStringSync();
+      expect(adapter.contains('DouyinPassportClient'), isTrue);
+      expect(adapter.contains('_passportLogin.sendSmsCode(phone)'), isTrue);
     });
   });
 }

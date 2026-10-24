@@ -18,8 +18,10 @@ import 'dart:async';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../core/app_settings.dart';
 import '../core/logger.dart';
 import '../models/playback.dart';
+import 'picture_in_picture.dart';
 import 'playback_intent.dart';
 
 /// 播放器运行状态（供外围 UI 渲染）。
@@ -62,6 +64,8 @@ class PlayerSnapshot {
     required this.videoWidth,
     required this.videoHeight,
     required this.volume,
+    this.rate = 1.0,
+    this.boosting = false,
   });
 
   final PlayerPhase phase;
@@ -74,6 +78,12 @@ class PlayerSnapshot {
   final int? videoWidth;
   final int? videoHeight;
   final double volume;
+
+  /// **实际生效**的倍速。长按加速期间它是 boost 值，不是用户设的默认值。
+  final double rate;
+
+  /// 是否处于长按临时加速中（UI 据此显示"3× 快进中"提示）。
+  final bool boosting;
 
   static const PlayerSnapshot initial = PlayerSnapshot(
     phase: PlayerPhase.idle,
@@ -107,6 +117,9 @@ class PlayerSnapshot {
     int? videoWidth,
     int? videoHeight,
     double? volume,
+    double? rate,
+    bool? boosting,
+    bool endBoost = false,
   }) =>
       PlayerSnapshot(
         phase: phase ?? this.phase,
@@ -119,6 +132,8 @@ class PlayerSnapshot {
         videoWidth: videoWidth ?? this.videoWidth,
         videoHeight: videoHeight ?? this.videoHeight,
         volume: volume ?? this.volume,
+        rate: rate ?? this.rate,
+        boosting: endBoost ? false : (boosting ?? this.boosting),
       );
 }
 
@@ -131,14 +146,31 @@ class PlayerSnapshot {
 /// // UI 侧监听 controller.stream
 /// ```
 class FusionPlayerController {
-  FusionPlayerController({FusionLogger? logger})
+  FusionPlayerController({FusionLogger? logger, AppSettings? settings})
       : _logger = logger ?? appLogger {
     _player = Player();
     _attach();
+    _settings = settings;
+    final s = settings;
+    if (s != null) {
+      _baseRate = s.playbackRate;
+      s.addListener(_syncRateFromSettings);
+    }
   }
 
   final FusionLogger _logger;
   late final Player _player;
+
+  /// 应用设置。倍速以它为准：面板改设置 → 播放器跟随，
+  /// 换源后也从这里重新下发（mpv 每次 open 都会把倍速带回 1.0）。
+  AppSettings? _settings;
+
+  void _syncRateFromSettings() {
+    final s = _settings;
+    if (s == null) return;
+    if (s.playbackRate == _baseRate) return;
+    unawaited(setRate(s.playbackRate));
+  }
 
   final StreamController<PlayerSnapshot> _snapshots =
       StreamController<PlayerSnapshot>.broadcast();
@@ -353,6 +385,9 @@ class FusionPlayerController {
       }
 
       _emit(_snapshot.copyWith(phase: PlayerPhase.ready));
+      // mpv 每次 open 都会把倍速带回 1.0，换源后必须重新下发用户设定，
+      // 否则表现为"选了 1.5 倍速，滑到下一条又变回原速"。
+      unawaited(_applyRate(_boostRate ?? _baseRate));
     } catch (e) {
       _logger.error('player load failed', {'error': '$e'});
       _emit(_snapshot.copyWith(
@@ -704,6 +739,67 @@ class FusionPlayerController {
   Future<void> seek(Duration position) => _player.seek(position);
 
   Future<void> setVolume(double volume) => _player.setVolume(volume);
+
+  // ── 倍速 ────────────────────────────────────────────────────
+
+  double _baseRate = 1.0;
+  double? _boostRate;
+
+  /// 用户设定的倍速（不含长按加速）。
+  double get baseRate => _baseRate;
+
+  /// 设置倍速。长按加速期间调用会记下基准，松手后回到它。
+  Future<void> setRate(double rate) async {
+    _baseRate = rate.clamp(0.25, 4.0);
+    if (_boostRate != null) {
+      // 加速中改基准：先记下，松手时再生效，避免长按期间突然变回常速。
+      _emit(_snapshot.copyWith(rate: _boostRate));
+      return;
+    }
+    await _applyRate(_baseRate);
+  }
+
+  /// 长按临时加速（抖音式「按住 3 倍速」）。
+  Future<void> beginBoost([double rate = 3.0]) async {
+    if (_boostRate != null) return;
+    _boostRate = rate.clamp(0.25, 4.0);
+    _emit(_snapshot.copyWith(rate: _boostRate, boosting: true));
+    await _applyRate(_boostRate!);
+  }
+
+  /// 松手：回到用户设定的基准倍速。
+  Future<void> endBoost() async {
+    if (_boostRate == null) return;
+    _boostRate = null;
+    _emit(_snapshot.copyWith(rate: _baseRate, endBoost: true));
+    await _applyRate(_baseRate);
+  }
+
+  bool get isBoosting => _boostRate != null;
+
+  Future<void> _applyRate(double rate) async {
+    if (_disposed) return;
+    try {
+      await _player.setRate(rate);
+    } catch (e) {
+      _logger.warn('player: setRate failed', {'rate': rate, 'error': '$e'});
+    }
+  }
+
+  // ── 画中画 ──────────────────────────────────────────────────
+  //
+  // media_kit 1.2.6 的 NativePlayer 没有 enterPip，
+  // 实现见 picture_in_picture.dart（Android 原生 PictureInPictureParams）。
+
+  final PictureInPicture _pip = PictureInPicture.instance;
+
+  PictureInPicture get pictureInPicture => _pip;
+
+  /// 进入小窗。返回 false = 设备不支持或被 ROM 拒绝，调用方须如实提示。
+  Future<bool> enterPictureInPicture() => _pip.enter(
+        width: _snapshot.videoWidth,
+        height: _snapshot.videoHeight,
+      );
 
   /// 重试：重新加载当前播放源。
   ///

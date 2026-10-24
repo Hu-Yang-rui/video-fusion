@@ -1,4 +1,4 @@
-/// 设置页：账号与平台管理（Apple 风格分组列表）。
+﻿/// 设置页：账号与平台管理（Apple 风格分组列表）。
 ///
 /// 内容：
 ///  - 已连接平台账号（登录状态、重新授权、解绑）
@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 
 import '../../adapters/platform_adapter.dart';
 import '../../adapters/platform_registry.dart';
+import '../../core/app_settings.dart';
 import '../../core/credential_vault.dart';
 import '../../core/video_progress_store.dart';
 import '../../core/video_service.dart';
@@ -34,6 +35,7 @@ class SettingsScreen extends StatefulWidget {
     required this.registry,
     required this.vault,
     required this.progressStore,
+    this.settings,
     this.onSessionChanged,
   });
 
@@ -41,6 +43,9 @@ class SettingsScreen extends StatefulWidget {
   final PlatformRegistry registry;
   final CredentialVault vault;
   final VideoProgressStore progressStore;
+
+  /// 应用设置（主题 / 连播 / 倍速）。为 null 时不渲染「外观与播放」分组。
+  final AppSettings? settings;
   final VoidCallback? onSessionChanged;
 
   @override
@@ -61,7 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   ///
   /// 之前这个值是硬编码的 `'1.0.0'`，而实际发布 0.9.0——
   /// 用户报问题时说的版本号是错的，排查方向直接被带偏。
-  static const String _appVersion = '0.10.0';
+  static const String _appVersion = '0.11.0';
 
   final Map<String, PlatformSession> _sessions = {};
   bool _loadingSessions = true;
@@ -129,6 +134,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(height: AppleSpace.lg),
                     _buildPlatforms(c),
                     const SizedBox(height: AppleSpace.lg),
+                    if (widget.settings != null) ...[
+                      _buildAppearance(c, widget.settings!),
+                      const SizedBox(height: AppleSpace.lg),
+                    ],
                     _buildPlayback(c),
                     const SizedBox(height: AppleSpace.lg),
                     _buildStorage(c),
@@ -623,6 +632,89 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  // ── 外观与播放偏好 ──────────────────────────────────────────
+
+  Widget _buildAppearance(AppleColors c, AppSettings s) {
+    return ListenableBuilder(
+      listenable: s,
+      builder: (context, _) => AppleGroupedSection(
+        header: '外观与播放',
+        children: [
+          AppleListRow(
+            leadingIcon: Icons.contrast_rounded,
+            leadingColor: c.gray,
+            title: '深色模式',
+            subtitle: '跟随系统，或强制浅色 / 深色',
+            trailingText: switch (s.themeMode) {
+              ThemeModeChoice.system => '跟随系统',
+              ThemeModeChoice.light => '浅色',
+              ThemeModeChoice.dark => '深色',
+            },
+            showChevron: true,
+            onTap: () => _pickThemeMode(s),
+          ),
+          AppleListRow(
+            leadingIcon: Icons.playlist_play_rounded,
+            leadingColor: c.green,
+            title: '短剧自动连播',
+            subtitle: '看完一集自动播下一集',
+            trailing: Switch(
+              value: s.autoPlayNext,
+              onChanged: (v) => s.autoPlayNext = v,
+            ),
+          ),
+          AppleListRow(
+            leadingIcon: Icons.speed_rounded,
+            leadingColor: c.blue,
+            title: '默认倍速',
+            subtitle: '长按画面可临时 3 倍速',
+            trailingText: '${s.playbackRate.toStringAsFixed(2)}×',
+            showChevron: true,
+            onTap: () => _pickPlaybackRate(s),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _pickThemeMode(AppSettings s) async {
+    final picked = await showModalBottomSheet<ThemeModeChoice>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _ChoiceSheet<ThemeModeChoice>(
+        title: '深色模式',
+        selected: s.themeMode,
+        options: const [
+          (ThemeModeChoice.system, '跟随系统'),
+          (ThemeModeChoice.light, '浅色'),
+          (ThemeModeChoice.dark, '深色'),
+        ],
+      ),
+    );
+    if (picked != null) s.themeMode = picked;
+  }
+
+  Future<void> _pickPlaybackRate(AppSettings s) async {
+    final picked = await showModalBottomSheet<double>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _ChoiceSheet<double>(
+        title: '默认倍速',
+        selected: s.playbackRate,
+        options: const [
+          (0.5, '0.5×'),
+          (0.75, '0.75×'),
+          (1.0, '1.0×（原速）'),
+          (1.25, '1.25×'),
+          (1.5, '1.5×'),
+          (2.0, '2.0×'),
+          (3.0, '3.0×'),
+        ],
+      ),
+    );
+    if (picked != null) s.playbackRate = picked;
+  }
+
   // ── 播放 ────────────────────────────────────────────────────
 
   Widget _buildPlayback(AppleColors c) {
@@ -750,6 +842,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
           subtitle: '各平台公开接口 + 用户授权账号',
         ),
       ],
+    );
+  }
+}
+
+/// 通用单选底部面板。
+///
+/// 用于「深色模式」「默认倍速」这类 2–7 个选项的偏好，
+/// 避免为每个开关各写一份 UI。
+class _ChoiceSheet<T> extends StatelessWidget {
+  const _ChoiceSheet({
+    required this.title,
+    required this.options,
+    this.selected,
+  });
+
+  final String title;
+  final List<(T, String)> options;
+  final T? selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppleColors.of(context);
+    return Container(
+      margin: const EdgeInsets.all(AppleSpace.md),
+      decoration: BoxDecoration(
+        color: c.background,
+        borderRadius: BorderRadius.circular(AppleRadius.lg),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(AppleSpace.lg),
+              child: Text(
+                title,
+                style: AppleType.headline.copyWith(color: c.label),
+              ),
+            ),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final (value, label) in options)
+                    ListTile(
+                      title: Text(label),
+                      trailing: selected == value
+                          ? Icon(Icons.check_rounded, color: c.blue)
+                          : null,
+                      onTap: () => Navigator.pop(context, value),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: AppleSpace.sm),
+          ],
+        ),
+      ),
     );
   }
 }

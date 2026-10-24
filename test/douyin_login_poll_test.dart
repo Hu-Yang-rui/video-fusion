@@ -108,15 +108,8 @@ void main() {
   });
 
   group('Referer 修复', () {
-    test('存在 _ensureOnHomePage，且短信登录入口调用它', () {
+    test('存在 _ensureOnHomePage（扫码路径仍依赖页面）', () {
       expect(src.contains('Future<void> _ensureOnHomePage()'), isTrue);
-      // 扫码路径现在优先走页面弹窗（fetchLoginQr 开头调
-      // _openLoginModalAndGrabQr），所以这里改守短信入口。
-      final idx = src.indexOf('Future<void> sendSmsCode(String phone)');
-      expect(idx, greaterThan(0), reason: '短信登录是当前可用路径');
-      final block = src.substring(idx, (idx + 900).clamp(0, src.length));
-      expect(block.contains('_ensureOnHomePage()'), isTrue,
-          reason: 'Referer 由页面地址决定，登录前必须把页面挪回首页');
     });
 
     test('pollLoginQr 每次轮询前也校正页面', () {

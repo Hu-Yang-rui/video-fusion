@@ -1,7 +1,7 @@
 /// 红果短剧平台适配器。
 ///
-/// 支持剧集列表、详情、分集、播放（360p~1080p）。
-/// 搜索、评论、点赞、投币、收藏、私信、直播均不支持。
+/// 支持：剧集列表 / 分类 / 搜索 / 详情 / 分集 / 播放（360p–1080p）。
+/// 不支持：评论、点赞、投币、收藏、私信、直播（平台无此概念）。
 library;
 
 import 'package:flutter/foundation.dart' show debugPrint;
@@ -17,7 +17,8 @@ import 'hongguo/playback_id.dart';
 import 'platform_adapter.dart';
 
 /// 红果短剧适配器。
-class HongguoAdapter extends PlatformAdapter {
+class HongguoAdapter extends PlatformAdapter
+    implements EpisodeListCapable {
   HongguoAdapter({
     required FusionHttpClient http,
     FusionLogger? logger,
@@ -511,7 +512,7 @@ class HongguoAdapter extends PlatformAdapter {
     );
   }
 
-  /// 拉取剧集的全部分集（转成 [UnifiedVideo]，供选集列表用）。
+  /// 拉取整部剧的分集（转成 [UnifiedVideo]，供选集列表用）。
   Future<List<UnifiedVideo>> fetchEpisodeVideos(String seriesId) async {
     final detail = await fetchSeriesDetail(seriesId);
     final now = DateTime.now().toIso8601String();
@@ -530,28 +531,37 @@ class HongguoAdapter extends PlatformAdapter {
         .toList();
   }
 
+  /// 按当前这一集反查整部剧（供详情页选集与连播用）。
+  ///
+  /// 入参可能是复合标识 `hongguo:{seriesId}#{index}`，
+  /// 也可能只有 `{seriesId}`（整部剧，默认第 1 集）。
+  @override
+  Future<EpisodeListing?> listEpisodesFor(String platformVideoId) async {
+    final parsed = HongguoPlaybackId.parse(platformVideoId);
+    if (parsed == null || parsed.seriesId.isEmpty) return null;
+    final episodes = await fetchEpisodeVideos(parsed.seriesId);
+    if (episodes.isEmpty) return null;
+
+    final wanted = parsed.episodeIndex ?? 1;
+    var index = episodes.indexWhere(
+      (e) => HongguoPlaybackId.parse(e.platformVideoId)?.episodeIndex == wanted,
+    );
+    if (index < 0) index = 0;
+
+    return EpisodeListing(
+      episodes: episodes,
+      currentIndex: index,
+      // 剧集标题形如「剧名 第N集」，去掉后缀就是剧名。
+      seriesTitle:
+          RegExp(r'^(.*?)\s*第\d+集$').firstMatch(episodes[index].title)?.group(1) ??
+          episodes[index].title,
+    );
+  }
+
   /// 探测某一集的 360p 是否真的可播。
   ///
-  /// # 为什么需要
-  ///
-  /// 实测发现：**官网的 360p 不是每集都有**。
-  ///
-  /// 逐集探测 76 集的结果（2026-10-20）：
-  ///
-  /// ```
-  /// 第 1–7 集   ✓
-  /// 第 8–9 集   ✗ 404
-  /// 第 10–12 集 ✓
-  /// 第 13–18 集 ✗ 404
-  /// 第 19–20 集 ✓
-  /// 第 21–29 集 ✗ 404
-  /// 第 30、48 集 ✓（零散可用）
-  /// 第 40 集以后 ✗ 404
-  /// ```
-  ///
-  /// 这与 TV 版 Release 说明一致：「公开备用页面只开放前三集」
-  /// ——实际是**部分集有兜底缓存**，不是完整覆盖。
-  ///
+  /// 官网的 360p **不是每集都有**：实测一部 76 集的剧里，第 8–9、13–18、
+  /// 21–29 与 40 集之后都是 404，只有零散几集有兜底缓存。
   /// 因此不能假设「拿到 vid 就能播」，必须探测。
   Future<bool> isEpisodePlayable(String vid) async {
     if (vid.isEmpty) return false;

@@ -124,46 +124,28 @@ void main() {
     });
   });
 
-  group('表单 body 结构（字段顺序固定）', () {
-    test('send_code body 五个字段顺序正确', () {
-      final body = adapter.buildSendCodeBody('13800138000');
-      final keys = body.split('&').map((kv) => kv.split('=').first).toList();
-      expect(keys, [
-        'is6Digits',
-        'mix_mode',
-        'mobile',
-        'type',
-        'fixed_mix_mode',
-      ]);
+  group('passport 手机号格式（必须带 +86 前缀）', () {
+    test('11 位号码补成 `+86 1xxxxxxxxxx`', () {
+      expect(adapter.formatPassportPhone('13800138000'), '+86 13800138000');
+      expect(adapter.formatPassportPhone('138 0013 8000'), '+86 13800138000');
+      expect(adapter.formatPassportPhone('+8613800138000'), '+86 13800138000');
+      expect(adapter.formatPassportPhone('8613800138000'), '+86 13800138000');
     });
 
-    test('sms_login body 五个字段顺序正确', () {
-      final body = adapter.buildSmsLoginBody('13800138000', '123456');
-      final keys = body.split('&').map((kv) => kv.split('=').first).toList();
-      expect(keys, [
-        'service',
-        'mix_mode',
-        'mobile',
-        'code',
-        'fixed_mix_mode',
-      ]);
+    test('位数不对原样返回（交给本地校验拦下）', () {
+      expect(adapter.formatPassportPhone('1380013800'), '1380013800');
     });
 
-    test('send_code 里 type 恒为 3731', () {
-      expect(adapter.buildSendCodeBody('13800138000'), contains('type=3731'));
-    });
-
-    test('sms_login 里 service 指向主站', () {
-      expect(
-        adapter.buildSmsLoginBody('13800138000', '123456'),
-        contains('service=https://www.douyin.com'),
+    test('加密后不出现明文号码', () {
+      final enc = adapter.passportEncrypt(
+        adapter.formatPassportPhone('13800138000'),
       );
+      expect(enc.contains('13800138000'), isFalse);
     });
 
-    test('手机号在 body 里是加密的（不出现明文）', () {
-      final body = adapter.buildSendCodeBody('13800138000');
-      expect(body.contains('13800138000'), isFalse,
-          reason: '明文手机号不该出现在请求体里');
+    test('nationalPhone 用于校验，去掉所有前缀与分隔符', () {
+      expect(adapter.nationalPhone('+86 138-0013-8000'), '13800138000');
+      expect(adapter.nationalPhone('8613800138000'), '13800138000');
     });
   });
 }

@@ -92,10 +92,25 @@ key.properties
 
 # 探针原始产物（含真实接口响应片段，不入库）
 # 注意：只忽略下划线前缀的产物，保留 probe_*.mjs 脚本本身作为可复现证据
-/tool/_*.json
-/tool/_*.txt
-/tool/_*.png
-/tool/_*.xml
+# 必须写成 **/_ 而不是 /tool/_：探针也放在 tool/live/ 等子目录里，
+# 那些产物含平台下发的签名 URL（auth_key / 有效期内的直链），
+# 一旦入库等于泄漏可用的访问凭证。
+/tool/**/_*.json
+/tool/**/_*.txt
+/tool/**/_*.png
+/tool/**/_*.xml
+/tool/**/_*.jpg
+/tool/**/_*.html
+/tool/**/_*.bin
+/tool/**/_*.mjs
+/tool/**/_*.js
+/tool/**/_*.dart
+
+# catbus 参考实现的抓取副本（_api.ts / _pp.ts / _sign.ts / _mc.json …），
+# 只作移植对照，含真实接口路径与参数，不入公开仓库
+/_*.ts
+/_*.json
+/_*.txt
 
 # ==============================================================
 # 本地签名库（抖音 X-Argus / X-Gorgon 签名引擎）
