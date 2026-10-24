@@ -229,7 +229,8 @@ class DouyinPassportClient {
     }
     _jar.remove('msToken');
     _seedPageCookiesAfterBootstrap();
-    await _step(strict, 'www/ttwid/check', _checkTtwidWww);
+    // ttwid/check 是探测项：已持有有效 ttwid 时服务端不发新的，no 属正常。
+    await _observe('www/ttwid/check', _checkTtwidWww);
     await _step(
       strict,
       'login_guiding_strategy',
@@ -239,7 +240,7 @@ class DouyinPassportClient {
       await _getSecTs();
       return true;
     });
-    await _step(strict, 'ttwid/check', _checkTtwidLogin);
+    await _observe('ttwid/check', _checkTtwidLogin);
     _jar.remove('bd_ticket_guard_client_data_v2');
     await _step(
       strict,
@@ -251,6 +252,63 @@ class DouyinPassportClient {
     }
     await _step(strict, 'client_data_v2', _addClientDataV2);
     _bootstrapped = true;
+  }
+
+  /// 诊断用：暴露 login_guiding_strategy 的完整响应。
+  ///
+  /// 服务端在这个响应里说明"该账号可用哪些登录方式"，但正式流程
+  /// 只看 `message=='success'`，内容被丢掉了。排查风控时要能看到它。
+  @visibleForTesting
+  Future<PassportHttpResult?> debugLoginGuidingStrategy() =>
+      _loginGuidingStrategy();
+
+  /// 诊断用：用指定 aid 发一次验证码。
+  ///
+  /// 不同 aid 对应不同 passport 服务与风控阈值，可用于判断
+  /// "是这个 aid 被拦"还是"这个账号被拦"。
+  @visibleForTesting
+  Future<PassportHttpResult> debugSendCodeWithAid(
+    String phone,
+    String aid,
+  ) async {
+    await bootstrap();
+    final data = <(String, String)>[
+      ('is6Digits', '1'),
+      ('mix_mode', '1'),
+      ('mobile', passportEncrypt(formatPassportPhone(phone))),
+      ('type', '3731'),
+      ('fixed_mix_mode', '1'),
+    ];
+    final p = _sdkParams(
+      extra: const {'is_from_iesaccountsaas': '1'},
+      data: data,
+      deviceFp: true,
+    );
+    p['aid'] = aid;
+    p['a_bogus'] = _abogusFor(p, host: 'login.douyin.com', body: spliceUrl(data));
+    return _send(
+      'POST',
+      '$kDouyinLoginHost/passport/web/send_code/',
+      headers: {
+        'web-sdk-version': '1',
+        'x-tt-session-dtrait': _dtrait('/passport/web/send_code/'),
+        'referer': _referer,
+        'x-tt-passport-aid-sign': aidSign('/passport/web/send_code/', '${sdkTsSeconds()}'),
+        'x-tt-passport-csrf-token': _csrf,
+        'x-tt-passport-trace-id': cookie('biz_trace_id') ?? '',
+        'accept': 'application/json, text/javascript',
+        'content-type': 'application/x-www-form-urlencoded',
+        'x-tt-passport-verify-portrait': _verifyPortrait,
+        'origin': kDouyinWebHost,
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-site',
+      },
+      query: p,
+      body: urlEncodePairs(data),
+      cookieOrder: _smsOrder,
+      historicalOnly: _smsHistoricalOnly,
+    );
   }
 
   /// 发送短信验证码。
@@ -281,7 +339,10 @@ class DouyinPassportClient {
       'code': res.errorCode ?? 'absent',
       'desc': res.errorDescription,
     });
-    if ((res.errorCode ?? 0) != 0) throw _smsError(res);
+    if ((res.errorCode ?? 0) != 0) {
+      _captureChallengeShape(res);
+      throw _smsError(res);
+    }
   }
 
   /// 提交验证码完成登录；成功时返回会话 cookie 快照。
@@ -312,7 +373,10 @@ class DouyinPassportClient {
       'code': res.errorCode ?? 'absent',
       'desc': res.errorDescription,
     });
-    if ((res.errorCode ?? 0) != 0) throw _smsError(res);
+    if ((res.errorCode ?? 0) != 0) {
+      _captureChallengeShape(res);
+      throw _smsError(res);
+    }
     if (!_jar.keys.any(_sessionMarkers.contains)) {
       throw FusionException(
         code: FusionErrorCode.upstreamError,
@@ -1043,6 +1107,16 @@ class DouyinPassportClient {
     }
   }
 
+  /// 只记录结果、绝不抛错的诊断步骤（探测类接口用）。
+  Future<void> _observe(String name, Future<bool> Function() fn) async {
+    try {
+      final ok = await fn();
+      steps.add('$name: ${ok ? "ok" : "no"}（探测项，不作为失败依据）');
+    } catch (e) {
+      steps.add('$name: 失败（$e）（探测项，不作为失败依据）');
+    }
+  }
+
   void _raiseIfBlocked(String api, PassportHttpResult res) {
     final code = res.errorCode;
     if (code == null || code == 0) return;
@@ -1097,12 +1171,23 @@ class DouyinPassportClient {
         desc.contains('滑块') ||
         desc.toLowerCase().contains('captcha');
     if (captcha) {
+      // 区分两种"要验证"：能在网页里做的滑块，与只能去官方 APP 做的。
+      // 后者客户端无论如何都代不了，文案必须直接告诉用户换路。
+      final mustUseApp = desc.contains('APP') ||
+          desc.contains('app') ||
+          desc.contains('抖音客户端') ||
+          desc.contains('账号安全');
       return FusionException(
         code: FusionErrorCode.capabilityUnavailable,
-        userMessage: '需要人机验证：${desc.isEmpty ? code : desc}',
-        technicalMessage: 'sms captcha required: code=$code desc=$desc',
+        userMessage: mustUseApp
+            ? '抖音要求先在官方 APP 里完成账号安全验证。'
+                '完成后回来重试，或改用「扫码登录」。'
+            : '需要人机验证：${desc.isEmpty ? code : desc}',
+        technicalMessage: 'sms captcha required: code=$code desc=$desc '
+            'mustUseApp=$mustUseApp challenge=$_smsChallengeShape',
         upstreamCode: code,
         platformId: 'douyin',
+        retryable: true,
       );
     }
     return FusionException(
@@ -1112,6 +1197,47 @@ class DouyinPassportClient {
       upstreamCode: code,
       platformId: 'douyin',
     );
+  }
+
+  /// 需要人机验证时，服务端下发的挑战形态（只记字段名与类型，不记取值）。
+  ///
+  /// 决定后续怎么做：
+  ///  - 有 `captcha` / `challenge_code` → 网页滑块，理论上可在 WebView 完成；
+  ///  - 只有 `mobile_verify_type` / 无挑战字段 → 服务端指定去官方 APP 验证，
+  ///    客户端无从代做，如实告知用户。
+  static const List<String> _smsChallengeFields = [
+    'captcha',
+    'captcha_version',
+    'challenge_code',
+    'verify_url',
+    'desc_url',
+    'mobile_verify_type',
+    'user_verify_type',
+    'verify_type',
+    'sliding_token',
+    'rush_rule',
+  ];
+
+  String get _smsChallengeShape => _lastChallengeShape;
+  String _lastChallengeShape = 'unknown';
+
+  /// 记录一次响应的挑战字段形态。
+  void _captureChallengeShape(PassportHttpResult res) {
+    final data = res.json?['data'];
+    if (data is! Map) {
+      _lastChallengeShape = 'no-data';
+      return;
+    }
+    final found = <String>[];
+    for (final f in _smsChallengeFields) {
+      final v = data[f];
+      if (v == null) continue;
+      found.add(v is String ? '$f(str:${v.length})' : '$f(${v.runtimeType})');
+    }
+    _lastChallengeShape = found.isEmpty
+        ? 'none-of:${_smsChallengeFields.join("|")}'
+        : found.join(',');
+    steps.add('challenge shape: $_lastChallengeShape');
   }
 
   String _uuid4() {

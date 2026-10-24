@@ -1,4 +1,4 @@
-﻿/// 播放策略与服务集成测试。
+/// 播放策略与服务集成测试。
 ///
 /// 覆盖需求八「播放测试」中可离线验证的部分，以及关键架构约束：
 ///  - 播放模式依据实际能力选择，不默认所有视频都能应用内播放
@@ -122,7 +122,7 @@ class StubAdapter extends PlatformAdapter with NoImSupport {
   /// implements 不继承默认实现，必须显式声明。
   @override
   Future<FeedPage> fetchFeed(FeedRequest request,
-          {required String sourceId}) async =>
+          {required String sourceId, PlatformSession? session}) async =>
       throw FusionException(
         code: FusionErrorCode.unsupportedPlatform,
         userMessage: '测试替身不提供推荐流。',
@@ -821,7 +821,7 @@ class _FlakyAdapter extends PlatformAdapter with NoImSupport {
 
   @override
   Future<FeedPage> fetchFeed(FeedRequest request,
-          {required String sourceId}) async =>
+          {required String sourceId, PlatformSession? session}) async =>
       throw FusionException(
         code: FusionErrorCode.unsupportedPlatform,
         userMessage: '测试替身不提供推荐流。',

@@ -161,6 +161,76 @@ class DouyinWebSigner {
   static const String _modalToken = '__modal__';
   static const String _modalFp = '__modal__';
 
+  /// 补齐 WebView 缺失的 Chrome 环境面。
+  ///
+  /// 抖音的 `uc-secure-dtrait-core` 在文档早期就读 `window.chrome`、
+  /// `navigator.plugins`、`Notification` 等，Android WebView 缺这些，
+  /// 于是被判"当前环境不支持"、`check_qrconnect` 返 4031。
+  /// 这里只补浏览器本来就有的对象，不改硬件/网络指纹。
+  static const String _chromeEnvPatch = r'''
+    (function () {
+      try {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      } catch (e) {}
+      try {
+        if (!window.chrome) { window.chrome = {}; }
+        if (!window.chrome.runtime) { window.chrome.runtime = {}; }
+        if (!window.chrome.loadTimes) {
+          window.chrome.loadTimes = function () {
+            return { requestTime: 0, startLoadTime: 0, commitLoadTime: 0,
+                     finishDocumentLoadTime: 0, finishLoadTime: 0,
+                     firstPaintTime: 0, firstPaintAfterLoadTime: 0,
+                     navigationType: 'Other', wasFetchedViaSpdy: true,
+                     wasNpnNegotiated: true, npnNegotiatedProtocol: 'h2',
+                     wasAlternateProtocolAvailable: false,
+                     connectionInfo: 'h2' };
+          };
+        }
+        if (!window.chrome.csi) {
+          window.chrome.csi = function () {
+            return { startE: 0, onloadT: 0, pageT: 0, tran: 15 };
+          };
+        }
+      } catch (e) {}
+      try {
+        if (!navigator.plugins || navigator.plugins.length === 0) {
+          var mk = function (name, filename, desc) {
+            return { name: name, filename: filename, description: desc,
+                     length: 1, item: function () { return null; },
+                     namedItem: function () { return null; } };
+          };
+          var list = [
+            mk('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+            mk('Chrome PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+            mk('Chromium PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+            mk('Microsoft Edge PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+            mk('WebKit built-in PDF', 'internal-pdf-viewer', 'Portable Document Format')
+          ];
+          Object.defineProperty(navigator, 'plugins', { get: () => list });
+          Object.defineProperty(navigator, 'mimeTypes', {
+            get: () => [{ type: 'application/pdf', suffixes: 'pdf',
+                          description: 'Portable Document Format',
+                          enabledPlugin: list[0] }]
+          });
+        }
+      } catch (e) {}
+      try {
+        if (typeof Notification === 'undefined') {
+          window.Notification = function () {};
+          window.Notification.permission = 'default';
+          window.Notification.requestPermission = function () {
+            return Promise.resolve('default');
+          };
+        }
+      } catch (e) {}
+      try {
+        if (navigator.languages && navigator.languages.length === 0) {
+          Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh'] });
+        }
+      } catch (e) {}
+    })();
+  ''';
+
   /// 是否为"页面弹窗"模式（token 是占位符）。
   bool _isModalMode(DouyinLoginQr qr) => qr.token == _modalToken;
 
@@ -228,13 +298,8 @@ class DouyinWebSigner {
           userAgent:
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          // # 缓存必须开启（2026-10-23 修正）
-          //
-          // 原设置 `cacheEnabled: false` 的本意是"避免拿到过期 Cookie"。
-          // 但禁用缓存同时会让 `ttwid` 这类**长期设备标识**每次都重新生成
-          // 或干脆不下发，而 ticket guard 需要一个稳定的设备身份。
-          //
-          // 实测：开启缓存后 Cookie 集合才接近真实浏览器。
+          // 缓存必须开：禁用它会让 ttwid 这类长期设备标识每次重生成，
+          // ticket guard 需要一个稳定设备身份。
           cacheEnabled: true,
           cacheMode: CacheMode.LOAD_DEFAULT,
           // 允许 DOM Storage 与数据库：ticket guard 会用到
@@ -243,7 +308,15 @@ class DouyinWebSigner {
           // 允许混合内容（页面内有些资源是 http）
           mixedContentMode: MixedContentMode.MIXED_CONTENT_COMPATIBILITY_MODE,
         ),
-        onWebViewCreated: (controller) {
+        // 页面脚本执行前注入：抖音的 dtrait/uc-secure SDK 在文档早期
+        // 就会读这些面，onLoadStop 再补已经太晚。
+        onWebViewCreated: (controller) async {
+          await controller.addUserScript(
+            userScript: UserScript(
+              source: _chromeEnvPatch,
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+            ),
+          );
           // 去掉 navigator.webdriver 标记：
           // 无头容器会带上该标记，平台据此判定自动化并拒绝下发 uifid。
           // 这里只移除这一个自动化标记，不伪造任何硬件/网络指纹。
@@ -257,15 +330,22 @@ class DouyinWebSigner {
             'url': url?.toString() ?? '-',
           });
 
+          // 环境自检：记下关键面，判断补丁是否生效（值本身不含隐私）。
           try {
-            // 移除自动化标记
-            await controller.evaluateJavascript(
-              source: '''
+            final env = await controller.evaluateJavascript(source: '''
+              (function () {
                 try {
-                  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                } catch (e) {}
-              ''',
-            );
+                  return JSON.stringify({
+                    webdriver: typeof navigator.webdriver,
+                    chrome: typeof window.chrome,
+                    chromeRuntime: typeof (window.chrome && window.chrome.runtime),
+                    plugins: navigator.plugins ? navigator.plugins.length : -1,
+                    notification: typeof Notification
+                  });
+                } catch (e) { return 'err'; }
+              })()
+            ''');
+            _logger.info('douyin signer: env patch', {'env': '$env'});
           } catch (_) {}
 
           // 等 uifid。先等到 temp 再（可选）等 full，

@@ -658,6 +658,7 @@ class MockAdapter implements PlatformAdapter {
   Future<FeedPage> fetchFeed(
     FeedRequest request, {
     required String sourceId,
+    PlatformSession? session,
   }) async {
     if (sourceId != 'mock:local') {
       throw FusionException(
@@ -805,6 +806,20 @@ class MockAdapter implements PlatformAdapter {
       userMessage: '模拟平台不提供应用内播放能力。',
       technicalMessage:
           'MockAdapter.resolvePlayback called; no native playback by design.',
+      platformId: id,
+    );
+  }
+
+  // 模拟平台没有通知中心：如实声明不支持。
+  @override
+  bool get supportsNotifications => false;
+
+  @override
+  Future<Map<String, int>> fetchNoticeCounts() async {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '模拟平台没有通知中心。',
+      technicalMessage: 'MockAdapter does not implement fetchNoticeCounts',
       platformId: id,
     );
   }

@@ -20,6 +20,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:video_fusion/src/adapters/platform_adapter.dart';
 import 'package:video_fusion/src/adapters/platform_registry.dart';
 import 'package:video_fusion/src/core/cache.dart';
+import 'package:video_fusion/src/core/credential_vault.dart';
 import 'package:video_fusion/src/core/errors.dart';
 import 'package:video_fusion/src/core/key_value_store.dart';
 import 'package:video_fusion/src/core/video_service.dart';
@@ -99,6 +100,7 @@ class _FeedAdapter extends PlatformAdapter with NoImSupport {
   Future<FeedPage> fetchFeed(
     FeedRequest request, {
     required String sourceId,
+    PlatformSession? session,
   }) async {
     if (fail) {
       throw FusionException(
@@ -163,7 +165,9 @@ void main() {
       final sources = service.describeFeedSources();
 
       expect(sources.first.id, VideoService.mixedFeedSourceId);
-      expect(sources.first.label, '混合');
+      // 标签必须能让用户看出混的是哪些平台，不能只写「混合」。
+      expect(sources.first.label, contains('抖音'));
+      expect(sources.first.label, contains('B站'));
       expect(sources.first.description, contains('抖音'));
       expect(sources.first.description, contains('B站'));
     });

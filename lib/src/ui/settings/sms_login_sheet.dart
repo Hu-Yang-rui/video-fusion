@@ -62,6 +62,10 @@ class _SmsLoginSheetState extends State<SmsLoginSheet> {
   bool _submitting = false;
   String? _error;
 
+  /// 本次失败是否属于"平台要求换验证方式"（去 APP 验证 / 需人机验证）。
+  /// 为 true 时错误下方给「改用扫码登录」出口。
+  bool _blockedByPlatform = false;
+
   /// 发送成功后的倒计时（秒）。0 表示可以再次发送。
   int _countdown = 0;
   Timer? _timer;
@@ -113,6 +117,7 @@ class _SmsLoginSheetState extends State<SmsLoginSheet> {
     setState(() {
       _sending = true;
       _error = null;
+      _blockedByPlatform = false;
     });
 
     try {
@@ -129,12 +134,16 @@ class _SmsLoginSheetState extends State<SmsLoginSheet> {
       setState(() {
         _sending = false;
         _error = e.userMessage;
+        // capabilityUnavailable = 平台要求换一种验证方式（含去 APP 验证）。
+        _blockedByPlatform = e.code == FusionErrorCode.capabilityUnavailable;
       });
     } catch (e) {
       if (!mounted) return;
+      // 非 FusionException 说明是未预期的异常（网络栈、序列化等）。
+      // 把类型带出来，否则用户只看到"失败"两字，排查时无从下手。
       setState(() {
         _sending = false;
-        _error = '验证码发送失败，请稍后重试。';
+        _error = '验证码发送失败（${e.runtimeType}），请稍后重试。';
       });
     }
   }
@@ -165,7 +174,7 @@ class _SmsLoginSheetState extends State<SmsLoginSheet> {
       if (!mounted) return;
       if (r.phase == QrLoginPhase.succeeded) {
         widget.onSucceeded(r);
-        Navigator.of(context).pop(true);
+        Navigator.of(context).pop(SmsConnectOutcome.succeeded);
         return;
       }
       setState(() {
@@ -177,6 +186,7 @@ class _SmsLoginSheetState extends State<SmsLoginSheet> {
       setState(() {
         _submitting = false;
         _error = e.userMessage;
+        _blockedByPlatform = e.code == FusionErrorCode.capabilityUnavailable;
       });
     } catch (e) {
       if (!mounted) return;
@@ -223,7 +233,11 @@ class _SmsLoginSheetState extends State<SmsLoginSheet> {
                   ),
                 ),
                 GestureDetector(
-                  onTap: () => Navigator.of(context).pop(false),
+                  onTap: () => Navigator.of(context).pop(
+                    _blockedByPlatform
+                        ? SmsConnectOutcome.blockedByPlatform
+                        : SmsConnectOutcome.cancelled,
+                  ),
                   child: Icon(
                     Icons.close_rounded,
                     size: 20,
@@ -267,7 +281,8 @@ class _SmsLoginSheetState extends State<SmsLoginSheet> {
                 ),
                 const SizedBox(width: AppleSpace.sm),
                 SizedBox(
-                  width: 108,
+                  // 132 是「获取验证码」5 个字在 15pt 下不省略的最小宽度。
+                  width: 132,
                   child: ApplePrimaryButton(
                     label: _countdown > 0
                         ? '${_countdown}s'
@@ -318,7 +333,8 @@ class _SmsLoginSheetState extends State<SmsLoginSheet> {
               ],
             ),
 
-            // 错误提示
+            // 错误提示。被平台要求去官方 APP 验证时，直接给「改扫码」出口——
+            // 否则用户只能自己退出、再从头点一遍，等于卡死在这里。
             if (_error != null) ...[
               const SizedBox(height: AppleSpace.md),
               Row(
@@ -327,9 +343,28 @@ class _SmsLoginSheetState extends State<SmsLoginSheet> {
                   Icon(Icons.error_outline_rounded, size: 15, color: c.red),
                   const SizedBox(width: AppleSpace.xs),
                   Expanded(
-                    child: Text(
-                      _error!,
-                      style: AppleType.footnote.copyWith(color: c.red),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _error!,
+                          style: AppleType.footnote.copyWith(color: c.red),
+                        ),
+                        if (_blockedByPlatform) ...[
+                          const SizedBox(height: 6),
+                          GestureDetector(
+                            onTap: () => Navigator.of(context)
+                                .pop(SmsConnectOutcome.blockedByPlatform),
+                            child: Text(
+                              '改用扫码登录 ›',
+                              style: AppleType.footnote.copyWith(
+                                color: c.blue,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
                 ],

@@ -722,18 +722,11 @@ class _TopBar extends StatelessWidget {
           ],
         ),
       ),
-      // # 顶栏三段式布局（2026-10-23 调整）
-      //
-      // 之前是「左来源 + 右账号 + 中间大片空白」，观感上不平衡：
-      // 两个元素分别贴边，中间空出一整块。
-      //
-      // 改成三段：左占位（与右侧账号等宽，保证来源胶囊视觉居中偏左）、
-      // 中间来源、右侧账号。这样胶囊不会贴边，也不压视频主体。
+      // 顶栏：左侧来源胶囊、右侧账号。左侧不再留空占位——
+      // 之前留 38px 是为了"视觉居中"，实际效果是胶囊既没贴边也没居中，
+      // 反而像放错了位置。
       child: Row(
         children: [
-          // 左侧占位：与右侧账号按钮同宽，让中间元素视觉平衡
-          const SizedBox(width: 38),
-          const SizedBox(width: AppleSpace.sm),
           if (activeSource != null)
             Flexible(
               child: _SourcePill(

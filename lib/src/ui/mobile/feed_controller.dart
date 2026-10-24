@@ -18,6 +18,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../../core/app_settings.dart';
+import '../../core/credential_vault.dart';
 import '../../core/errors.dart';
 import '../../core/logger.dart';
 import '../../core/video_service.dart';
@@ -52,11 +53,43 @@ class FeedController extends ChangeNotifier {
   FeedController({
     required VideoService service,
     FusionLogger? logger,
+    this.sessionProvider,
   })  : _service = service,
         _logger = logger ?? appLogger;
 
   final VideoService _service;
   final FusionLogger _logger;
+
+  /// 取某平台登录会话的回调。由 main 注入，避免 UI 层依赖凭证存储实现。
+  ///
+  /// 不带会话时平台给的是公开冷启动内容，不是按账号的推荐。
+  final Future<PlatformSession?> Function(String platformId)? sessionProvider;
+
+  /// 会话缓存。登录态变化时由 [invalidateSessions] 清掉。
+  final Map<String, PlatformSession?> _sessionCache = {};
+
+  /// 登录态变化后清缓存（导入/退出登录时调用）。
+  void invalidateSessions() => _sessionCache.clear();
+
+  /// 取某平台的会话（带缓存）。
+  Future<PlatformSession?> _sessionFor(String platformId) async {
+    if (_sessionCache.containsKey(platformId)) {
+      return _sessionCache[platformId];
+    }
+    PlatformSession? session;
+    try {
+      session = await sessionProvider?.call(platformId);
+    } catch (e) {
+      // 读会话失败不该让推荐流整体失败：退回公开流并留痕。
+      _logger.warn('feed: session lookup failed', {
+        'platform': platformId,
+        'errorType': e.runtimeType.toString(),
+      });
+      session = null;
+    }
+    _sessionCache[platformId] = session;
+    return session;
+  }
 
   // ── 流内容 ──────────────────────────────────────────────────
 
@@ -241,9 +274,26 @@ class FeedController extends ChangeNotifier {
     }
     notifyListeners();
 
+    // 取当前来源所属平台的会话：有登录态才是**按账号**的推荐流。
+    // 混合流要跨平台，所以整表传下去。
+    final sessions = <String, PlatformSession>{};
+    if (sessionProvider != null) {
+      if (source.adapterId == 'mixed') {
+        for (final id in VideoService.mixedFeedPlatforms) {
+          final s = await _sessionFor(id);
+          if (s != null) sessions[id] = s;
+        }
+      } else {
+        final s = await _sessionFor(source.adapterId);
+        if (s != null) sessions[source.adapterId] = s;
+      }
+    }
+
     final result = await _service.fetchFeed(
       source.id,
       request: FeedRequest(offset: _nextOffset),
+      session: sessions[source.adapterId],
+      sessions: sessions,
     );
 
     _loadingMore = false;

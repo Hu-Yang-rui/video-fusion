@@ -307,6 +307,70 @@ class HongguoParser {
     );
   }
 
+  /// 解析排行榜页，提取 `rankList`。
+  ///
+  /// # 数据形态（2026-10-24 实测，推翻了"无 SSR 数据"的旧结论）
+  ///
+  /// 榜单数据在 HTML 里被 **HTML 实体转义**过：
+  /// ```
+  /// &quot;rankList&quot;:[{&quot;id&quot;:&quot;...&quot;,
+  ///   &quot;seriesId&quot;:&quot;7697209269287914521&quot;,
+  ///   &quot;rank&quot;:1,&quot;title&quot;:&quot;持械入宋：第十季&quot;,
+  ///   &quot;cover&quot;:&quot;https://...&quot;,
+  ///   &quot;heatText&quot;:&quot;7921万热度&quot;,...}]
+  /// ```
+  /// 所以必须先把 `&quot;` 解回 `"` 才能当 JSON 解析。
+  ///
+  /// 四个榜单路径实测各 20 部：
+  ///   `/rank/hot-drama` `/rank/hot-real-drama`
+  ///   `/rank/hot-comic-drama` `/rank/hot-ai-drama`
+  ///
+  /// 字段名与首页/分类页**都不同**：这里是 `seriesId`（驼峰）、
+  /// `title`、`cover`，不是 `series_id` / `series_title` / `series_cover`。
+  List<HongguoSeries> parseRankPage(String html) {
+    // HTML 实体解码：只处理会破坏 JSON 的几个
+    final decoded = html
+        .replaceAll('&quot;', '"')
+        .replaceAll('&#34;', '"')
+        .replaceAll('&amp;', '&');
+
+    final raw = _extractJsonArray(decoded, 'rankList');
+    if (raw == null) return const [];
+
+    final List<Object?> items;
+    try {
+      final parsed = jsonDecode(raw);
+      if (parsed is! List) return const [];
+      items = parsed;
+    } catch (_) {
+      return const [];
+    }
+
+    final out = <HongguoSeries>[];
+    final seen = <String>{};
+    for (final item in items) {
+      if (item is! Map) continue;
+      final v = Map<String, Object?>.from(item);
+
+      // 榜单用驼峰 seriesId；兼容下划线写法
+      final id = _str(v['seriesId']) ?? _str(v['series_id']);
+      final title = _str(v['title']) ?? _str(v['series_title']) ?? '';
+      if (id == null || id.isEmpty || title.isEmpty) continue;
+      if (!seen.add(id)) continue;
+
+      out.add(
+        HongguoSeries(
+          seriesId: id,
+          title: title,
+          coverUrl: _str(v['cover']) ?? _str(v['series_cover']),
+          description: _str(v['description']),
+          rank: _toInt(v['rank']),
+        ),
+      );
+    }
+    return out;
+  }
+
   /// 兜底：解析顶层 `video_list`（首页只有 9 部时可能走这里）。
   List<HongguoSeries> _parseTopLevelVideoList(String html) {
     final raw = _extractJsonArray(html, 'video_list');

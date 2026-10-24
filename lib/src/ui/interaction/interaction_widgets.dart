@@ -1142,6 +1142,8 @@ class _CommentSheetState extends State<CommentSheet> {
         controller: sheetScroll,
         padding: const EdgeInsets.only(bottom: AppleSpace.xxxl),
         itemCount: ctrl.comments.length + (ctrl.commentsHasMore ? 1 : 0),
+        // 分隔线从正文左边缘开始（头像 32 + 间距 12 + 页面左边距 16 = 60），
+        // 不在头像下方拉一条线——那会让头像看起来像被切成两半。
         separatorBuilder: (_, _) => const AppleDivider(indent: 60),
         itemBuilder: (context, index) {
           if (index >= ctrl.comments.length) {
@@ -1320,8 +1322,9 @@ class _CommentTile extends StatelessWidget {
                         comment.authorName,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: AppleType.footnoteEmphasized.copyWith(
+                        style: AppleType.subheadline.copyWith(
                           color: c.secondaryLabel,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
@@ -1360,9 +1363,9 @@ class _CommentTile extends StatelessWidget {
                 const SizedBox(height: 3),
                 Text(
                   comment.message,
-                  style: AppleType.footnote.copyWith(
+                  style: AppleType.body.copyWith(
                     color: c.label,
-                    height: 1.45,
+                    height: 1.5,
                   ),
                 ),
                 // 译文：与原文并列显示，原文永不替换。
@@ -1379,49 +1382,45 @@ class _CommentTile extends StatelessWidget {
                     message: translation!.errorMessage!,
                     onRetry: onTranslate,
                   ),
-                const SizedBox(height: 6),
-                Row(
+                const SizedBox(height: 8),
+                // 元信息行。回复数只由展开区渲染，此处不重复；用 Wrap 防溢出。
+                Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: AppleSpace.md,
+                  runSpacing: 2,
                   children: [
                     Text(
                       _relativeTime(comment.createdAt),
-                      style: AppleType.caption2.copyWith(
+                      style: AppleType.caption1.copyWith(
                         color: c.tertiaryLabel,
                       ),
                     ),
                     // 翻译入口：与时间同层级，不做成显眼按钮。
                     // 平台不支持翻译时整段不渲染（不给点了必然失败的按钮）。
-                    if (supportsTranslation && onTranslate != null) ...[
-                      const SizedBox(width: AppleSpace.md),
+                    if (supportsTranslation && onTranslate != null)
                       _TranslateAction(
-                        state: translation?.state ??
-                            CommentTranslationState.idle,
+                        state:
+                            translation?.state ?? CommentTranslationState.idle,
                         visible: translation?.visible ?? false,
                         onTap: onTranslate!,
                       ),
-                    ],
                     // IP 属地：与时间同权重，不额外加底色或徽标。
                     // 仅在平台确实返回时显示，缺失时整段不渲染。
-                    if (comment.ipLocation != null) ...[
-                      const SizedBox(width: AppleSpace.sm),
+                    if (comment.ipLocation != null)
                       Text(
                         comment.ipLocation!,
-                        style: AppleType.caption2.copyWith(
+                        style: AppleType.caption1.copyWith(
                           color: c.tertiaryLabel,
                         ),
                       ),
-                    ],
-                    if (comment.likeCount != null || canLike) ...[
-                      const SizedBox(width: AppleSpace.md),
-                      // 点赞：平台支持时是可点按钮；点亮态来自平台下发的
-                      // isLikedByMe（我赞过），不是本地猜的。
+                    // 点赞：平台支持时是可点按钮；点亮态来自平台下发的
+                    // isLikedByMe（我赞过），不是本地猜的。
+                    if (comment.likeCount != null || canLike)
                       GestureDetector(
                         onTap: (canLike && !likePending) ? onLike : null,
                         behavior: HitTestBehavior.opaque,
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            vertical: 4,
-                            horizontal: 2,
-                          ),
+                          padding: const EdgeInsets.symmetric(vertical: 2),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -1429,17 +1428,17 @@ class _CommentTile extends StatelessWidget {
                                 comment.isLikedByMe
                                     ? Icons.thumb_up_rounded
                                     : Icons.thumb_up_outlined,
-                                size: 11,
+                                size: 13,
                                 color: comment.isLikedByMe
                                     ? c.blue
                                     : c.tertiaryLabel,
                               ),
                               if (comment.likeCount != null &&
                                   comment.likeCount! > 0) ...[
-                                const SizedBox(width: 2),
+                                const SizedBox(width: 3),
                                 Text(
-                                  '${comment.likeCount}',
-                                  style: AppleType.caption2.copyWith(
+                                  _fmtCount(comment.likeCount!),
+                                  style: AppleType.caption1.copyWith(
                                     color: comment.isLikedByMe
                                         ? c.blue
                                         : c.tertiaryLabel,
@@ -1450,38 +1449,22 @@ class _CommentTile extends StatelessWidget {
                           ),
                         ),
                       ),
-                    ],
-                    if (comment.replyCount != null &&
-                        comment.replyCount! > 0) ...[
-                      const SizedBox(width: AppleSpace.md),
-                      Text(
-                        '${comment.replyCount} 条回复',
-                        style: AppleType.caption2.copyWith(
-                          color: c.tertiaryLabel,
-                        ),
-                      ),
-                    ],
                     // 回复入口：与"翻译"同级的小字链接，支持时才渲染。
-                    if (canReply && onReply != null) ...[
-                      const SizedBox(width: AppleSpace.md),
+                    if (canReply && onReply != null)
                       GestureDetector(
                         onTap: onReply,
                         behavior: HitTestBehavior.opaque,
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            vertical: 4,
-                            horizontal: 2,
-                          ),
+                          padding: const EdgeInsets.symmetric(vertical: 2),
                           child: Text(
                             '回复',
-                            style: AppleType.caption2.copyWith(
+                            style: AppleType.caption1.copyWith(
                               color: c.blue,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
                         ),
                       ),
-                    ],
                   ],
                 ),
               ],
@@ -1502,6 +1485,19 @@ class _CommentTile extends StatelessWidget {
     if (diff.inHours > 0) return '${diff.inHours} 小时前';
     if (diff.inMinutes > 0) return '${diff.inMinutes} 分钟前';
     return '刚刚';
+  }
+
+  /// 数字缩写（318368 → 31.8万），与面板标题同口径。
+  static String _fmtCount(int n) {
+    if (n >= 100000000) {
+      final v = n / 100000000;
+      return '${v.toStringAsFixed(v >= 10 ? 0 : 1)}亿';
+    }
+    if (n >= 10000) {
+      final v = n / 10000;
+      return '${v.toStringAsFixed(v >= 10 ? 0 : 1)}万';
+    }
+    return '$n';
   }
 }
 
@@ -1898,6 +1894,9 @@ class _SubCommentsArea extends StatelessWidget {
     final subs = ctrl.subCommentsOf(rootId);
 
     // 未展开：给一个"展开 N 条回复"的文字按钮（首次点击才发请求）。
+    //
+    // 左缩进与正文左边缘对齐（头像 32 + 间距 12 + 页面左边距 16 = 60），
+    // 让"展开"看起来是这条评论的延续，而不是另一条独立内容。
     if (!loaded) {
       return Padding(
         padding: const EdgeInsets.only(
@@ -1915,17 +1914,20 @@ class _SubCommentsArea extends StatelessWidget {
                   ),
                   const SizedBox(width: 6),
                   Text('加载回复…',
-                      style: AppleType.caption2.copyWith(color: c.tertiaryLabel)),
+                      style: AppleType.caption1.copyWith(color: c.tertiaryLabel)),
                 ],
               )
             : GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: () => ctrl.loadSubComments(rootId),
-                child: Text(
-                  '展开 $total 条回复',
-                  style: AppleType.caption1.copyWith(
-                    color: c.blue,
-                    fontWeight: FontWeight.w600,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Text(
+                    '展开 $total 条回复',
+                    style: AppleType.caption1.copyWith(
+                      color: c.blue,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
               ),
@@ -2015,64 +2017,142 @@ class _SubCommentRow extends StatelessWidget {
   final bool canReply;
   final VoidCallback? onReply;
 
+  /// 头像解码宽度（逻辑 24px → 2x 屏取 48）。
+  static const int _avatarDecodeWidth = 48;
+
   @override
   Widget build(BuildContext context) {
     final c = AppleColors.of(context);
+    final initial = comment.authorName.isEmpty
+        ? '?'
+        : comment.authorName.characters.first;
+
     return Padding(
+      // 子评论自己也有头像，所以缩进只保留一级评论的头像宽度（32）
+      // 一半，让子评论头像落在"展开"按钮的视觉延续线上，而不是再多缩一整圈。
       padding: const EdgeInsets.only(
-        left: 60,
+        left: 44,
         right: AppleSpace.lg,
         bottom: AppleSpace.sm,
       ),
-      child: Column(
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text.rich(
-            TextSpan(
+          // 头像：子评论也要有，否则与一级评论不是同一套视觉语言。
+          CircleAvatar(
+            radius: 12,
+            backgroundColor: c.fill,
+            backgroundImage: comment.authorAvatarUrl == null
+                ? null
+                : ResizeImage.resizeIfNeeded(
+                    _avatarDecodeWidth,
+                    _avatarDecodeWidth,
+                    NetworkImage(
+                      comment.authorAvatarUrl!,
+                      headers: const {'Referer': 'https://www.bilibili.com/'},
+                    ),
+                  ),
+            child: comment.authorAvatarUrl == null
+                ? Text(
+                    initial,
+                    style: AppleType.caption2.copyWith(color: c.secondaryLabel),
+                  )
+                : null,
+          ),
+          const SizedBox(width: AppleSpace.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                TextSpan(
-                  text: '${comment.authorName}: ',
-                  style: AppleType.caption1.copyWith(
+                Text(
+                  comment.authorName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppleType.footnote.copyWith(
                     color: c.secondaryLabel,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                TextSpan(
-                  text: comment.message,
-                  style: AppleType.footnote.copyWith(color: c.label, height: 1.4),
+                const SizedBox(height: 2),
+                Text(
+                  comment.message,
+                  style: AppleType.subheadline.copyWith(
+                    color: c.label,
+                    height: 1.45,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: AppleSpace.md,
+                  runSpacing: 2,
+                  children: [
+                    Text(
+                      _CommentTile._relativeTime(comment.createdAt),
+                      style: AppleType.caption1.copyWith(
+                        color: c.tertiaryLabel,
+                      ),
+                    ),
+                    if (comment.ipLocation != null)
+                      Text(
+                        comment.ipLocation!,
+                        style: AppleType.caption1.copyWith(
+                          color: c.tertiaryLabel,
+                        ),
+                      ),
+                    if (canLike)
+                      GestureDetector(
+                        onTap: pending ? null : onLike,
+                        behavior: HitTestBehavior.opaque,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                comment.isLikedByMe
+                                    ? Icons.thumb_up_rounded
+                                    : Icons.thumb_up_outlined,
+                                size: 13,
+                                color: comment.isLikedByMe
+                                    ? c.blue
+                                    : c.tertiaryLabel,
+                              ),
+                              if (comment.likeCount != null &&
+                                  comment.likeCount! > 0) ...[
+                                const SizedBox(width: 3),
+                                Text(
+                                  _CommentTile._fmtCount(comment.likeCount!),
+                                  style: AppleType.caption1.copyWith(
+                                    color: comment.isLikedByMe
+                                        ? c.blue
+                                        : c.tertiaryLabel,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    if (canReply)
+                      GestureDetector(
+                        onTap: onReply,
+                        behavior: HitTestBehavior.opaque,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                          child: Text(
+                            '回复',
+                            style: AppleType.caption1.copyWith(
+                              color: c.blue,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ],
             ),
-          ),
-          const SizedBox(height: 2),
-          Row(
-            children: [
-              if (comment.ipLocation != null)
-                Text(comment.ipLocation!,
-                    style: AppleType.caption2.copyWith(color: c.tertiaryLabel)),
-              if (canLike) ...[
-                const SizedBox(width: AppleSpace.md),
-                GestureDetector(
-                  onTap: pending ? null : onLike,
-                  behavior: HitTestBehavior.opaque,
-                  child: Icon(
-                    comment.isLikedByMe ? Icons.thumb_up_rounded : Icons.thumb_up_outlined,
-                    size: 12,
-                    color: comment.isLikedByMe ? c.blue : c.tertiaryLabel,
-                  ),
-                ),
-              ],
-              if (canReply) ...[
-                const SizedBox(width: AppleSpace.md),
-                GestureDetector(
-                  onTap: onReply,
-                  behavior: HitTestBehavior.opaque,
-                  child: Text('回复',
-                      style: AppleType.caption2.copyWith(
-                          color: c.blue, fontWeight: FontWeight.w600)),
-                ),
-              ],
-            ],
           ),
         ],
       ),

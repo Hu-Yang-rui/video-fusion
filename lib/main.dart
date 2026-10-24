@@ -156,7 +156,13 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
     );
 
     _vault = CredentialVault(storage: secureStore, logger: logger);
-    _feedController = FeedController(service: _service, logger: logger);
+    _feedController = FeedController(
+      service: _service,
+      logger: logger,
+      // 推荐流要按账号推送：把 vault 的读取封成回调注入，
+      // 让 UI 层的控制器不必直接依赖凭证存储实现。
+      sessionProvider: (platformId) => _vault.load(platformId),
+    );
     _interactions = InteractionRegistry(service: _service, vault: _vault);
     _imStore = ImStore(service: _service, vault: _vault);
     _progressStore = VideoProgressStore(
@@ -225,9 +231,18 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
     // 登录态变了：云端进度上报器丢掉会话缓存与节流窗口，
     // 否则刚导入 Cookie 的账号要等 5 分钟缓存过期才开始上报。
     _cloudProgress.invalidateSessions();
+    // 推荐流的会话缓存也要清：不清的话刚登录仍按匿名流推内容，
+    // 用户会觉得"登录了但推荐还是那些东西"。
+    _feedController.invalidateSessions();
     // 已打开的推荐流/详情页要重新读登录态，否则导入 Cookie 后
     // 按钮仍显示"登录后可操作"，必须切走再切回才更新。
     await _interactions.recalibrateAll();
+    // 启动时首次恢复会话不重载：`_bootstrap` 已经在并行拉第一页，
+    // 两边同时 loadSource 会互相清空（表现为首屏闪一下又重来）。
+    // 只在"已经有内容之后再变登录态"时才重载。
+    if (_feedController.length > 0) {
+      await _reloadFeedForSession();
+    }
   }
 
   @override
@@ -383,6 +398,24 @@ class _VideoFusionAppState extends State<VideoFusionApp> {
     // Cookie 导入/退出登录会改变登录态：返回后校准所有互动状态，
     // 否则已打开的推荐流会继续显示"登录后可操作"。
     await _interactions.recalibrateAll();
+    // 推荐流也要重载：登录前拿的是公开冷启动内容，登录后应该按账号推。
+    // 不重载的话用户会看到"登录了但推荐还是那些东西"，等于白登录。
+    await _reloadFeedForSession();
+  }
+
+  /// 登录态变化后重载当前推荐来源。
+  ///
+  /// 先清会话缓存（否则仍用旧的匿名结果），再重新拉第一页。
+  /// 失败不动现有内容——重载是增强，不该把用户正在看的东西清空。
+  Future<void> _reloadFeedForSession() async {
+    final source = _activeSource;
+    if (source == null) return;
+    _feedController.invalidateSessions();
+    try {
+      await _feedController.loadSource(source);
+    } catch (_) {
+      // 重载失败保留原有内容，用户仍可继续看。
+    }
   }
 
   Future<void> _openLogin() async {

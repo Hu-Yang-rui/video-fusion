@@ -137,11 +137,12 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
   Future<FeedPage> fetchFeed(
     FeedRequest request, {
     required String sourceId,
+    PlatformSession? session,
   }) async {
     return switch (sourceId) {
-      feedSourceRcmd => _fetchRcmd(request),
-      feedSourcePopular => _fetchPopular(request),
-      feedSourceRanking => _fetchRanking(request),
+      feedSourceRcmd => _fetchRcmd(request, session: session),
+      feedSourcePopular => _fetchPopular(request, session: session),
+      feedSourceRanking => _fetchRanking(request, session: session),
       _ => throw FusionException(
           code: FusionErrorCode.unsupportedPlatform,
           userMessage: '未知的推荐流来源。',
@@ -151,7 +152,16 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
     };
   }
 
-  Future<FeedPage> _fetchRcmd(FeedRequest request) async {
+  /// 推荐流请求头。带 SESSDATA 才是按账号个性化；未登录退回公开流。
+  Map<String, String> _feedHeaders(PlatformSession? session) => {
+        'Referer': _referer,
+        if (session != null) 'Cookie': session.cookieHeader,
+      };
+
+  Future<FeedPage> _fetchRcmd(
+    FeedRequest request, {
+    PlatformSession? session,
+  }) async {
     // 实测（2026-10）：rcmd 的分页参数是 `fresh_idx`（刷新轮次），
     // 不是 offset。同一 fresh_idx 会返回同一批内容，
     // 因此必须用 offset 递增 fresh_idx 才能拿到新内容。
@@ -168,7 +178,7 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
 
     final json = await _http.getJson(
       url,
-      headers: const {'Referer': _referer},
+      headers: _feedHeaders(session),
       platformId: id,
     );
     _assertApiOk(json, endpoint: '/x/web-interface/index/top/feed/rcmd');
@@ -222,13 +232,16 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
     );
   }
 
-  Future<FeedPage> _fetchPopular(FeedRequest request) async {
+  Future<FeedPage> _fetchPopular(
+    FeedRequest request, {
+    PlatformSession? session,
+  }) async {
     final url = '$_apiBase/x/web-interface/popular'
         '?ps=${request.safePageSize}&pn=${request.offset + 1}';
 
     final json = await _http.getJson(
       url,
-      headers: const {'Referer': _referer},
+      headers: _feedHeaders(session),
       platformId: id,
     );
     _assertApiOk(json, endpoint: '/x/web-interface/popular');
@@ -271,7 +284,10 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
     );
   }
 
-  Future<FeedPage> _fetchRanking(FeedRequest request) async {    // 实测（2026-10）：`/x/web-interface/ranking/v2` 在当前网络环境下
+  Future<FeedPage> _fetchRanking(
+    FeedRequest request, {
+    PlatformSession? session,
+  }) async {    // 实测（2026-10）：`/x/web-interface/ranking/v2` 在当前网络环境下
     // 返回 `code=-352`（B 站风控拦截），且未登录时无法通过。
     // 这里改为使用 `/x/web-interface/ranking/region`（分区排行），
     // 该接口实测返回 code=0。若其亦被拦截，则如实抛错，不伪造空内容。
@@ -279,7 +295,7 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
 
     final json = await _http.getJson(
       url,
-      headers: const {'Referer': _referer},
+      headers: _feedHeaders(session),
       platformId: id,
     );
 
@@ -5100,6 +5116,27 @@ class BilibiliAdapter implements PlatformAdapter, QrLoginCapable, NumericVideoId
     required PlatformSession session,
   }) =>
       _imEmote.fetchPanel(session: session);
+
+  // ── 通知中心 ────────────────────────────────────────────────
+  //
+  // B站的未读汇总在 `/x/msgfeed/unread`（需要 SESSDATA）。
+  // 未实测过登录态下的字段，因此只声明能力、不猜测字段名：
+  // 拿不到就如实报错，不返回假数字。
+
+  @override
+  bool get supportsNotifications => true;
+
+  @override
+  Future<Map<String, int>> fetchNoticeCounts() async {
+    throw FusionException(
+      code: FusionErrorCode.capabilityUnavailable,
+      userMessage: 'B站通知中心尚未接通。',
+      technicalMessage: 'bilibili notice counts not implemented '
+          '(endpoint /x/msgfeed/unread 未在登录态实测)',
+      platformId: id,
+      retryable: false,
+    );
+  }
 }
 
 /// 单个收藏夹的核对结果。

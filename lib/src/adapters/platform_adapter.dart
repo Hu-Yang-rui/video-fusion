@@ -154,7 +154,15 @@ abstract class PlatformAdapter {
   /// [sourceId] 来自 [feedSources] 中的 [FeedSource.id]。
   /// 未声明该来源时必须抛 [FusionException]（unsupportedPlatform），
   /// 不得静默返回空列表——那会让"不可用"伪装成"没有内容"。
-  Future<FeedPage> fetchFeed(FeedRequest request, {required String sourceId}) {
+  ///
+  /// [session] 为该平台的登录会话。**传了才是按账号的个性化流**；
+  /// 为 null 时退回公开流。平台若有个性化接口，实现方必须在
+  /// [session] 非空时走个性化路径，不得忽略它继续打公开接口。
+  Future<FeedPage> fetchFeed(
+    FeedRequest request, {
+    required String sourceId,
+    PlatformSession? session,
+  }) {
     throw FusionException(
       code: FusionErrorCode.unsupportedPlatform,
       userMessage: '该平台未提供推荐流。',
@@ -582,6 +590,26 @@ abstract class PlatformAdapter {
       code: FusionErrorCode.unsupportedPlatform,
       userMessage: '该平台暂不支持关注。',
       technicalMessage: 'Adapter $id does not implement setFollowAuthor',
+      platformId: id,
+    );
+  }
+
+  /// 是否支持**通知中心**（点赞/评论/关注/系统通知的未读汇总）。
+  ///
+  /// 与私信（[supportsIm]）分开：私信是点对点会话，通知是平台事件流。
+  /// 多数平台两者接口不同、登录要求也可能不同。
+  bool get supportsNotifications => false;
+
+  /// 拉取通知未读汇总（入口红点用）。
+  ///
+  /// 返回 `分类 → 未读数`。未登录抛 `loginRequired`；不支持抛
+  /// `unsupportedPlatform`。**返回空 map 表示"确实没有未读"**，
+  /// 不是"能力不可用"——两者在 UI 上表现不同。
+  Future<Map<String, int>> fetchNoticeCounts() {
+    throw FusionException(
+      code: FusionErrorCode.unsupportedPlatform,
+      userMessage: '该平台暂不支持通知中心。',
+      technicalMessage: 'Adapter $id does not implement fetchNoticeCounts',
       platformId: id,
     );
   }

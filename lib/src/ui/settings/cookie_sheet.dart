@@ -166,7 +166,13 @@ class _CookieImportSheetState extends State<_CookieImportSheet> {
                       height: 1.4,
                     ),
                     decoration: InputDecoration(
-                      hintText: 'SESSDATA=xxx; bili_jct=yyy; DedeUserID=zzz',
+                      // 占位示例必须跟随平台：原来写死 B站字段，
+                      // 在「导入抖音 Cookie」面板里显示 SESSDATA 会误导。
+                      hintText: switch (widget.platformHint) {
+                        'douyin' => 'sessionid=xxx; sid_tt=yyy; passport_csrf_token=zzz',
+                        'bilibili' => 'SESSDATA=xxx; bili_jct=yyy; DedeUserID=zzz',
+                        _ => 'name=value; name2=value2',
+                      },
                       hintStyle: AppleType.footnote.copyWith(
                         color: c.tertiaryLabel,
                         fontFamily: 'monospace',

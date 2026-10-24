@@ -52,11 +52,19 @@ class ApplePrimaryButton extends StatelessWidget {
           Icon(icon, size: 18, color: Colors.white),
           const SizedBox(width: AppleSpace.sm),
         ],
-        Text(
-          label,
-          style: AppleType.button.copyWith(
-            color: Colors.white,
-            fontSize: 16,
+        // Flexible + ellipsis：窄按钮里长文案（如「获取验证码」）会溢出，
+        // 原来直接塞 Text 会画出 overflow 警示条。
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            softWrap: false,
+            textAlign: TextAlign.center,
+            style: AppleType.button.copyWith(
+              color: Colors.white,
+              fontSize: 15,
+            ),
           ),
         ),
       ],

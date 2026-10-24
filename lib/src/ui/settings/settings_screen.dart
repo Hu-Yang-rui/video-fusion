@@ -1,4 +1,4 @@
-﻿/// 设置页：账号与平台管理（Apple 风格分组列表）。
+/// 设置页：账号与平台管理（Apple 风格分组列表）。
 ///
 /// 内容：
 ///  - 已连接平台账号（登录状态、重新授权、解绑）
@@ -365,8 +365,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// 所以不硬编码走哪条，而是**两个都给**，让用户选。
   /// 只支持扫码的平台不弹选择，直接进扫码页。
   Future<void> _connect(PlatformAdapter adapter) async {
-    final qrCapable = adapter is QrLoginCapable ? adapter : null;
-    final smsCapable = adapter is SmsLoginCapable ? adapter : null;
+    // 显式转换到能力接口：`adapter is X ? adapter : null` 的推断结果是
+    // PlatformAdapter?，直接赋给能力接口变量会类型不匹配。
+    final QrLoginCapable? qrCapable =
+        adapter is QrLoginCapable ? adapter as QrLoginCapable : null;
+    final SmsLoginCapable? smsCapable =
+        adapter is SmsLoginCapable ? adapter as SmsLoginCapable : null;
 
     if (qrCapable == null && smsCapable == null) {
       if (mounted) {
@@ -383,11 +387,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
         : (smsCapable != null ? _LoginMethod.sms : _LoginMethod.qr);
     if (method == null || !mounted) return;
 
-    final ok = method == _LoginMethod.sms
-        ? await _connectViaSms(adapter, smsCapable as SmsLoginCapable)
-        : await _connectViaQr(adapter, qrCapable as QrLoginCapable);
+    var ok = false;
+    if (method == _LoginMethod.sms) {
+      final outcome = await _connectViaSms(adapter, smsCapable as SmsLoginCapable);
+      if (outcome == SmsConnectOutcome.succeeded) {
+        ok = true;
+      } else if (outcome == SmsConnectOutcome.blockedByPlatform &&
+          qrCapable != null &&
+          mounted) {
+        // 平台要求去 APP 验证 —— 短信这条路走不通了，直接接扫码。
+        // 让用户自己退出去再点一遍「连接」等于把人卡死在这。
+        final goQr = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('短信登录被限制'),
+            content: Text(
+              '抖音要求先在官方 APP 完成账号安全验证。'
+              '可以现在改用扫码登录，或稍后再试短信。',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('稍后再试'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('改用扫码'),
+              ),
+            ],
+          ),
+        );
+        if (goQr == true && mounted) {
+          ok = await _connectViaQr(adapter, qrCapable!) == true;
+        }
+      }
+    } else {
+      ok = await _connectViaQr(adapter, qrCapable as QrLoginCapable) == true;
+    }
 
-    if (ok == true) {
+    if (ok) {
       await _loadSessions();
       widget.onSessionChanged?.call();
       if (mounted) {
@@ -445,15 +483,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   /// 短信登录。
-  Future<bool?> _connectViaSms(
+  ///
+  /// 返回 [SmsConnectOutcome]：成功 / 用户取消 / 平台要求换验证方式。
+  /// 后者由调用方直接接扫码，不让用户自己退出去再点一遍。
+  Future<SmsConnectOutcome> _connectViaSms(
     PlatformAdapter adapter,
     SmsLoginCapable capability,
   ) async {
     PlatformSession? pending;
-    final ok = await showModalBottomSheet<bool>(
+    final outcome = await showModalBottomSheet<SmsConnectOutcome>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      // 发送验证码要走完整 bootstrap（11 步 HTTP），耗时可达数十秒。
+      // 期间误点遮罩会让弹窗消失、进度全部丢失——禁止点击外部关闭。
+      isDismissible: false,
+      enableDrag: false,
       builder: (_) => Theme(
         data: AppleTheme.light(),
         child: SmsLoginSheet(
@@ -475,9 +520,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
 
-    if (ok != true || pending == null) return false;
-    await widget.vault.save(pending!);
-    return true;
+    if (outcome == SmsConnectOutcome.succeeded && pending != null) {
+      await widget.vault.save(pending!);
+      return SmsConnectOutcome.succeeded;
+    }
+    // 弹窗返回 blockedByPlatform 时透传，让调用方接扫码。
+    return outcome == SmsConnectOutcome.blockedByPlatform
+        ? SmsConnectOutcome.blockedByPlatform
+        : SmsConnectOutcome.cancelled;
   }
 
   /// 扫码登录（原有流程）。
@@ -644,7 +694,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             leadingIcon: Icons.contrast_rounded,
             leadingColor: c.gray,
             title: '深色模式',
-            subtitle: '跟随系统，或强制浅色 / 深色',
+            // 副标题只说明"怎么选"，具体档位由右侧 trailingText 显示。
+            // 原来写成「跟随系统，或强制浅色 / 深色」，与右侧重复且折行。
+            subtitle: '选择界面配色',
             trailingText: switch (s.themeMode) {
               ThemeModeChoice.system => '跟随系统',
               ThemeModeChoice.light => '浅色',
@@ -667,7 +719,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             leadingIcon: Icons.speed_rounded,
             leadingColor: c.blue,
             title: '默认倍速',
-            subtitle: '长按画面可临时 3 倍速',
+            subtitle: '长按画面临时 3 倍速',
             trailingText: '${s.playbackRate.toStringAsFixed(2)}×',
             showChevron: true,
             onTap: () => _pickPlaybackRate(s),

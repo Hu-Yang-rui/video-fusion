@@ -95,8 +95,10 @@ void main() {
       expect(a.supportsVideoDanmaku, isFalse);
       // 搜索已实现（2026-10-23 实测 /api/search/result/ 可用）
       expect(a.supportsSearch, isTrue);
-      // 联想词未实测 → 如实不支持
-      expect(a.supportsSearchSuggestions, isFalse);
+      // 联想词已实现（2026-10-24 实测 /api/search/suggestion/ 返回 200）
+      expect(a.supportsSearchSuggestions, isTrue);
+      // 云端历史接口存在（read_history/list），但匿名拿不到数据
+      expect(a.supportsCloudHistory, isTrue);
     });
 
     test('播放能力声明为原生播放', () {
@@ -265,15 +267,11 @@ void main() {
   });
 
   group('红果适配器：不支持的能力如实抛错', () {
-    test('联想词抛 unsupportedPlatform（搜索本身已支持）', () async {
+    test('联想词空关键词返回空，不发请求', () async {
       final a = buildAdapter();
-      // 搜索已实现（见 hongguo_search_test.dart）；这里换成联想词，
-      // 它才是本平台仍未实测的能力。
-      expect(
-        () => a.fetchSearchSuggestions('测试'),
-        throwsA(isA<FusionException>()
-            .having((e) => e.code, 'code', FusionErrorCode.unsupportedPlatform)),
-      );
+      // 联想词已实现（/api/search/suggestion/）：空输入不该打服务端。
+      final words = await a.fetchSearchSuggestions('');
+      expect(words, isEmpty);
     });
 
     test('未知 feed 来源抛 unsupportedPlatform', () async {

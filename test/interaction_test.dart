@@ -1,4 +1,4 @@
-﻿/// 互动功能测试。
+/// 互动功能测试。
 ///
 /// 重点验证**不伪造状态**这一核心约束：
 ///  - 未登录时状态必须是 unknown，不能显示"未点赞"
@@ -113,7 +113,7 @@ class FakeInteractionAdapter extends PlatformAdapter with NoImSupport {
 
   @override
   Future<FeedPage> fetchFeed(FeedRequest request,
-          {required String sourceId}) async =>
+          {required String sourceId, PlatformSession? session}) async =>
       throw FusionException(
         code: FusionErrorCode.unsupportedPlatform,
         userMessage: '无推荐流',

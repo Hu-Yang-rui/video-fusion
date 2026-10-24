@@ -1138,8 +1138,10 @@ class VideoService {
     return FeedSource(
       id: mixedFeedSourceId,
       adapterId: 'mix',
-      label: '混合',
-      description: '$names 交错播放（抖音 + B站）',
+      // 标签必须说明"混的是什么"。原来只写「混合」，用户在顶栏看到
+      // 两个字无从判断内容来自哪些平台。
+      label: '抖音 + B站',
+      description: '$names 交错播放',
     );
   }
 
@@ -1158,7 +1160,10 @@ class VideoService {
   ///
   /// 一个平台挂了不该让整个混合流失败——另一个平台的条目照常返回，
   /// 失败原因放进 notes。两个都失败才返回 error。
-  Future<FeedFetchResult> _fetchMixedFeed(FeedRequest request) async {
+  Future<FeedFetchResult> _fetchMixedFeed(
+    FeedRequest request, {
+    Map<String, PlatformSession> sessions = const {},
+  }) async {
     final adapters = mixedFeedPlatforms
         .map((id) => _registry.byId(id))
         .whereType<PlatformAdapter>()
@@ -1184,7 +1189,11 @@ class VideoService {
           orElse: () => a.feedSources.first,
         );
         try {
-          final page = await a.fetchFeed(request, sourceId: source.id);
+          final page = await a.fetchFeed(
+            request,
+            sourceId: source.id,
+            session: sessions[a.id],
+          );
           return MapEntry<PlatformAdapter, FeedPage?>(a, page);
         } on FusionException catch (e) {
           _logger.warn('mixed feed: platform failed', {
@@ -1254,13 +1263,24 @@ class VideoService {
   ///
   /// 失败时返回带明确错误的 [FeedFetchResult]，不抛异常给 UI。
   /// **不把失败伪装成空列表**——两者在 UI 上是不同的状态。
+  ///
+  /// [session] 为该平台已登录的会话。**带上它推荐流才是个性化的**：
+  /// 不带 Cookie 时平台返回的是公开热门/冷启动内容，与用户口味无关。
+  /// 未登录时传 null，退回公开流（如实，不假装是个性化）。
   Future<FeedFetchResult> fetchFeed(
     String sourceId, {
     FeedRequest request = const FeedRequest(),
+    PlatformSession? session,
+    Map<String, PlatformSession> sessions = const {},
   }) async {
     // 混合流走独立路径：它没有单一 owner 适配器。
     if (isMixedFeedSource(sourceId)) {
-      return _fetchMixedFeed(request);
+      // 混合流要跨平台，单个 session 不够，用 sessions 表。
+      final table = <String, PlatformSession>{
+        ...sessions,
+        if (session != null) session.platformId: session,
+      };
+      return _fetchMixedFeed(request, sessions: table);
     }
 
     PlatformAdapter? owner;
@@ -1283,7 +1303,11 @@ class VideoService {
     }
 
     try {
-      final page = await owner.fetchFeed(request, sourceId: sourceId);
+      final page = await owner.fetchFeed(
+        request,
+        sourceId: sourceId,
+        session: session,
+      );
       return FeedFetchResult(sourceId: sourceId, page: page);
     } on FusionException catch (e) {
       _logger.warn('feed fetch failed', {

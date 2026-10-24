@@ -192,6 +192,22 @@ key.properties
 /tool/probe_*.mjs
 /tool/live/bili_history_upaction_probe.dart
 /tool/live/comment_replies_probe.dart
+# 本轮新增的探针（2026-10-24）：同样是"活跃探针留本地、不入公开仓库"
+/tool/live/bili_bundle_ctx_probe.dart
+/tool/live/bili_bundle_kw_probe.dart
+/tool/live/bili_bundle_paths_probe.dart
+/tool/live/bili_bundle_sprite_probe.dart
+/tool/live/bili_feed_dump_probe.dart
+/tool/live/bili_feed_sub_sprite_probe.dart
+/tool/live/bili_probe_matrix.dart
+/tool/live/bili_seek_preview_probe.dart
+/tool/live/bili_subtitle_ab_probe.dart
+/tool/live/bili_videoshot_pages_probe.dart
+/tool/live/bili_videoshot_probe.dart
+/tool/live/douyin_http_login_probe_test.dart
+/tool/live/dy_login_strategy_probe_test.dart
+/tool/verify_mssdk.dart
+/tool/gen_douyin_login_assets.mjs
 # 调试产物（截图、运行日志）—— 不入库
 /_shots/
 _*.log

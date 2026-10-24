@@ -4,7 +4,11 @@
 /// 不支持：评论、点赞、投币、收藏、私信、直播（平台无此概念）。
 library;
 
+import 'dart:convert';
+import 'dart:math';
+
 import 'package:flutter/foundation.dart' show debugPrint;
+import '../core/credential_vault.dart';
 import '../core/errors.dart';
 import '../core/http_client.dart';
 import '../core/logger.dart';
@@ -12,6 +16,7 @@ import '../models/feed.dart';
 import '../models/playback.dart';
 import '../models/unified_video.dart';
 import 'hongguo/media_client.dart';
+import 'hongguo/history_client.dart';
 import 'hongguo/parser.dart';
 import 'hongguo/playback_id.dart';
 import 'platform_adapter.dart';
@@ -37,6 +42,11 @@ class HongguoAdapter extends PlatformAdapter
   HongguoMediaClient? _media;
   HongguoMediaClient get _mediaClient =>
       _media ??= HongguoMediaClient(http: _http, logger: _logger);
+
+  /// 观看历史客户端。
+  HongguoHistoryClient? _history;
+  HongguoHistoryClient get _historyClient =>
+      _history ??= HongguoHistoryClient(http: _http, logger: _logger);
 
   /// 尝试取完整清晰度；失败返回 null。
   Future<HongguoEpisodeMedia?> _tryFetchMainSource(String vid) async {
@@ -68,6 +78,9 @@ class HongguoAdapter extends PlatformAdapter
 
   /// 分类来源 id 前缀。
   static const String _categorySourcePrefix = 'hongguo:category:';
+
+  /// 榜单来源 id 前缀。
+  static const String _rankSourcePrefix = 'hongguo:rank:';
 
   static const String feedSourceRealDrama =
       '${_categorySourcePrefix}real-drama';
@@ -632,16 +645,48 @@ class HongguoAdapter extends PlatformAdapter
       label: 'AI 剧',
       description: 'AI 生成的短剧',
     ),
+    // 榜单：实测四个页面各有 20 部 SSR 数据。
+    FeedSource(
+      id: '$_rankSourcePrefix$rankHotDrama',
+      adapterId: 'hongguo',
+      label: '热播榜',
+      description: '红果热播排行（20 部）',
+    ),
+    FeedSource(
+      id: '$_rankSourcePrefix$rankHotRealDrama',
+      adapterId: 'hongguo',
+      label: '真人剧榜',
+      description: '真人剧排行（20 部）',
+    ),
+    FeedSource(
+      id: '$_rankSourcePrefix$rankHotComicDrama',
+      adapterId: 'hongguo',
+      label: '漫剧榜',
+      description: '漫剧排行（20 部）',
+    ),
+    FeedSource(
+      id: '$_rankSourcePrefix$rankHotAiDrama',
+      adapterId: 'hongguo',
+      label: 'AI 剧榜',
+      description: 'AI 剧排行（20 部）',
+    ),
   ];
 
   @override
   Future<FeedPage> fetchFeed(
     FeedRequest request, {
     required String sourceId,
+    // 红果没有账号个性化推荐：官网 SSR 页面按大盘热度给内容，
+    // 不存在按用户口味排序的接口。参数保留只为满足契约。
+    PlatformSession? session,
   }) async {
     // 分类源：feedSourceCategory:<slug>
     final slug = _categorySlugOf(sourceId);
     if (slug != null) return _fetchCategoryFeed(slug);
+
+    // 榜单源：feedSourceRank:<slug>
+    final rankSlug = _rankSlugOf(sourceId);
+    if (rankSlug != null) return _fetchRankFeed(rankSlug);
 
     if (sourceId != feedSourceHome) {
       throw FusionException(
@@ -743,6 +788,57 @@ class HongguoAdapter extends PlatformAdapter
     if (!sourceId.startsWith(prefix)) return null;
     final slug = sourceId.substring(prefix.length);
     return categoryLabels.containsKey(slug) ? slug : null;
+  }
+
+  /// 从 sourceId 解析榜单 slug；不是榜单源时返回 null。
+  String? _rankSlugOf(String sourceId) {
+    const prefix = 'hongguo:rank:';
+    if (!sourceId.startsWith(prefix)) return null;
+    final slug = sourceId.substring(prefix.length);
+    return rankLabels.containsKey(slug) ? slug : null;
+  }
+
+  /// 榜单源的 feed。
+  Future<FeedPage> _fetchRankFeed(String slug) async {
+    final started = DateTime.now();
+    final list = await fetchRank(slug);
+    final now = DateTime.now().toIso8601String();
+    final label = rankLabels[slug] ?? slug;
+
+    final items = list.map((s) {
+      return UnifiedVideo(
+        id: '$id:${s.seriesId}',
+        platformId: id,
+        platformVideoId: s.seriesId,
+        originalUrl: '$_origin/player/${s.seriesId}',
+        canonicalUrl: '$_origin/player/${s.seriesId}',
+        title: s.title,
+        description: s.description,
+        author: const VideoAuthor(name: '红果短剧'),
+        coverUrl: s.coverUrl,
+        fetchedAt: now,
+        availability: VideoAvailability.available,
+        playbackModes: const [PlaybackMode.native],
+        diagnostics: VideoDiagnostics(
+          adapterId: id,
+          upstreamEndpoint: 'GET $_origin/rank/$slug (rankList)',
+          fromCache: false,
+          fetchDurationMs: DateTime.now().difference(started).inMilliseconds,
+          notes: [
+            '榜单：$label',
+            if (s.rank != null) '第 ${s.rank} 名',
+          ],
+        ),
+      );
+    }).toList();
+
+    return FeedPage(
+      items: items,
+      hasMore: false,
+      adapterId: id,
+      upstreamEndpoint: 'GET $_origin/rank/$slug (rankList)',
+      notes: ['来源：官网榜单页 $label'],
+    );
   }
 
   // ── 搜索 ─────────────────────────────────────────────────
@@ -909,6 +1005,234 @@ class HongguoAdapter extends PlatformAdapter
         // 如实说明：平台每页固定 10 条，pageSize 参数不生效
         '每页 ${parsed.items.length} 条（平台固定 10 条/页）',
       ],
+    );
+  }
+
+  /// 红果支持搜索联想词。
+  ///
+  /// 接口与搜索同在 `_SdkGlueInit` 的白名单里：
+  /// `^/api/search/suggestion/?$`，匿名可用。
+  @override
+  bool get supportsSearchSuggestions => true;
+
+  /// 拉取搜索联想词。
+  ///
+  /// 接口：`GET /api/search/suggestion/?query={前缀}`
+  /// 响应：`{"suggestionList":[{"name":"...","keyword":"..."}]}`
+  ///
+  /// 失败一律返回空（联想词是锦上添花，不该打断输入）。
+  @override
+  Future<List<String>> fetchSearchSuggestions(String query) async {
+    final keyword = query.trim();
+    if (keyword.isEmpty) return const [];
+
+    try {
+      final res = await _http.get(
+        '$_origin/api/search/suggestion/'
+        '?query=${Uri.encodeQueryComponent(keyword)}',
+        headers: {
+          'User-Agent': _webUa,
+          'Accept': 'application/json, text/plain, */*',
+          'Referer': '$_origin/',
+        },
+        platformId: id,
+        timeout: const Duration(seconds: 12),
+      );
+      if (res.statusCode != 200) return const [];
+
+      final decoded = jsonDecode(res.body);
+      if (decoded is! Map) return const [];
+      final list = decoded['suggestionList'];
+      if (list is! List) return const [];
+
+      final out = <String>[];
+      final seen = <String>{};
+      for (final raw in list) {
+        if (raw is! Map) continue;
+        final m = Map<String, Object?>.from(raw);
+        // name 是展示词；keyword 在部分条目里是 id，不能当词用。
+        final word = (m['name'] as String?)?.trim();
+        if (word == null || word.isEmpty) continue;
+        if (!seen.add(word)) continue;
+        out.add(word);
+        if (out.length >= 10) break;
+      }
+      return out;
+    } catch (e) {
+      _logger.debug('hongguo: suggestion failed', {'error': '$e'.split('\n').first});
+      return const [];
+    }
+  }
+
+  // ── 排行榜 ────────────────────────────────────────────────
+
+  /// 排行榜 slug。
+  static const rankHotDrama = 'hot-drama';
+  static const rankHotRealDrama = 'hot-real-drama';
+  static const rankHotComicDrama = 'hot-comic-drama';
+  static const rankHotAiDrama = 'hot-ai-drama';
+
+  /// 榜单中文名。
+  static const Map<String, String> rankLabels = {
+    rankHotDrama: '热播榜',
+    rankHotRealDrama: '真人剧榜',
+    rankHotComicDrama: '漫剧榜',
+    rankHotAiDrama: 'AI 剧榜',
+  };
+
+  final Map<String, ({List<HongguoSeries> data, DateTime at})> _rankCache = {};
+
+  /// 拉取某个榜单（每榜 20 部）。
+  ///
+  /// 数据来自官网 SSR 页面的 `rankList`，匿名可用、无需签名。
+  Future<List<HongguoSeries>> fetchRank(
+    String slug, {
+    bool forceRefresh = false,
+  }) async {
+    final cached = _rankCache[slug];
+    if (!forceRefresh &&
+        cached != null &&
+        DateTime.now().difference(cached.at) < _categoryCacheTtl) {
+      return cached.data;
+    }
+
+    final html = await _fetchHtml('$_origin/rank/$slug');
+    final list = _parser.parseRankPage(html);
+
+    if (list.isEmpty) {
+      _logger.warn('hongguo: rank parsed empty', {
+        'slug': slug,
+        'htmlLength': html.length,
+      });
+      throw FusionException(
+        code: FusionErrorCode.parseError,
+        userMessage: '红果${rankLabels[slug] ?? '该榜单'}暂时没有数据。',
+        technicalMessage:
+            'parseRankPage($slug) returned empty (html=${html.length} bytes)',
+        platformId: id,
+        retryable: true,
+      );
+    }
+
+    _rankCache[slug] = (data: list, at: DateTime.now());
+    return list;
+  }
+
+  /// 把榜单转成 [UnifiedVideo]（供影视页网格用）。
+  Future<List<UnifiedVideo>> fetchRankVideos(String slug) async {
+    final list = await fetchRank(slug);
+    final now = DateTime.now().toIso8601String();
+    return list.map((s) {
+      return UnifiedVideo(
+        id: '$id:${s.seriesId}',
+        platformId: id,
+        platformVideoId: s.seriesId,
+        originalUrl: '$_origin/player/${s.seriesId}',
+        canonicalUrl: '$_origin/player/${s.seriesId}',
+        title: s.title,
+        description: s.description,
+        author: const VideoAuthor(name: '红果短剧'),
+        coverUrl: s.coverUrl,
+        fetchedAt: now,
+        availability: VideoAvailability.available,
+        playbackModes: const [PlaybackMode.native],
+        diagnostics: VideoDiagnostics(
+          adapterId: id,
+          upstreamEndpoint: 'GET $_origin/rank/$slug (rankList)',
+          fromCache: false,
+          fetchDurationMs: 0,
+          notes: [
+            '榜单：${rankLabels[slug] ?? slug}',
+            if (s.rank != null) '第 ${s.rank} 名',
+          ],
+        ),
+      );
+    }).toList();
+  }
+
+  // ── 云端观看历史 ──────────────────────────────────────────
+
+  /// 红果**有**云端历史接口，但匿名拿不到数据。
+  ///
+  /// 实测（2026-10-24）：带 guest 参数返回 `code:0` + 空列表；
+  /// 不带 iid/device_id 返回 `code:101108 USER_NOT_LOGIN`。
+  /// 两者都不需要签名——但没有红果登录态就永远为空。
+  ///
+  /// 声明为 true 是因为**接口真实存在且已实现**；UI 拿到空列表时
+  /// 会用 [HongguoHistoryResult.loginRequired] 如实说明原因，
+  /// 不会渲染成"你还没看过剧"。
+  @override
+  bool get supportsCloudHistory => true;
+
+  @override
+  Future<SavedVideoPage> fetchHistoryVideos({
+    required PlatformSession session,
+    int page = 1,
+    int pageSize = 20,
+    int cursor = 0,
+  }) async {
+    // 每次请求用全新设备身份：复用同一对会被静默封锁。
+    final rng = Random.secure();
+    String ident() {
+      final sb = StringBuffer();
+      for (var i = 0; i < 16; i++) {
+        sb.write(i == 0 ? 1 + rng.nextInt(9) : rng.nextInt(10));
+      }
+      return sb.toString();
+    }
+
+    final result = await _historyClient.fetchHistory(
+      iid: ident(),
+      deviceId: ident(),
+      pageCount: pageSize,
+      offset: cursor,
+    );
+
+    if (result.loginRequired) {
+      // 未登录是状态不是错误，但也不能返回空列表冒充"没有记录"。
+      throw FusionException(
+        code: FusionErrorCode.loginRequired,
+        userMessage: '红果账号未登录，读不到云端观看历史。',
+        technicalMessage: 'read_history returned 101108 USER_NOT_LOGIN',
+        upstreamCode: 101108,
+        platformId: id,
+        retryable: false,
+      );
+    }
+
+    final items = result.items.map((h) {
+      return UnifiedVideo(
+        id: '$id:${h.bookId}',
+        platformId: id,
+        platformVideoId: h.bookId,
+        originalUrl: '$_origin/player/${h.bookId}',
+        canonicalUrl: '$_origin/player/${h.bookId}',
+        title: h.title,
+        author: const VideoAuthor(name: '红果短剧'),
+        coverUrl: h.coverUrl,
+        fetchedAt: DateTime.now().toIso8601String(),
+        availability: VideoAvailability.available,
+        playbackModes: const [PlaybackMode.native],
+        diagnostics: VideoDiagnostics(
+          adapterId: id,
+          upstreamEndpoint: 'GET /reading/bookapi/read_history/list/v1/',
+          fromCache: false,
+          fetchDurationMs: 0,
+          notes: [
+            if (h.chapterIndex != null) '看到第 ${h.chapterIndex! + 1} 集',
+          ],
+        ),
+      );
+    }).toList();
+
+    return SavedVideoPage(
+      items: items,
+      hasMore: result.hasMore,
+      total: result.total,
+      nextCursor: result.nextOffset,
+      adapterId: id,
+      upstreamEndpoint: 'GET /reading/bookapi/read_history/list/v1/',
+      notes: result.notes,
     );
   }
 

@@ -306,7 +306,7 @@ class FolderCapableAdapter extends PlatformAdapter with NoImSupport {
 
   @override
   Future<FeedPage> fetchFeed(FeedRequest request,
-          {required String sourceId}) async =>
+          {required String sourceId, PlatformSession? session}) async =>
       throw FusionException(
         code: FusionErrorCode.unsupportedPlatform,
         userMessage: '无推荐流',

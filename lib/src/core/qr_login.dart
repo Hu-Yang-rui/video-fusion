@@ -144,3 +144,15 @@ abstract class SmsLoginCapable {
   /// 失败时如实返回原因（验证码错误、过期、风控等）。
   Future<QrLoginPollResult> submitLoginSmsCode(String phone, String code);
 }
+
+/// 短信登录弹窗的结局。
+///
+/// 区分「用户主动放弃」与「平台要求换验证方式」：后者要自动接扫码，
+/// 不能当成普通取消——否则用户被卡在一条走不通的路上。
+enum SmsConnectOutcome {
+  succeeded,
+  cancelled,
+
+  /// 平台要求去官方 APP / 做网页验证，短信这条路当前不通。
+  blockedByPlatform,
+}

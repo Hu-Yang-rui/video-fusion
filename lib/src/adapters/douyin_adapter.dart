@@ -206,6 +206,52 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable, SmsLoginCapable 
     );
   }
 
+  // ── 通知中心 ────────────────────────────────────────────────
+  //
+  // 实测（2026-10-24）：
+  //   GET /aweme/v1/web/notice/count/   → status_code=8 用户未登录（存在）
+  //   GET /aweme/v1/web/notice/detail/  → status_code=8 用户未登录（存在）
+  //   GET /aweme/v1/web/notice/list/    → status_code=0 "url doesn't match"（路径不对）
+  //   GET /aweme/v1/web/notice/multi/   → 同上
+  //   GET /aweme/v1/web/notification/list/ → 404
+  //
+  // 所以"通知中心"的读接口是 count/detail，不是 list。全部要登录态，
+  // 未登录由 `_writeRequest` 统一映射 loginRequired，不谎报"没有通知"。
+
+  /// 抖音支持通知中心。
+  @override
+  bool get supportsNotifications => true;
+
+  /// 拉取通知未读汇总（入口红点用）。
+  ///
+  /// 返回各分类未读数。未登录抛 `loginRequired`。
+  @override
+  Future<Map<String, int>> fetchNoticeCounts() async {
+    final json = await _writeRequest(
+      path: '/aweme/v1/web/notice/count/',
+      params: const {},
+      method: 'GET',
+      requireFullUifid: false,
+    );
+    // 字段名未在登录态下实测过，这里按可能的键名收集，缺的跳过。
+    const keys = [
+      'total',
+      'digg',
+      'comment',
+      'follow',
+      'at',
+      'mention',
+      'im',
+      'system',
+    ];
+    final out = <String, int>{};
+    for (final k in keys) {
+      final v = json[k];
+      if (v is num && v > 0) out[k] = v.toInt();
+    }
+    return out;
+  }
+
   // ── 直播 ────────────────────────────────────────────────────
   //
   // `webcast.amemv.com/webcast/feed/` 匿名可用，不需要签名或登录。
@@ -2637,10 +2683,11 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable, SmsLoginCapable 
   Future<FeedPage> fetchFeed(
     FeedRequest request, {
     required String sourceId,
+    PlatformSession? session,
   }) async {
     return switch (sourceId) {
-      feedSourceRecommend => _fetchRecommend(request),
-      feedSourceHot => _fetchHot(request),
+      feedSourceRecommend => _fetchRecommend(request, session: session),
+      feedSourceHot => _fetchHot(request, session: session),
       _ => throw FusionException(
           code: FusionErrorCode.unsupportedPlatform,
           userMessage: '未知的抖音内容来源。',
@@ -2655,7 +2702,13 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable, SmsLoginCapable 
   /// 分页：`max_cursor` 为游标。实测该接口在 `max_cursor=0` 时返回
   /// 随机推荐（符合推荐流特性），带上次返回的 `max_cursor` 可继续翻页
   /// 且无重复。
-  Future<FeedPage> _fetchRecommend(FeedRequest request) async {
+  ///
+  /// [session] 非空时带 Cookie：抖音的推荐流按账号的兴趣画像排序，
+  /// 匿名拿到的是冷启动内容，与用户实际刷到的完全不是一回事。
+  Future<FeedPage> _fetchRecommend(
+    FeedRequest request, {
+    PlatformSession? session,
+  }) async {
     final count = request.safePageSize.clamp(4, 20);
     final cursor = request.offset <= 0 ? 0 : request.offset;
 
@@ -2665,9 +2718,11 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable, SmsLoginCapable 
 
     final result = await _http.get(
       url,
-      headers: const {
+      headers: {
         'User-Agent': _appUserAgent,
         'Accept': 'application/json',
+        // 带登录态才是按账号的推荐；匿名是冷启动内容。
+        if (session != null) 'Cookie': session.cookieHeader,
       },
       platformId: id,
     );
@@ -2713,14 +2768,18 @@ class DouyinAdapter implements PlatformAdapter, QrLoginCapable, SmsLoginCapable 
   /// 该接口返回的是**热搜词**而非视频，因此这里把每个热榜条目
   /// 转成一条"引导项"：标题为热词，点击后跳转抖音搜索。
   /// 这是如实的能力表达——热榜不等于视频流。
-  Future<FeedPage> _fetchHot(FeedRequest request) async {
+  Future<FeedPage> _fetchHot(
+    FeedRequest request, {
+    PlatformSession? session,
+  }) async {
     final url = '$_apiBase/aweme/v1/hot/search/list/';
 
     final result = await _http.get(
       url,
-      headers: const {
+      headers: {
         'User-Agent': _appUserAgent,
         'Accept': 'application/json',
+        if (session != null) 'Cookie': session.cookieHeader,
       },
       platformId: id,
     );

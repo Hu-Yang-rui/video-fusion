@@ -1,4 +1,4 @@
-﻿/// 跨平台搜索与观看进度测试。
+/// 跨平台搜索与观看进度测试。
 ///
 /// 验证：
 ///  - 搜索失败与"没有结果"必须可区分
@@ -102,6 +102,7 @@ class FakeSearchAdapter extends PlatformAdapter with NoImSupport {
   Future<FeedPage> fetchFeed(
     FeedRequest request, {
     required String sourceId,
+    PlatformSession? session,
   }) async {
     throw FusionException(
       code: FusionErrorCode.unsupportedPlatform,
