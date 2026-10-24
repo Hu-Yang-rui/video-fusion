@@ -254,63 +254,6 @@ class DouyinPassportClient {
     _bootstrapped = true;
   }
 
-  /// 诊断用：暴露 login_guiding_strategy 的完整响应。
-  ///
-  /// 服务端在这个响应里说明"该账号可用哪些登录方式"，但正式流程
-  /// 只看 `message=='success'`，内容被丢掉了。排查风控时要能看到它。
-  @visibleForTesting
-  Future<PassportHttpResult?> debugLoginGuidingStrategy() =>
-      _loginGuidingStrategy();
-
-  /// 诊断用：用指定 aid 发一次验证码。
-  ///
-  /// 不同 aid 对应不同 passport 服务与风控阈值，可用于判断
-  /// "是这个 aid 被拦"还是"这个账号被拦"。
-  @visibleForTesting
-  Future<PassportHttpResult> debugSendCodeWithAid(
-    String phone,
-    String aid,
-  ) async {
-    await bootstrap();
-    final data = <(String, String)>[
-      ('is6Digits', '1'),
-      ('mix_mode', '1'),
-      ('mobile', passportEncrypt(formatPassportPhone(phone))),
-      ('type', '3731'),
-      ('fixed_mix_mode', '1'),
-    ];
-    final p = _sdkParams(
-      extra: const {'is_from_iesaccountsaas': '1'},
-      data: data,
-      deviceFp: true,
-    );
-    p['aid'] = aid;
-    p['a_bogus'] = _abogusFor(p, host: 'login.douyin.com', body: spliceUrl(data));
-    return _send(
-      'POST',
-      '$kDouyinLoginHost/passport/web/send_code/',
-      headers: {
-        'web-sdk-version': '1',
-        'x-tt-session-dtrait': _dtrait('/passport/web/send_code/'),
-        'referer': _referer,
-        'x-tt-passport-aid-sign': aidSign('/passport/web/send_code/', '${sdkTsSeconds()}'),
-        'x-tt-passport-csrf-token': _csrf,
-        'x-tt-passport-trace-id': cookie('biz_trace_id') ?? '',
-        'accept': 'application/json, text/javascript',
-        'content-type': 'application/x-www-form-urlencoded',
-        'x-tt-passport-verify-portrait': _verifyPortrait,
-        'origin': kDouyinWebHost,
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-site',
-      },
-      query: p,
-      body: urlEncodePairs(data),
-      cookieOrder: _smsOrder,
-      historicalOnly: _smsHistoricalOnly,
-    );
-  }
-
   /// 发送短信验证码。
   Future<void> sendSmsCode(String phone) async {
     final err = validatePhone(phone);
